@@ -1,0 +1,22 @@
+{
+  "name": "com.zzq.uiframe",
+  "displayName": "UIFrame",
+  "version": "1.0.0",
+  "unity": "6000.0",
+  "description": "A lightweight Unity UI framework with panel lifecycle management, YooAsset loading, screen orientation support, and editor code generation.",
+  "keywords": [
+    "ui",
+    "ugui",
+    "yooasset",
+    "unitask"
+  ],
+  "author": {
+    "name": "ZZQzero"
+  },
+  "license": "MIT",
+  "dependencies": {
+    "com.cysharp.unitask": "2.5.10",
+    "com.tuyoogame.yooasset": "3.0.5",
+    "com.unity.ugui": "2.0.0"
+  }
+}
