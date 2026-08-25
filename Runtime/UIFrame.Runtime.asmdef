@@ -4,7 +4,8 @@
   "references": [
     "UniTask",
     "YooAsset",
-    "Unity.ugui"
+    "Unity.ugui",
+    "Unity.RenderPipelines.Universal.Runtime"
   ],
   "includePlatforms": [],
   "excludePlatforms": [],

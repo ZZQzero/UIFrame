@@ -1,5 +1,6 @@
 using System;
 using Cysharp.Threading.Tasks;
+using UnityEngine;
 using YooAsset;
 
 namespace UIFrame
@@ -11,6 +12,7 @@ namespace UIFrame
         static bool _shuttingDown;
 
         public static bool IsInited => _manager != null && _manager.IsInited;
+        public static Camera UICamera => IsInited ? _manager.UICamera : null;
 
         /// <summary>创建 Root。若 YooAsset 已初始化且只有一个包，会自动绑定。</summary>
         public static void Init()
@@ -60,6 +62,32 @@ namespace UIFrame
             }
 
             _manager.SetPackage(packageName);
+        }
+
+        /// <summary>
+        /// 配置 URP Camera Stack。未传 Base Camera 时使用 Camera.main；
+        /// 未传 UI Camera 时由 UIFrame 自动创建。返回最终使用的 UI Camera。
+        /// </summary>
+        public static Camera ConfigureURPCameraStack(
+            Camera baseCamera = null,
+            Camera uiCamera = null,
+            int uiLayer = -1)
+        {
+            if (!EnsureInit())
+            {
+                return null;
+            }
+
+            return _manager.ConfigureURPCameraStack(baseCamera, uiCamera, uiLayer);
+        }
+
+        /// <summary>移除 UI Camera Stack，并将 UIFrame Canvas 恢复为 Screen Space Overlay。</summary>
+        public static void DisableURPCameraStack()
+        {
+            if (IsInited)
+            {
+                _manager.DisableURPCameraStack();
+            }
         }
 
         /// <summary>

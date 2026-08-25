@@ -1,6 +1,6 @@
 # UIFrame
 
-基于 UGUI、YooAsset 和 UniTask 的轻量 Unity UI 框架，提供面板生命周期、层级栈、缓存、异步加载、屏幕方向管理和编辑器绑定代码生成。
+基于 URP、UGUI、YooAsset 和 UniTask 的轻量 Unity UI 框架，提供面板生命周期、层级栈、缓存、异步加载、URP Camera Stack、屏幕方向管理和编辑器绑定代码生成。
 
 ## 环境要求
 
@@ -8,6 +8,7 @@
 - UniTask 2.5.10 或更高版本
 - YooAsset 3.0.5 或更高版本
 - UGUI 2.0.0 或更高版本
+- Universal RP 17.3.0 或更高版本
 
 ## 安装
 
@@ -68,6 +69,32 @@ public static class UIStartup
 
 ```csharp
 UI.Shutdown();
+```
+
+## URP Camera Stack
+
+默认使用 `Screen Space Overlay`。需要 Camera Stack 时，可让框架使用 `Camera.main` 并自动创建 UI Camera：
+
+```csharp
+Camera uiCamera = UI.ConfigureURPCameraStack();
+```
+
+也可以指定 Base Camera，并选择复用已有 UI Camera：
+
+```csharp
+UI.ConfigureURPCameraStack(baseCamera, existingUICamera);
+```
+
+框架会将 UI Camera 配置为 `Overlay`、加入 Base Camera Stack，并把 UI Canvas 切换为 `Screen Space Camera`。默认使用项目的 `UI` Layer，也可以通过第三个参数指定 Layer：
+
+```csharp
+UI.ConfigureURPCameraStack(baseCamera, uiCamera, uiLayer);
+```
+
+恢复 Overlay Canvas 并移除 Camera Stack：
+
+```csharp
+UI.DisableURPCameraStack();
 ```
 
 ## 目录

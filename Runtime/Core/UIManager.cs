@@ -22,6 +22,7 @@ namespace UIFrame
         bool _inited;
 
         public bool IsInited => _inited;
+        public Camera UICamera => _root != null ? _root.UICamera : null;
 
         public void Init()
         {
@@ -157,6 +158,25 @@ namespace UIFrame
             catch (Exception ex)
             {
                 Debug.LogWarning($"[UIFrame] 绑定 ResourcePackage 失败: {ex.Message}");
+            }
+        }
+
+        public Camera ConfigureURPCameraStack(Camera baseCamera, Camera uiCamera, int uiLayer)
+        {
+            if (_root == null)
+            {
+                Debug.LogWarning("[UIFrame] 尚未 Init，无法配置 URP Camera Stack。");
+                return null;
+            }
+
+            return _root.ConfigureURPCameraStack(baseCamera, uiCamera, uiLayer);
+        }
+
+        public void DisableURPCameraStack()
+        {
+            if (_root != null)
+            {
+                _root.DisableURPCameraStack();
             }
         }
 
@@ -800,6 +820,17 @@ namespace UIFrame
             if (t.parent != parent)
             {
                 t.SetParent(parent, false);
+            }
+
+            SetLayerRecursively(t, parent.gameObject.layer);
+        }
+
+        static void SetLayerRecursively(Transform root, int layer)
+        {
+            root.gameObject.layer = layer;
+            for (var i = 0; i < root.childCount; i++)
+            {
+                SetLayerRecursively(root.GetChild(i), layer);
             }
         }
 

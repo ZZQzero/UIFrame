@@ -1,9 +1,9 @@
 {
   "name": "com.zzq.uiframe",
   "displayName": "UIFrame",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "unity": "6000.0",
-  "description": "A lightweight Unity UI framework with panel lifecycle management, YooAsset loading, screen orientation support, and editor code generation.",
+  "description": "A lightweight URP UI framework with panel lifecycle management, YooAsset loading, Camera Stack support, screen orientation, and editor code generation.",
   "keywords": [
     "ui",
     "ugui",
@@ -17,6 +17,7 @@
   "dependencies": {
     "com.cysharp.unitask": "2.5.10",
     "com.tuyoogame.yooasset": "3.0.5",
-    "com.unity.ugui": "2.0.0"
+    "com.unity.ugui": "2.0.0",
+    "com.unity.render-pipelines.universal": "17.3.0"
   }
 }
