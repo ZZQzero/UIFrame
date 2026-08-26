@@ -73,25 +73,26 @@ UI.Shutdown();
 
 ## URP Camera Stack
 
-默认使用 `Screen Space Overlay`。需要 Camera Stack 时，可让框架使用 `Camera.main` 并自动创建 UI Camera：
+`UI.Init()` 后 Canvas 默认为 `Screen Space Camera`，并绑定常驻 UI Camera；同时开启 `Vertex Color Always In Gamma Color Space`。
+
+需要叠加到主相机时：
 
 ```csharp
-Camera uiCamera = UI.ConfigureURPCameraStack();
+UI.ConfigureURPCameraStack(); // Base = Camera.main，复用已有 UI Camera
 ```
 
-也可以指定 Base Camera，并选择复用已有 UI Camera：
+也可指定 Base / 外部 UI Camera：
 
 ```csharp
 UI.ConfigureURPCameraStack(baseCamera, existingUICamera);
 ```
 
-框架会将 UI Camera 配置为 `Overlay`、加入 Base Camera Stack，并把 UI Canvas 切换为 `Screen Space Camera`。默认使用项目的 `UI` Layer，也可以通过第三个参数指定 Layer：
+行为约定：
 
-```csharp
-UI.ConfigureURPCameraStack(baseCamera, uiCamera, uiLayer);
-```
-
-恢复 Overlay Canvas 并移除 Camera Stack：
+- 只把 UI Camera 设为 `Overlay` 并加入 Base Camera Stack
+- **不改动** Base Camera 的 cullingMask、renderType 等
+- `Disable` 只从 Stack 移除 UI Camera；Canvas 仍保持 `Screen Space Camera` 与 UI Camera 引用
+- UI Camera 创建后常驻，不销毁
 
 ```csharp
 UI.DisableURPCameraStack();

@@ -7,7 +7,8 @@ All notable changes to this package will be documented in this file.
 ### Added
 
 - Added URP Camera Stack configuration with automatic or caller-provided UI Camera.
-- Added automatic Canvas render-mode switching and UI layer synchronization.
+- Canvas defaults to Screen Space Camera with a persistent UI Camera and Vertex Color Always In Gamma Space.
+- Camera Stack only adds/removes the UI Camera; Base Camera and Canvas references stay unchanged on detach.
 
 ## [1.0.0] - 2026-08-25
 

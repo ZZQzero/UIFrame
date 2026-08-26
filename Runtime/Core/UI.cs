@@ -65,8 +65,8 @@ namespace UIFrame
         }
 
         /// <summary>
-        /// 配置 URP Camera Stack。未传 Base Camera 时使用 Camera.main；
-        /// 未传 UI Camera 时由 UIFrame 自动创建。返回最终使用的 UI Camera。
+        /// 将 UI Camera 加入 Base Camera Stack。未传 Base 时用 Camera.main；
+        /// 未传 UI Camera 时复用 Init 时创建的 UI Camera。不改动 Base / Canvas 其他参数。
         /// </summary>
         public static Camera ConfigureURPCameraStack(
             Camera baseCamera = null,
@@ -81,7 +81,7 @@ namespace UIFrame
             return _manager.ConfigureURPCameraStack(baseCamera, uiCamera, uiLayer);
         }
 
-        /// <summary>移除 UI Camera Stack，并将 UIFrame Canvas 恢复为 Screen Space Overlay。</summary>
+        /// <summary>仅从 Base Camera Stack 移除 UI Camera。Canvas 保持 Screen Space Camera 与 UI Camera 引用。</summary>
         public static void DisableURPCameraStack()
         {
             if (IsInited)
