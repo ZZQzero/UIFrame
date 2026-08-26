@@ -2,6 +2,13 @@
 
 All notable changes to this package will be documented in this file.
 
+## [1.2.0] - 2026-08-26
+
+### Added
+
+- Added reusable single-prefab and multi-prefab loop-scroll panel bases.
+- Added concrete horizontal and vertical loop-scroll components.
+
 ## [1.1.0] - 2026-08-25
 
 ### Added
