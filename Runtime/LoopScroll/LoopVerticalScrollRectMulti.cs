@@ -1,8 +1,10 @@
 using UnityEngine;
+using UnityEngine.UI;
+using System.Collections;
 
 namespace UnityEngine.UI
 {
-    [AddComponentMenu("UI/Loop Vertical Scroll Rect (Multi Prefab)", 53)]
+    [AddComponentMenu("UI/Loop Vertical Scroll Rect(MultiPrefab)", 53)]
     [DisallowMultipleComponent]
     public class LoopVerticalScrollRectMulti : LoopScrollRectMulti
     {
@@ -13,18 +15,24 @@ namespace UnityEngine.UI
 
         protected override float GetSize(RectTransform item, bool includeSpacing)
         {
-            var size = includeSpacing ? contentSpacing : 0f;
-            size += m_GridLayout != null
-                ? m_GridLayout.cellSize.y
-                : LoopScrollSizeUtils.GetPreferredHeight(item);
-            return size * m_Content.localScale.y;
+            float size = includeSpacing ? contentSpacing : 0;
+            if (m_GridLayout != null)
+            {
+                size += m_GridLayout.cellSize.y;
+            }
+            else
+            {
+                size += LoopScrollSizeUtils.GetPreferredHeight(item);
+            }
+            size *= m_Content.localScale.y;
+            return size;
         }
 
         protected override float GetDimension(Vector2 vector)
         {
             return vector.y;
         }
-
+        
         protected override float GetAbsDimension(Vector2 vector)
         {
             return vector.y;
@@ -32,91 +40,140 @@ namespace UnityEngine.UI
 
         protected override Vector2 GetVector(float value)
         {
-            return new Vector2(0f, value);
+            return new Vector2(0, value);
         }
 
         protected override void Awake()
         {
             base.Awake();
-            if (m_Content == null)
+            if (m_Content)
             {
-                return;
-            }
-
-            var layout = m_Content.GetComponent<GridLayoutGroup>();
-            if (layout != null && layout.constraint != GridLayoutGroup.Constraint.FixedColumnCount)
-            {
-                Debug.LogError("[LoopScrollRect] Vertical GridLayoutGroup requires FixedColumnCount.", this);
+                GridLayoutGroup layout = m_Content.GetComponent<GridLayoutGroup>();
+                if (layout != null && layout.constraint != GridLayoutGroup.Constraint.FixedColumnCount)
+                {
+                    Debug.LogError("[LoopScrollRect] unsupported GridLayoutGroup constraint");
+                }
             }
         }
 
         protected override bool UpdateItems(ref Bounds viewBounds, ref Bounds contentBounds)
         {
-            var changed = HandlePageJump(ref viewBounds, ref contentBounds);
+            bool changed = false;
+
+            // special case: handling move several page in one frame
+            if ((viewBounds.size.y < contentBounds.min.y - viewBounds.max.y) && itemTypeEnd > itemTypeStart)
+            {
+                int maxItemTypeStart = -1;
+                if (totalCount >= 0)
+                {
+                    maxItemTypeStart = Mathf.Max(0, totalCount - (itemTypeEnd - itemTypeStart));
+                }
+                float currentSize = contentBounds.size.y;
+                float elementSize = EstimiateElementSize();
+                ReturnToTempPool(true, itemTypeEnd - itemTypeStart);
+                itemTypeStart = itemTypeEnd;
+
+                int offsetCount = Mathf.FloorToInt((contentBounds.min.y - viewBounds.max.y) / (elementSize + contentSpacing));
+                if (maxItemTypeStart >= 0 && itemTypeStart + offsetCount * contentConstraintCount > maxItemTypeStart)
+                {
+                    offsetCount = Mathf.FloorToInt((float)(maxItemTypeStart - itemTypeStart) / contentConstraintCount);
+                }
+                itemTypeStart += offsetCount * contentConstraintCount;
+                if (totalCount >= 0)
+                {
+                    itemTypeStart = Mathf.Max(itemTypeStart, 0);
+                }
+                itemTypeEnd = itemTypeStart;
+                itemTypeSize = 0;
+
+                float offset = offsetCount * (elementSize + contentSpacing);
+                m_Content.anchoredPosition -= new Vector2(0, offset + (reverseDirection ? 0 : currentSize));
+                contentBounds.center -= new Vector3(0, offset + currentSize / 2, 0);
+                contentBounds.size = Vector3.zero;
+
+                changed = true;
+            }
+            
+            if ((viewBounds.min.y - contentBounds.max.y > viewBounds.size.y) && itemTypeEnd > itemTypeStart)
+            {
+                float currentSize = contentBounds.size.y;
+                float elementSize = EstimiateElementSize();
+                ReturnToTempPool(false, itemTypeEnd - itemTypeStart);
+                itemTypeEnd = itemTypeStart;
+
+                int offsetCount = Mathf.FloorToInt((viewBounds.min.y - contentBounds.max.y) / (elementSize + contentSpacing));
+                if (totalCount >= 0 && itemTypeStart - offsetCount * contentConstraintCount < 0)
+                {
+                    offsetCount = Mathf.FloorToInt((float)(itemTypeStart) / contentConstraintCount);
+                }
+                itemTypeStart -= offsetCount * contentConstraintCount;
+                if (totalCount >= 0)
+                {
+                    itemTypeStart = Mathf.Max(itemTypeStart, 0);
+                }
+                itemTypeEnd = itemTypeStart;
+                itemTypeSize = 0;
+
+                float offset = offsetCount * (elementSize + contentSpacing);
+                m_Content.anchoredPosition += new Vector2(0, offset + (reverseDirection ? currentSize : 0));
+                contentBounds.center += new Vector3(0, offset + currentSize / 2, 0);
+                contentBounds.size = Vector3.zero;
+
+                changed = true;
+            }
 
             if (viewBounds.min.y < contentBounds.min.y + m_ContentBottomPadding)
             {
-                var size = NewItemAtEnd();
-                var totalSize = size;
-                while (size > 0f
-                       && viewBounds.min.y < contentBounds.min.y + m_ContentBottomPadding - totalSize)
+                float size = NewItemAtEnd(), totalSize = size;
+                while (size > 0 && viewBounds.min.y < contentBounds.min.y + m_ContentBottomPadding - totalSize)
                 {
                     size = NewItemAtEnd();
                     totalSize += size;
                 }
-
-                changed |= totalSize > 0f;
+                if (totalSize > 0)
+                    changed = true;
             }
-            else if (itemTypeEnd % contentConstraintCount != 0
-                     && (itemTypeEnd < totalCount || totalCount < 0))
+            else if ((itemTypeEnd % contentConstraintCount != 0) && (itemTypeEnd < totalCount || totalCount < 0))
             {
                 NewItemAtEnd();
             }
 
             if (viewBounds.max.y > contentBounds.max.y - m_ContentTopPadding)
             {
-                var size = NewItemAtStart();
-                var totalSize = size;
-                while (size > 0f
-                       && viewBounds.max.y > contentBounds.max.y - m_ContentTopPadding + totalSize)
+                float size = NewItemAtStart(), totalSize = size;
+                while (size > 0 && viewBounds.max.y > contentBounds.max.y - m_ContentTopPadding + totalSize)
                 {
                     size = NewItemAtStart();
                     totalSize += size;
                 }
-
-                changed |= totalSize > 0f;
+                if (totalSize > 0)
+                    changed = true;
             }
 
             if (viewBounds.min.y > contentBounds.min.y + threshold + m_ContentBottomPadding
                 && viewBounds.size.y < contentBounds.size.y - threshold)
             {
-                var size = DeleteItemAtEnd();
-                var totalSize = size;
-                while (size > 0f
-                       && viewBounds.min.y
-                       > contentBounds.min.y + threshold + m_ContentBottomPadding + totalSize)
+                float size = DeleteItemAtEnd(), totalSize = size;
+                while (size > 0 && viewBounds.min.y > contentBounds.min.y + threshold + m_ContentBottomPadding + totalSize)
                 {
                     size = DeleteItemAtEnd();
                     totalSize += size;
                 }
-
-                changed |= totalSize > 0f;
+                if (totalSize > 0)
+                    changed = true;
             }
 
             if (viewBounds.max.y < contentBounds.max.y - threshold - m_ContentTopPadding
                 && viewBounds.size.y < contentBounds.size.y - threshold)
             {
-                var size = DeleteItemAtStart();
-                var totalSize = size;
-                while (size > 0f
-                       && viewBounds.max.y
-                       < contentBounds.max.y - threshold - m_ContentTopPadding - totalSize)
+                float size = DeleteItemAtStart(), totalSize = size;
+                while (size > 0 && viewBounds.max.y < contentBounds.max.y - threshold - m_ContentTopPadding - totalSize)
                 {
                     size = DeleteItemAtStart();
                     totalSize += size;
                 }
-
-                changed |= totalSize > 0f;
+                if (totalSize > 0)
+                    changed = true;
             }
 
             if (changed)
@@ -125,85 +182,6 @@ namespace UnityEngine.UI
             }
 
             return changed;
-        }
-
-        bool HandlePageJump(ref Bounds viewBounds, ref Bounds contentBounds)
-        {
-            if (itemTypeEnd <= itemTypeStart)
-            {
-                return false;
-            }
-
-            if (viewBounds.size.y < contentBounds.min.y - viewBounds.max.y)
-            {
-                var maxStart = totalCount >= 0
-                    ? Mathf.Max(0, totalCount - (itemTypeEnd - itemTypeStart))
-                    : -1;
-                var currentSize = contentBounds.size.y;
-                var elementSize = EstimiateElementSize();
-
-                ReturnToTempPool(true, itemTypeEnd - itemTypeStart);
-                itemTypeStart = itemTypeEnd;
-
-                var offsetCount = Mathf.FloorToInt(
-                    (contentBounds.min.y - viewBounds.max.y) / (elementSize + contentSpacing));
-                if (maxStart >= 0 && itemTypeStart + offsetCount * contentConstraintCount > maxStart)
-                {
-                    offsetCount = Mathf.FloorToInt(
-                        (float)(maxStart - itemTypeStart) / contentConstraintCount);
-                }
-
-                itemTypeStart += offsetCount * contentConstraintCount;
-                if (totalCount >= 0)
-                {
-                    itemTypeStart = Mathf.Max(itemTypeStart, 0);
-                }
-
-                itemTypeEnd = itemTypeStart;
-                itemTypeSize = 0f;
-
-                var offset = offsetCount * (elementSize + contentSpacing);
-                m_Content.anchoredPosition -= new Vector2(
-                    0f,
-                    offset + (reverseDirection ? 0f : currentSize));
-                contentBounds.center -= new Vector3(0f, offset + currentSize * 0.5f, 0f);
-                contentBounds.size = Vector3.zero;
-                return true;
-            }
-
-            if (viewBounds.min.y - contentBounds.max.y <= viewBounds.size.y)
-            {
-                return false;
-            }
-
-            var sizeBeforeJump = contentBounds.size.y;
-            var estimatedSize = EstimiateElementSize();
-            ReturnToTempPool(false, itemTypeEnd - itemTypeStart);
-            itemTypeEnd = itemTypeStart;
-
-            var count = Mathf.FloorToInt(
-                (viewBounds.min.y - contentBounds.max.y) / (estimatedSize + contentSpacing));
-            if (totalCount >= 0 && itemTypeStart - count * contentConstraintCount < 0)
-            {
-                count = Mathf.FloorToInt((float)itemTypeStart / contentConstraintCount);
-            }
-
-            itemTypeStart -= count * contentConstraintCount;
-            if (totalCount >= 0)
-            {
-                itemTypeStart = Mathf.Max(itemTypeStart, 0);
-            }
-
-            itemTypeEnd = itemTypeStart;
-            itemTypeSize = 0f;
-
-            var jumpOffset = count * (estimatedSize + contentSpacing);
-            m_Content.anchoredPosition += new Vector2(
-                0f,
-                jumpOffset + (reverseDirection ? sizeBeforeJump : 0f));
-            contentBounds.center += new Vector3(0f, jumpOffset + sizeBeforeJump * 0.5f, 0f);
-            contentBounds.size = Vector3.zero;
-            return true;
         }
     }
 }
