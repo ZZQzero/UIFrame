@@ -12,10 +12,10 @@ namespace UIFrame
         /// <summary>当前生效的方向。</summary>
         public static GameScreenOrientation Current { get; private set; } = GameScreenOrientation.Portrait;
 
-        /// <summary>为 true 时，方向变更会通过 <see cref="CanvasLayoutChanged"/> 通知 Canvas 同步布局（默认开启）。</summary>
+        /// <summary>为 true 时，方向变更会通过 <see cref="CanvasLayoutChanged"/> 通知 Canvas 同步布局。</summary>
         public static bool SyncCanvasLayout { get; set; } = true;
 
-        /// <summary>方向已应用到 Screen。UIFrameRoot 通过该事件同步 Canvas 参考分辨率。</summary>
+        /// <summary>方向已应用。UIFrameRoot 通过该事件同步 Canvas 参考分辨率。</summary>
         public static event Action<GameScreenOrientation> CanvasLayoutChanged;
 
         public static void Initialize()
@@ -43,24 +43,15 @@ namespace UIFrame
             _initialized = false;
         }
 
-        /// <summary>锁定竖屏。</summary>
-        public static void SetPortrait()
-        {
-            Set(GameScreenOrientation.Portrait);
-        }
+        public static void SetPortrait() => Set(GameScreenOrientation.Portrait);
 
-        /// <summary>锁定横屏（左右可自动旋转）。</summary>
-        public static void SetLandscape()
-        {
-            Set(GameScreenOrientation.Landscape);
-        }
+        public static void SetLandscape() => Set(GameScreenOrientation.Landscape);
 
         /// <summary>直接设置为指定方向（不入栈）。</summary>
         public static void Set(GameScreenOrientation orientation)
         {
-            if (!_initialized)
+            if (MarkInitialized())
             {
-                _initialized = true;
                 ApplyInternal(orientation, force: true);
                 return;
             }
@@ -68,14 +59,11 @@ namespace UIFrame
             ApplyInternal(orientation, force: false);
         }
 
-        /// <summary>
-        /// 压入新方向（进入小游戏时用）。离开时调用 <see cref="Pop"/> 恢复。
-        /// </summary>
+        /// <summary>压入新方向。离开时调用 <see cref="Pop"/> 恢复。</summary>
         public static void Push(GameScreenOrientation orientation)
         {
-            if (!_initialized)
+            if (MarkInitialized())
             {
-                _initialized = true;
                 Current = GameScreenOrientation.Portrait;
                 Stack.Push(Current);
                 ApplyInternal(orientation, force: true);
@@ -86,39 +74,51 @@ namespace UIFrame
             ApplyInternal(orientation, force: false);
         }
 
-        /// <summary>
-        /// 弹出并恢复上一方向。栈空时回退到竖屏。
-        /// </summary>
+        /// <summary>弹出并恢复上一方向。栈空时回退到竖屏。</summary>
         public static void Pop()
         {
             Initialize();
-            var next = Stack.Count > 0
-                ? Stack.Pop()
-                : GameScreenOrientation.Portrait;
+            var next = Stack.Count > 0 ? Stack.Pop() : GameScreenOrientation.Portrait;
             ApplyInternal(next, force: false);
         }
 
-        /// <summary>清空方向栈并设为指定方向（退出小游戏回大厅时可用）。</summary>
+        /// <summary>清空方向栈并设为指定方向。</summary>
         public static void ResetTo(GameScreenOrientation orientation)
         {
             Stack.Clear();
-            if (!_initialized)
-            {
-                _initialized = true;
-                ApplyInternal(orientation, force: true);
-                return;
-            }
-
+            MarkInitialized();
             ApplyInternal(orientation, force: true);
         }
 
-        /// <summary>
-        /// 仅根据当前设备方向重新通知 Canvas 同步布局（不改 Screen.orientation）。
-        /// </summary>
+        /// <summary>仅重新通知 Canvas 同步布局（不改 Screen.orientation）。</summary>
         public static void SyncCanvasLayoutNow()
         {
             Initialize();
             CanvasLayoutChanged?.Invoke(Current);
+        }
+
+        public static bool IsLandscape(GameScreenOrientation orientation)
+        {
+            return orientation == GameScreenOrientation.Landscape
+                   || orientation == GameScreenOrientation.AutoLandscape;
+        }
+
+        public static GameUICanvasLayout GetCanvasLayout(GameScreenOrientation orientation)
+        {
+            return IsLandscape(orientation)
+                ? GameUICanvasLayout.Landscape
+                : GameUICanvasLayout.Portrait;
+        }
+
+        static bool MarkInitialized()
+        {
+            if (_initialized)
+            {
+                return false;
+            }
+
+            _initialized = true;
+            return true;
         }
 
         static void ApplyInternal(GameScreenOrientation orientation, bool force)
@@ -138,19 +138,6 @@ namespace UIFrame
 #if UNITY_EDITOR || DEVELOPMENT_BUILD
             Debug.Log($"[ScreenOrientation] Applied: {orientation}");
 #endif
-        }
-
-        public static bool IsLandscape(GameScreenOrientation orientation)
-        {
-            return orientation == GameScreenOrientation.Landscape
-                   || orientation == GameScreenOrientation.AutoLandscape;
-        }
-
-        public static GameUICanvasLayout GetCanvasLayout(GameScreenOrientation orientation)
-        {
-            return IsLandscape(orientation)
-                ? GameUICanvasLayout.Landscape
-                : GameUICanvasLayout.Portrait;
         }
 
         static void ApplyToUnity(GameScreenOrientation orientation)
@@ -192,5 +179,4 @@ namespace UIFrame
             }
         }
     }
-
 }

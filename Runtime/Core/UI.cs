@@ -64,10 +64,7 @@ namespace UIFrame
             _manager.SetPackage(packageName);
         }
 
-        /// <summary>
-        /// 将 UI Camera 加入 Base Camera Stack。未传 Base 时用 Camera.main；
-        /// 未传 UI Camera 时复用 Init 时创建的 UI Camera。不改动 Base / Canvas 其他参数。
-        /// </summary>
+        /// <summary>将 UI Camera 加入 Base Camera Stack。默认 Base=Camera.main，复用已有 UI Camera。</summary>
         public static Camera ConfigureURPCameraStack(
             Camera baseCamera = null,
             Camera uiCamera = null,
@@ -81,7 +78,7 @@ namespace UIFrame
             return _manager.ConfigureURPCameraStack(baseCamera, uiCamera, uiLayer);
         }
 
-        /// <summary>仅从 Base Camera Stack 移除 UI Camera。Canvas 保持 Screen Space Camera 与 UI Camera 引用。</summary>
+        /// <summary>仅从 Base Camera Stack 移除 UI Camera。Canvas 模式与引用不变。</summary>
         public static void DisableURPCameraStack()
         {
             if (IsInited)

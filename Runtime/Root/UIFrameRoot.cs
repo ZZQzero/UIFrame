@@ -9,6 +9,10 @@ namespace UIFrame
     /// <summary>UI 根节点。默认 Screen Space Camera + UI Camera，可挂入 URP Camera Stack。</summary>
     sealed class UIFrameRoot : MonoBehaviour
     {
+        const int DefaultUiLayerFallback = 5;
+        const int CanvasSortingOrder = 100;
+        const float CanvasPlaneDistance = 1f;
+
         static readonly UILayer[] LayerOrder =
         {
             UILayer.Window,
@@ -19,18 +23,23 @@ namespace UIFrame
             UILayer.Guide,
         };
 
+        static readonly Vector2 PortraitReference = new Vector2(1080f, 1920f);
+        static readonly Vector2 LandscapeReference = new Vector2(1920f, 1080f);
+
         readonly Dictionary<UILayer, RectTransform> _layers = new Dictionary<UILayer, RectTransform>();
 
-        Image _maskImage;
-        Sprite _whiteSprite;
         Canvas _canvas;
         RectTransform _canvasRoot;
         CanvasScaler _rootScaler;
-        Camera _baseCamera;
+        Image _maskImage;
+        Sprite _whiteSprite;
+
         Camera _uiCamera;
-        int _uiLayer;
+        Camera _baseCamera;
+        int _uiLayer = -1;
 
         public event Action MaskClicked;
+
         public Camera UICamera => _uiCamera;
 
         public static UIFrameRoot Create()
@@ -49,17 +58,13 @@ namespace UIFrame
 
         public void SetMaskVisible(bool visible)
         {
-            if (_maskImage == null)
+            if (_maskImage != null)
             {
-                return;
+                _maskImage.gameObject.SetActive(visible);
             }
-
-            _maskImage.gameObject.SetActive(visible);
         }
 
-        /// <summary>
-        /// 将 UI Camera 加入 Base Camera Stack。
-        /// </summary>
+        /// <summary>将 UI Camera 加入 Base Camera Stack。不改 Base / Canvas 其他参数。</summary>
         public Camera ConfigureURPCameraStack(Camera baseCamera, Camera uiCamera, int uiLayer)
         {
             baseCamera = baseCamera != null ? baseCamera : Camera.main;
@@ -75,30 +80,10 @@ namespace UIFrame
                 return null;
             }
 
-            if (uiLayer < 0)
+            if (!TryResolveUiLayer(ref uiLayer))
             {
-                uiLayer = _uiLayer >= 0 ? _uiLayer : LayerMask.NameToLayer("UI");
-            }
-
-            if (uiLayer < 0 || uiLayer > 31)
-            {
-                Debug.LogError($"[UIFrame] 配置 URP Camera Stack 失败：无效 UI Layer {uiLayer}。");
                 return null;
             }
-
-            DetachFromBaseCamera();
-
-            if (uiCamera != null)
-            {
-                _uiCamera = uiCamera;
-            }
-            else if (_uiCamera == null)
-            {
-                _uiCamera = CreateUICamera(uiLayer);
-            }
-
-            _uiLayer = uiLayer;
-            SetLayerRecursively(_canvasRoot, uiLayer);
 
             var cameraStack = baseCamera.GetUniversalAdditionalCameraData().cameraStack;
             if (cameraStack == null)
@@ -107,9 +92,11 @@ namespace UIFrame
                 return null;
             }
 
-            var uiCameraData = _uiCamera.GetUniversalAdditionalCameraData();
-            uiCameraData.renderType = CameraRenderType.Overlay;
+            DetachFromBaseCamera();
+            EnsureUICamera(uiCamera, uiLayer);
 
+            var uiData = _uiCamera.GetUniversalAdditionalCameraData();
+            uiData.renderType = CameraRenderType.Overlay;
             if (!cameraStack.Contains(_uiCamera))
             {
                 cameraStack.Add(_uiCamera);
@@ -120,76 +107,56 @@ namespace UIFrame
             return _uiCamera;
         }
 
-        /// <summary>仅从 Base Camera Stack 移除 UI Camera。Canvas 保持 Screen Space Camera 与 UI Camera 引用。</summary>
+        /// <summary>仅从 Base Camera Stack 移除 UI Camera。Canvas 模式与引用不变。</summary>
         public void DisableURPCameraStack()
         {
             DetachFromBaseCamera();
         }
 
-        void ApplyOrientation(GameScreenOrientation orientation)
-        {
-            var layout = ScreenOrientationManager.GetCanvasLayout(orientation);
-            var size = layout == GameUICanvasLayout.Landscape
-                ? new Vector2(1920f, 1080f)
-                : new Vector2(1080f, 1920f);
-            if (_rootScaler != null)
-            {
-                _rootScaler.referenceResolution = size;
-            }
-        }
-
         void Build()
         {
-            _uiLayer = LayerMask.NameToLayer("UI");
-            if (_uiLayer < 0)
-            {
-                _uiLayer = 5;
-            }
-
+            _uiLayer = ResolveDefaultUiLayer();
             _uiCamera = CreateUICamera(_uiLayer);
+            BuildCanvas();
+            BuildLayers();
+            BuildMask();
+            BindOrientation();
+        }
 
+        void BuildCanvas()
+        {
             var canvasGo = new GameObject("CanvasRoot", typeof(RectTransform));
             canvasGo.transform.SetParent(transform, false);
             canvasGo.layer = _uiLayer;
 
             _canvas = canvasGo.AddComponent<Canvas>();
             _canvas.vertexColorAlwaysGammaSpace = true;
-            _canvas.sortingOrder = 100;
+            _canvas.sortingOrder = CanvasSortingOrder;
+            _canvas.planeDistance = CanvasPlaneDistance;
             _canvas.additionalShaderChannels =
                 AdditionalCanvasShaderChannels.TexCoord1
                 | AdditionalCanvasShaderChannels.Normal
                 | AdditionalCanvasShaderChannels.Tangent;
-            _canvas.planeDistance = 1f;
             BindCanvasToUICamera();
 
             _rootScaler = canvasGo.AddComponent<CanvasScaler>();
             _rootScaler.uiScaleMode = CanvasScaler.ScaleMode.ScaleWithScreenSize;
             _rootScaler.screenMatchMode = CanvasScaler.ScreenMatchMode.MatchWidthOrHeight;
             _rootScaler.matchWidthOrHeight = 0.5f;
-            _rootScaler.referenceResolution = new Vector2(1080f, 1920f);
+            _rootScaler.referenceResolution = PortraitReference;
             canvasGo.AddComponent<GraphicRaycaster>();
 
             _canvasRoot = (RectTransform)canvasGo.transform;
             UIRect.Stretch(_canvasRoot);
+        }
 
+        void BuildLayers()
+        {
             for (var i = 0; i < LayerOrder.Length; i++)
             {
                 var layer = LayerOrder[i];
-                _layers[layer] = CreateLayer(canvasGo.transform, layer);
+                _layers[layer] = CreateLayer(_canvasRoot, layer);
             }
-
-            BuildMask();
-            BindOrientation();
-        }
-
-        RectTransform CreateLayer(Transform parent, UILayer layer)
-        {
-            var go = new GameObject(layer.ToString(), typeof(RectTransform));
-            go.layer = _uiLayer;
-            var rt = (RectTransform)go.transform;
-            rt.SetParent(parent, false);
-            UIRect.Stretch(rt);
-            return rt;
         }
 
         void BuildMask()
@@ -197,6 +164,7 @@ namespace UIFrame
             var parent = GetLayer(UILayer.Mask);
             var go = new GameObject("MaskDimmer", typeof(RectTransform));
             go.layer = _uiLayer;
+
             var rt = (RectTransform)go.transform;
             rt.SetParent(parent, false);
             UIRect.Stretch(rt);
@@ -214,15 +182,21 @@ namespace UIFrame
             _maskImage.color = new Color(0f, 0f, 0f, 0.55f);
             _maskImage.raycastTarget = true;
 
-            var maskButton = go.AddComponent<Button>();
-            maskButton.transition = Selectable.Transition.None;
-            maskButton.onClick.AddListener(OnMaskClicked);
+            var button = go.AddComponent<Button>();
+            button.transition = Selectable.Transition.None;
+            button.onClick.AddListener(OnMaskClicked);
             go.SetActive(false);
         }
 
-        void OnMaskClicked()
+        RectTransform CreateLayer(Transform parent, UILayer layer)
         {
-            MaskClicked?.Invoke();
+            var go = new GameObject(layer.ToString(), typeof(RectTransform));
+            go.layer = _uiLayer;
+
+            var rt = (RectTransform)go.transform;
+            rt.SetParent(parent, false);
+            UIRect.Stretch(rt);
+            return rt;
         }
 
         void BindOrientation()
@@ -237,40 +211,91 @@ namespace UIFrame
             ApplyOrientation(orientation);
         }
 
+        void ApplyOrientation(GameScreenOrientation orientation)
+        {
+            if (_rootScaler == null)
+            {
+                return;
+            }
+
+            var landscape = ScreenOrientationManager.GetCanvasLayout(orientation) == GameUICanvasLayout.Landscape;
+            _rootScaler.referenceResolution = landscape ? LandscapeReference : PortraitReference;
+        }
+
+        void OnMaskClicked()
+        {
+            MaskClicked?.Invoke();
+        }
+
+        void EnsureUICamera(Camera uiCamera, int uiLayer)
+        {
+            if (uiCamera != null)
+            {
+                _uiCamera = uiCamera;
+            }
+            else if (_uiCamera == null)
+            {
+                _uiCamera = CreateUICamera(uiLayer);
+            }
+
+            _uiLayer = uiLayer;
+            SetLayerRecursively(_canvasRoot, uiLayer);
+        }
+
+        Camera CreateUICamera(int uiLayer)
+        {
+            var go = new GameObject("UIFrameCamera");
+            go.transform.SetParent(transform, false);
+            go.layer = uiLayer;
+
+            var camera = go.AddComponent<Camera>();
+            camera.clearFlags = CameraClearFlags.Depth;
+            camera.orthographic = true;
+            camera.cullingMask = 1 << uiLayer;
+
+            var data = camera.GetUniversalAdditionalCameraData();
+            data.renderType = CameraRenderType.Overlay;
+            data.renderPostProcessing = false;
+            data.renderShadows = false;
+            return camera;
+        }
+
         void BindCanvasToUICamera()
         {
             _canvas.renderMode = RenderMode.ScreenSpaceCamera;
             _canvas.worldCamera = _uiCamera;
         }
 
-        Camera CreateUICamera(int uiLayer)
-        {
-            var cameraGo = new GameObject("UIFrameCamera");
-            cameraGo.transform.SetParent(transform, false);
-            cameraGo.layer = uiLayer;
-            var uiCamera = cameraGo.AddComponent<Camera>();
-            uiCamera.clearFlags = CameraClearFlags.Depth;
-            uiCamera.orthographic = true;
-            uiCamera.cullingMask = 1 << uiLayer;
-
-            var cameraData = uiCamera.GetUniversalAdditionalCameraData();
-            cameraData.renderType = CameraRenderType.Overlay;
-            cameraData.renderPostProcessing = false;
-            cameraData.renderShadows = false;
-            return uiCamera;
-        }
-
         void DetachFromBaseCamera()
         {
-            if (_baseCamera == null || _uiCamera == null)
+            if (_baseCamera != null && _uiCamera != null)
             {
-                _baseCamera = null;
-                return;
+                _baseCamera.GetUniversalAdditionalCameraData().cameraStack?.Remove(_uiCamera);
             }
 
-            var cameraStack = _baseCamera.GetUniversalAdditionalCameraData().cameraStack;
-            cameraStack?.Remove(_uiCamera);
             _baseCamera = null;
+        }
+
+        bool TryResolveUiLayer(ref int uiLayer)
+        {
+            if (uiLayer < 0)
+            {
+                uiLayer = _uiLayer >= 0 ? _uiLayer : ResolveDefaultUiLayer();
+            }
+
+            if (uiLayer >= 0 && uiLayer <= 31)
+            {
+                return true;
+            }
+
+            Debug.LogError($"[UIFrame] 配置 URP Camera Stack 失败：无效 UI Layer {uiLayer}。");
+            return false;
+        }
+
+        static int ResolveDefaultUiLayer()
+        {
+            var layer = LayerMask.NameToLayer("UI");
+            return layer >= 0 ? layer : DefaultUiLayerFallback;
         }
 
         static void SetLayerRecursively(Transform root, int layer)
