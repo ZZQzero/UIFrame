@@ -73,28 +73,6 @@ namespace UIFrame
         }
 
         /// <summary>
-        /// 增减叶子数量。该方法仅为便利入口，业务同步优先使用 Set。
-        /// </summary>
-        public static void Add(string path, int delta)
-        {
-            EnsureMainThread();
-            ValidatePath(path);
-
-            int current = GetUnchecked(path);
-            long next = (long)current + delta;
-            if (next < 0)
-            {
-                next = 0;
-            }
-            else if (next > int.MaxValue)
-            {
-                next = int.MaxValue;
-            }
-
-            Set(path, (int)next);
-        }
-
-        /// <summary>
         /// 获取路径的聚合数量。路径不存在时返回 0。
         /// </summary>
         public static int Get(string path)

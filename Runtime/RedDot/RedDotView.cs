@@ -1,7 +1,6 @@
 using System;
 using TMPro;
 using UnityEngine;
-using UnityEngine.UI;
 
 namespace UIFrame
 {
@@ -19,10 +18,6 @@ namespace UIFrame
         [SerializeField]
         [Tooltip("红点显示对象。必须是宿主的其他对象，通常为子节点。")]
         private GameObject target;
-
-        [SerializeField]
-        [Tooltip("可选的 UGUI 数字文本。")]
-        private Text countText;
 
         [SerializeField]
         [Tooltip("可选的 TextMeshPro 数字文本。")]
@@ -202,11 +197,6 @@ namespace UIFrame
             }
 
             displayedText = text;
-            if (countText != null)
-            {
-                countText.text = text;
-            }
-
             if (tmpCountText != null)
             {
                 tmpCountText.text = text;
