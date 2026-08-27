@@ -12,6 +12,9 @@ namespace Game.Pooling
 
     public interface IPrefabProvider
     {
+        /// <summary>
+        /// 加载可以在任意线程完成；GameObjectPoolService 会在使用返回句柄前切回主线程。
+        /// </summary>
         UniTask<IPrefabHandle> LoadAsync(string location);
     }
 

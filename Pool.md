@@ -72,14 +72,15 @@ if (!pool.TrySpawn("PlayerItem", contentRoot, out PlayerItem item))
 `TrySpawn` 只查询已经存在的分桶。池内有闲置实例时直接复用，池空时通过已持有
 的 Prefab Handle 同步实例化；location 尚未加载或仍在加载时返回 `false`，不会
 偷偷触发同步 YooAsset 加载。该接口适合必须立即返回 Cell 的循环列表
-`GetObject`。
+`GetObject`。`false` 仅表示分桶尚未准备或泛型入口缺少目标组件；参数错误、线程
+错误或分桶已损坏仍会抛出异常。
 
 `IPoolable` 回调规则：
 
 1. 获取时重置父节点及局部变换，激活对象，然后按组件顺序调用 `OnSpawned`。
 2. 归还时按相反顺序调用 `OnDespawned`，隐藏对象并移动到池根节点。
-3. 回调组件列表仅在实例首次创建时扫描并缓存，稳态取还不会重复
-   `GetComponents`。
+3. 回调组件列表仅在实例首次创建时通过
+   `GetComponentsInChildren<IPoolable>(true)` 扫描并缓存，稳态取还不会重复查询。
 
 ## 显式回收与分组
 
@@ -110,15 +111,24 @@ pool.TryRemoveGroup(PoolGroup.UI, force: true);
 
 - 同一 location 的并发请求共享一次 YooAsset 加载。
 - 单个调用的 `CancellationToken` 只取消该调用的等待，不会取消其他等待者。
+- 即使最后一个等待者取消，已经开始的共享加载仍会完成并保留分桶，直到主动移除
+  或释放服务。
 - 每个分桶持有一个 `AssetHandle`，直到分桶真正移除。
-- `TryRemovePool` 在仍有活跃实例或正在加载时返回 `false`。
+- `TryRemovePool` 在仍有活跃实例、正在加载或正在跨帧预热时返回 `false`。
 - `TryRemoveGroup` 按组释放闲置实例和句柄；组内正在加载或仍有活跃实例时拒绝
-  普通移除。
+  普通移除。预热进行中时即使传入 `force: true` 也会拒绝移除。
 - `Trim(location, count)` 将闲置实例收缩到指定数量，但不释放 Prefab 句柄。
-- `TryDispose()` 在存在活跃实例或加载任务时返回 `false`，适合校验式关闭。
+- `TryDispose()` 在存在活跃实例、加载任务或预热任务时返回 `false`，适合校验式关闭。
 - `Dispose()`/`ForceDispose()` 会终止活跃实例，并保证每个已建立分桶的 Prefab
   Handle 被释放；可安全用于 `using/finally`。
-- 池化实例不得由业务代码直接 `Destroy`，应统一调用 `Despawn`。
+- 池化实例不得由业务代码直接 `Destroy`，应统一调用 `Despawn`。一旦检测到外部
+  `Destroy`，对应分桶会被标记为损坏并拒绝继续 Prepare、Prewarm、Spawn 或
+  Trim；调用方必须先移除该分桶，再重新 Prepare。从未激活过的预热实例可能没有
+  Unity `OnDestroy` 回调，此时会在下次取用发现失效引用时将分桶标记为损坏。
+
+`GameObjectPoolService` 的公开操作必须从创建它的 Unity 主线程调用。自定义
+`IPrefabProvider` 可以在后台线程完成加载；服务会在创建分桶或操作 Unity 对象前
+切回主线程。
 
 如果未传入 `poolRoot`，服务会创建 `[GameObjectPool]` 根节点，并在释放服务时
 销毁。跨场景使用时，应由调用方提供自己的常驻根节点并管理其生命周期。

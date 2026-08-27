@@ -85,7 +85,9 @@ namespace Game.Pooling
             cancellationToken.ThrowIfCancellationRequested();
             PoolBucket bucket =
                 await GetOrCreateBucketAsync(location, options, cancellationToken);
+            EnsureUsable();
             cancellationToken.ThrowIfCancellationRequested();
+            bucket.EnsureAvailable();
             int cappedTarget = Math.Min(targetCount, bucket.Options.MaxSize);
             if (bucket.Pool.CountAll >= cappedTarget)
             {
@@ -95,21 +97,25 @@ namespace Game.Pooling
             int rentCapacity = Math.Max(0, cappedTarget - bucket.Pool.CountActive);
             var rented = new List<PooledInstanceMarker>(rentCapacity);
             int createdThisFrame = 0;
+            bucket.BeginPrewarm();
             try
             {
                 while (bucket.Pool.CountAll < cappedTarget)
                 {
+                    EnsureUsable();
                     cancellationToken.ThrowIfCancellationRequested();
-                    int createdBefore = bucket.Pool.Stats.TotalCreated;
+                    bucket.EnsureAvailable();
+                    int countAllBefore = bucket.Pool.CountAll;
                     PooledInstanceMarker marker = bucket.Pool.Get();
                     if (marker == null)
                     {
+                        bucket.RegisterMissingInactiveInstance();
                         throw new InvalidOperationException(
                             $"An inactive pooled instance of '{location}' was destroyed externally.");
                     }
 
                     rented.Add(marker);
-                    bool wasCreated = bucket.Pool.Stats.TotalCreated > createdBefore;
+                    bool wasCreated = bucket.Pool.CountAll > countAllBefore;
                     if (!wasCreated)
                     {
                         continue;
@@ -127,9 +133,16 @@ namespace Game.Pooling
             }
             finally
             {
-                for (int i = 0; i < rented.Count; i++)
+                try
                 {
-                    bucket.Pool.Release(rented[i]);
+                    for (int i = 0; i < rented.Count; i++)
+                    {
+                        bucket.ReturnPrewarmed(rented[i]);
+                    }
+                }
+                finally
+                {
+                    bucket.EndPrewarm();
                 }
             }
         }
@@ -213,15 +226,7 @@ namespace Game.Pooling
             where T : Component
         {
             GameObject instance = SpawnLoaded(location, parent);
-            T component = instance.GetComponent<T>();
-            if (component != null)
-            {
-                return component;
-            }
-
-            DespawnImmediate(instance);
-            throw new InvalidOperationException(
-                $"Pooled prefab '{location}' does not contain component {typeof(T).FullName}.");
+            return GetRequiredComponent<T>(instance, location);
         }
 
         public async UniTask<T> SpawnAsync<T>(
@@ -233,15 +238,7 @@ namespace Game.Pooling
         {
             GameObject instance =
                 await SpawnAsync(location, parent, options, cancellationToken);
-            T component = instance.GetComponent<T>();
-            if (component != null)
-            {
-                return component;
-            }
-
-            DespawnImmediate(instance);
-            throw new InvalidOperationException(
-                $"Pooled prefab '{location}' does not contain component {typeof(T).FullName}.");
+            return GetRequiredComponent<T>(instance, location);
         }
 
         public bool Despawn(GameObject instance)
@@ -349,7 +346,7 @@ namespace Game.Pooling
                 return true;
             }
 
-            if (bucket.Active.Count > 0)
+            if (bucket.Active.Count > 0 || bucket.IsPrewarming)
             {
                 return false;
             }
@@ -389,7 +386,7 @@ namespace Game.Pooling
 
             foreach (PoolBucket bucket in buckets.Values)
             {
-                if (bucket.Active.Count > 0)
+                if (bucket.Active.Count > 0 || bucket.IsPrewarming)
                 {
                     return false;
                 }
@@ -455,6 +452,7 @@ namespace Game.Pooling
             if (buckets.TryGetValue(location, out PoolBucket bucket))
             {
                 ValidateOptions(location, bucket.Options, options);
+                bucket.EnsureAvailable();
                 return bucket;
             }
 
@@ -476,9 +474,32 @@ namespace Game.Pooling
         private async UniTask CompleteLoadAsync(string location, PendingLoad pending)
         {
             IPrefabHandle handle = null;
+            Exception loadException = null;
             try
             {
                 handle = await prefabProvider.LoadAsync(location);
+            }
+            catch (Exception exception)
+            {
+                loadException = exception;
+            }
+
+            await UniTask.SwitchToMainThread();
+            try
+            {
+                EnsureOwnerThread();
+                if (loadException != null)
+                {
+                    pending.Completion.TrySetException(loadException);
+                    return;
+                }
+
+                if (handle == null)
+                {
+                    throw new InvalidOperationException(
+                        $"Prefab provider returned a null handle for '{location}'.");
+                }
+
                 if (disposed)
                 {
                     throw new ObjectDisposedException(nameof(GameObjectPoolService));
@@ -505,15 +526,17 @@ namespace Game.Pooling
         {
             using ProfilerMarker.AutoScope _ = SpawnProfilerMarker.Auto();
             EnsureUsable();
-            int createdBefore = bucket.Pool.Stats.TotalCreated;
+            bucket.EnsureAvailable();
+            int countAllBefore = bucket.Pool.CountAll;
             PooledInstanceMarker marker = bucket.Pool.Get();
             if (marker == null)
             {
+                bucket.RegisterMissingInactiveInstance();
                 throw new InvalidOperationException(
                     $"A pooled instance of '{bucket.Location}' was destroyed externally.");
             }
             bool createdSynchronously =
-                bucket.Pool.Stats.TotalCreated > createdBefore;
+                bucket.Pool.CountAll > countAllBefore;
 
             marker.State = PooledInstanceState.Spawning;
             bucket.Active.Add(marker);
@@ -620,33 +643,25 @@ namespace Game.Pooling
 
         private static IPoolable[] CollectCallbacks(GameObject instance)
         {
-            MonoBehaviour[] behaviours =
-                instance.GetComponentsInChildren<MonoBehaviour>(true);
-            int count = 0;
-            for (int i = 0; i < behaviours.Length; i++)
+            IPoolable[] callbacks =
+                instance.GetComponentsInChildren<IPoolable>(true);
+            return callbacks.Length == 0
+                ? Array.Empty<IPoolable>()
+                : callbacks;
+        }
+
+        private T GetRequiredComponent<T>(GameObject instance, string location)
+            where T : Component
+        {
+            T component = instance.GetComponent<T>();
+            if (component != null)
             {
-                if (behaviours[i] is IPoolable)
-                {
-                    count++;
-                }
+                return component;
             }
 
-            if (count == 0)
-            {
-                return Array.Empty<IPoolable>();
-            }
-
-            var callbacks = new IPoolable[count];
-            int index = 0;
-            for (int i = 0; i < behaviours.Length; i++)
-            {
-                if (behaviours[i] is IPoolable poolable)
-                {
-                    callbacks[index++] = poolable;
-                }
-            }
-
-            return callbacks;
+            DespawnImmediate(instance);
+            throw new InvalidOperationException(
+                $"Pooled prefab '{location}' does not contain component {typeof(T).FullName}.");
         }
 
         private void InvokeSpawned(IPoolable[] callbacks, ref int completedCount)
@@ -822,8 +837,12 @@ namespace Game.Pooling
             public HashSet<PooledInstanceMarker> Active { get; } = new();
             public int PeakActive { get; private set; }
             public int SynchronousExpansionCount { get; private set; }
+            public bool IsPrewarming => prewarmOperationCount > 0;
             private int externallyDestroyedCount;
             private int externallyDestroyedInactiveCount;
+            private int prewarmOperationCount;
+            private bool corrupted;
+            private bool disposed;
 
             public PoolBucket(
                 GameObjectPoolService owner,
@@ -854,13 +873,84 @@ namespace Game.Pooling
                 }
             }
 
+            public void BeginPrewarm()
+            {
+                EnsureAvailable();
+                prewarmOperationCount++;
+            }
+
+            public void EndPrewarm()
+            {
+                if (prewarmOperationCount > 0)
+                {
+                    prewarmOperationCount--;
+                }
+            }
+
+            public void ReturnPrewarmed(PooledInstanceMarker marker)
+            {
+                if (marker == null)
+                {
+                    return;
+                }
+
+                if (disposed)
+                {
+                    DestroyPooledInstance(marker);
+                    return;
+                }
+
+                try
+                {
+                    Pool.Release(marker);
+                }
+                catch (Exception exception)
+                {
+                    DestroyPooledInstance(marker);
+                    Debug.LogException(exception);
+                }
+            }
+
+            public void EnsureAvailable()
+            {
+                if (disposed)
+                {
+                    throw new ObjectDisposedException($"Pool '{Location}'");
+                }
+
+                if (corrupted)
+                {
+                    throw new InvalidOperationException(
+                        $"Pool '{Location}' is corrupted because a pooled instance was destroyed " +
+                        "externally. Remove the pool and prepare it again before reuse.");
+                }
+            }
+
             public void RegisterExternalDestroy(PooledInstanceState previousState)
             {
+                if (corrupted)
+                {
+                    return;
+                }
+
+                corrupted = true;
                 externallyDestroyedCount++;
                 if (previousState == PooledInstanceState.Inactive)
                 {
                     externallyDestroyedInactiveCount++;
                 }
+            }
+
+            public void RegisterMissingInactiveInstance()
+            {
+                if (corrupted)
+                {
+                    return;
+                }
+
+                corrupted = true;
+                externallyDestroyedCount++;
+                externallyDestroyedInactiveCount++;
             }
 
             public PoolStats GetStats()
@@ -879,6 +969,18 @@ namespace Game.Pooling
 
             public void Dispose(bool force)
             {
+                if (disposed)
+                {
+                    return;
+                }
+
+                if (!force && IsPrewarming)
+                {
+                    throw new InvalidOperationException(
+                        $"Pool '{Location}' cannot be disposed while prewarming.");
+                }
+
+                disposed = true;
                 if (force)
                 {
                     foreach (PooledInstanceMarker marker in Active)

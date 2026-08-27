@@ -94,6 +94,7 @@ namespace Game.Pooling
                 return 0;
             }
 
+            bucket.EnsureAvailable();
             int before = bucket.Pool.CountInactive;
             if (before <= targetInactive)
             {
@@ -132,6 +133,14 @@ namespace Game.Pooling
             foreach (PendingLoad pending in pendingLoads.Values)
             {
                 if (pending.Options.Group == group)
+                {
+                    return false;
+                }
+            }
+
+            foreach (PoolBucket bucket in buckets.Values)
+            {
+                if (bucket.Options.Group == group && bucket.IsPrewarming)
                 {
                     return false;
                 }
