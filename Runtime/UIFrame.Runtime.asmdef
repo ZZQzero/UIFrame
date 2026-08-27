@@ -5,6 +5,7 @@
     "UniTask",
     "YooAsset",
     "Unity.ugui",
+    "Unity.TextMeshPro",
     "Unity.RenderPipelines.Universal.Runtime"
   ],
   "includePlatforms": [],
