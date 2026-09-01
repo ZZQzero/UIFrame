@@ -59,7 +59,14 @@ namespace UIFrame
             OnLoopScrollCreated();
         }
 
-        protected override void OnDisabled()
+        /// <summary>关闭时还池。覆写须调用 base。</summary>
+        protected override void OnClose()
+        {
+            LoopScrollPoolSource.Clear(_scrollRect);
+        }
+
+        /// <summary>销毁面板时还池。覆写须调用 base。</summary>
+        protected override void OnDestroyPanel()
         {
             LoopScrollPoolSource.Clear(_scrollRect);
         }

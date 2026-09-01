@@ -155,7 +155,7 @@ ScrollRect.RefillCells();
 `GetObject` 内部走 `TrySpawn`：分桶已准备则同步取出或扩容；尚未 Prepare 时抛出
 明确异常，避免 LoopScroll 对空引用取 `transform`。单 Prefab 的 `PrepareCellsAsync` /
 `PrewarmCellsAsync` 使用 `GetCellLocation(0)`。`ReturnObject` 走
-`DespawnImmediate`。面板隐藏或销毁时 Unity 会 `OnDisable`，基类在这里 `ClearCells`
+`DespawnImmediate`。`OnClose` 和 `OnDestroyPanel` 会 `ClearCells`
 把 Cell 还回池，并清掉 LoopScroll 的 temp pool 计数，因此缓存后再 `RefillCells`
 不会对空 Content 取子节点。
 `SpawnLoaded` 仍可用于其它必须立即拿到实例的同步路径。池空时两者都会基于已加载

@@ -77,19 +77,8 @@ namespace UIFrame
             OnDestroyPanel();
         }
 
-        void OnDisable()
-        {
-            OnDisabled();
-        }
-
-        /// <summary>Unity 禁用该组件时。泛型子类应覆写此方法，不要声明 OnDisable。</summary>
-        protected virtual void OnDisabled()
-        {
-        }
-
         void OnDestroy()
         {
-            OnDestroyed();
             var handle = AssetHandle;
             if (handle == null)
             {
@@ -98,11 +87,6 @@ namespace UIFrame
 
             AssetHandle = null;
             UILoader.Release(handle);
-        }
-
-        /// <summary>Unity 销毁该组件时。泛型子类应覆写此方法，不要声明 OnDestroy。</summary>
-        protected virtual void OnDestroyed()
-        {
         }
 
         /// <summary>关闭自己。默认隐藏进缓存，不 Destroy、不释放 Handle。</summary>

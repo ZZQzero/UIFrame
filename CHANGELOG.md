@@ -12,10 +12,9 @@ All notable changes to this package will be documented in this file.
 
 ### Changed
 
-- Loop-scroll panels return cells when the GameObject is disabled, which follows both cache-close and destroy.
-- OnCreate is sealed; override OnLoopScrollCreated. OnClose / OnDestroyPanel stay overridable.
+- Loop-scroll panels return cells in OnClose and OnDestroyPanel.
+- OnCreate is sealed; override OnLoopScrollCreated. Override OnClose / OnDestroyPanel must call base to return cells.
 - PrepareCellsAsync / PrewarmCellsAsync use GetCellLocation(0), not only the serialized field.
-- UIPanel routes Unity OnDisable / OnDestroy through OnDisabled / OnDestroyed so generic subclasses receive them.
 
 ### Fixed
 
