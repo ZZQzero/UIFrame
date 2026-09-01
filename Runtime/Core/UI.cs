@@ -10,6 +10,7 @@ namespace UIFrame
     {
         static UIManager _manager;
         static bool _shuttingDown;
+        static TipsSettings _tipsSettings = TipsSettings.Default;
 
         public static bool IsInited => _manager != null && _manager.IsInited;
         public static Camera UICamera => IsInited ? _manager.UICamera : null;
@@ -155,14 +156,51 @@ namespace UIFrame
             return Open<TPanel, TArgs>(UIOpenMode.Popup, args);
         }
 
-        public static UniTask<TPanel> Toast<TPanel>() where TPanel : UIPanel<UINone>
+        /// <summary>
+        /// 配置 Tips 层：同时可见条数、等待队列长度、默认自动关闭秒数。
+        /// <paramref name="defaultDuration"/> ≤ 0 表示常驻到手动关闭。队列满时丢掉最旧等待项。
+        /// Shutdown 后仍保留该配置。
+        /// </summary>
+        public static void ConfigureTips(
+            int maxVisible = TipsSettings.DefaultMaxVisible,
+            int maxQueued = TipsSettings.DefaultMaxQueued,
+            float defaultDuration = TipsSettings.DefaultDurationSeconds)
         {
-            return Open<TPanel, UINone>(UIOpenMode.Toast, UINone.Value);
+            _tipsSettings = new TipsSettings(maxVisible, maxQueued, defaultDuration);
+            if (!IsInited)
+            {
+                return;
+            }
+
+            _manager.ConfigureTips(
+                _tipsSettings.MaxVisible,
+                _tipsSettings.MaxQueued,
+                _tipsSettings.DefaultDuration);
         }
 
-        public static UniTask<TPanel> Toast<TPanel, TArgs>(TArgs args) where TPanel : UIPanel<TArgs>
+        /// <summary>
+        /// 打开 Tips Toast。<paramref name="duration"/> 为空用 ConfigureTips 的默认值；
+        /// ≤ 0 常驻到手动关闭。可见已满时只入队，出队后才加载。
+        /// </summary>
+        public static UniTask<TPanel> Toast<TPanel>(float? duration = null)
+            where TPanel : UIPanel<UINone>
         {
-            return Open<TPanel, TArgs>(UIOpenMode.Toast, args);
+            return Toast<TPanel, UINone>(UINone.Value, duration);
+        }
+
+        /// <summary>
+        /// 打开 Tips Toast。<paramref name="duration"/> 为空用 ConfigureTips 的默认值；
+        /// ≤ 0 常驻到手动关闭。可见已满时只入队，出队后才加载。
+        /// </summary>
+        public static UniTask<TPanel> Toast<TPanel, TArgs>(TArgs args, float? duration = null)
+            where TPanel : UIPanel<TArgs>
+        {
+            if (!EnsureInit())
+            {
+                return UniTask.FromResult<TPanel>(null);
+            }
+
+            return _manager.Toast<TPanel>(args, duration);
         }
 
         public static void Back()
@@ -227,7 +265,7 @@ namespace UIFrame
             _manager.CloseGroup(group, destroy);
         }
 
-        /// <summary>销毁所有已关闭进缓存的面板，释放内存。不影响当前打开的界面。</summary>
+        /// <summary>销毁所有已关闭进缓存的面板（含 Tips 闲置 Toast），释放内存。不影响当前打开的界面。</summary>
         public static void ClearCache()
         {
             if (!IsInited)
@@ -262,6 +300,10 @@ namespace UIFrame
 
             _manager = new UIManager();
             _manager.Init();
+            _manager.ConfigureTips(
+                _tipsSettings.MaxVisible,
+                _tipsSettings.MaxQueued,
+                _tipsSettings.DefaultDuration);
             return true;
         }
 

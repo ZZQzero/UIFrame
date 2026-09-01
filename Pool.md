@@ -136,7 +136,8 @@ pool.TryRemoveGroup(PoolGroup.UI, force: true);
 ## UIFrame 边界
 
 UIFrame 的 `UILoader` 已经负责 `UIPanel` 的 YooAsset 句柄，`UIManager` 也会在
-面板关闭时缓存实例。不要再将 `UIPanel` 放入本对象池，否则会产生双重所有权。
+面板关闭时缓存实例。Toast 关掉后走 Tips 自己的按类型闲置列表，不要再将
+`UIPanel` 放入本对象池，否则会产生双重所有权。
 
 循环列表必须采用“异步准备、同步获取、同步归还”。默认源是 `LoopScrollPoolSource`，
 由 `UILoopScrollBase` / `UILoopScrollMultiBase` 在 `OnCreate` 里接到 `LoopScrollRect`。

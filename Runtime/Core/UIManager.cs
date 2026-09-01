@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Threading;
 using Cysharp.Threading.Tasks;
 using UnityEngine;
 using YooAsset;
@@ -12,10 +13,16 @@ namespace UIFrame
         readonly Dictionary<Type, UIPanel> _cached = new Dictionary<Type, UIPanel>();
         readonly Dictionary<Type, UIOpenRequest> _loading = new Dictionary<Type, UIOpenRequest>();
         readonly Dictionary<Type, List<UIPanel>> _toasts = new Dictionary<Type, List<UIPanel>>();
+        readonly Dictionary<Type, List<UIPanel>> _toastIdle = new Dictionary<Type, List<UIPanel>>();
+        readonly Dictionary<UIPanel, CancellationTokenSource> _toastTimers =
+            new Dictionary<UIPanel, CancellationTokenSource>();
         readonly HashSet<UILoadRequest> _toastLoading = new HashSet<UILoadRequest>();
+        readonly TipsChannel _tips = new TipsChannel();
+        readonly List<TipsWaitItem> _tipsDrain = new List<TipsWaitItem>(8);
         readonly List<UIPanel> _windowStack = new List<UIPanel>();
         readonly List<UIPanel> _popupStack = new List<UIPanel>();
-        readonly List<UIPanel> _closeBuffer = new List<UIPanel>(16);
+        bool _toastPumping;
+        int _toastSuppressPump;
 
         UIFrameRoot _root;
         UILoader _loader;
@@ -61,15 +68,19 @@ namespace UIFrame
             }
 
             _toastLoading.Clear();
+            _tipsDrain.Clear();
+            _tips.ResetRuntime(_tipsDrain);
+            RejectToastWaits(_tipsDrain);
+            CancelAllToastTimers();
             _windowStack.Clear();
             _popupStack.Clear();
 
-            _closeBuffer.Clear();
+            var closing = new List<UIPanel>(16);
             foreach (var panel in _opened.Values)
             {
                 if (panel != null)
                 {
-                    _closeBuffer.Add(panel);
+                    closing.Add(panel);
                 }
             }
 
@@ -84,35 +95,35 @@ namespace UIFrame
                 {
                     if (list[i] != null)
                     {
-                        _closeBuffer.Add(list[i]);
+                        closing.Add(list[i]);
                     }
                 }
             }
 
-            for (var i = 0; i < _closeBuffer.Count; i++)
+            for (var i = 0; i < closing.Count; i++)
             {
-                ClosePanel(_closeBuffer[i], destroy: true);
+                ClosePanel(closing[i], destroy: true);
             }
 
-            _closeBuffer.Clear();
             _opened.Clear();
             _toasts.Clear();
+            DestroyToastIdle();
 
+            closing.Clear();
             foreach (var panel in _cached.Values)
             {
                 if (panel != null)
                 {
-                    _closeBuffer.Add(panel);
+                    closing.Add(panel);
                 }
             }
 
             _cached.Clear();
-            for (var i = 0; i < _closeBuffer.Count; i++)
+            for (var i = 0; i < closing.Count; i++)
             {
-                DestroyPanel(_closeBuffer[i]);
+                DestroyPanel(closing[i]);
             }
 
-            _closeBuffer.Clear();
             if (_root != null)
             {
                 _root.MaskClicked -= OnMaskClicked;
@@ -215,6 +226,18 @@ namespace UIFrame
             }
         }
 
+        public void ConfigureTips(int maxVisible, int maxQueued, float defaultDuration)
+        {
+            _tipsDrain.Clear();
+            _tips.Configure(maxVisible, maxQueued, defaultDuration, _tipsDrain);
+            RejectToastWaits(_tipsDrain);
+            TrimToastIdle();
+            if (_inited)
+            {
+                PumpToastQueue();
+            }
+        }
+
         public UniTask<TPanel> Open<TPanel, TArgs>(UIOpenMode mode, TArgs args)
             where TPanel : UIPanel<TArgs>
         {
@@ -227,7 +250,7 @@ namespace UIFrame
 
             if (mode == UIOpenMode.Toast)
             {
-                return OpenToast<TPanel>(type, args);
+                return OpenToast<TPanel>(type, args, duration: null);
             }
 
             if (_loading.TryGetValue(type, out var inflight))
@@ -364,56 +387,120 @@ namespace UIFrame
             }
         }
 
-        async UniTask<TPanel> OpenToast<TPanel>(Type type, object args)
+        internal UniTask<TPanel> Toast<TPanel>(object args, float? duration)
             where TPanel : UIPanel
         {
-            if (!UIPanelCatalog.TryResolve(type, UIOpenMode.Toast, out var bind))
-            {
-                return null;
-            }
+            return OpenToast<TPanel>(typeof(TPanel), args, duration);
+        }
 
-            var req = new UILoadRequest();
-            _toastLoading.Add(req);
-            UIPanel panel = null;
-            try
+        async UniTask<TPanel> OpenToast<TPanel>(Type type, object args, float? duration)
+            where TPanel : UIPanel
+        {
+            var resolved = _tips.ResolveDuration(duration);
+            if (!_tips.HasFreeSlot(CountVisibleToasts()))
             {
-                panel = await LoadPanel(type, bind, req);
-                if (req.Cancelled || panel == null)
+                if (_tips.Settings.MaxVisible <= 0 || _tips.Settings.MaxQueued <= 0)
                 {
-                    if (panel != null)
-                    {
-                        DestroyPanel(panel);
-                    }
-
                     return null;
                 }
 
-                panel.OpenMode = UIOpenMode.Toast;
-                panel.ApplyArgs(args);
-                AttachToLayer(panel, _root.GetLayer(panel.Layer));
-                panel.transform.SetAsLastSibling();
-                panel.gameObject.SetActive(true);
-                panel.DispatchOpen();
-
-                if (!_toasts.TryGetValue(type, out var list))
+                var wait = new TipsWaitItem
                 {
-                    list = new List<UIPanel>();
-                    _toasts[type] = list;
+                    PanelType = type,
+                    Args = args,
+                    Duration = resolved,
+                };
+                if (!_tips.TryEnqueue(wait, out var dropped))
+                {
+                    return null;
                 }
 
-                list.Add(panel);
-                return panel as TPanel;
+                RejectToastWait(dropped);
+                var queued = await wait.Completion.Task;
+                return queued as TPanel;
+            }
+
+            var panel = await ShowToast(type, args, resolved);
+            return panel as TPanel;
+        }
+
+        async UniTask<UIPanel> ShowToast(Type type, object args, float duration)
+        {
+            UILoadRequest req = null;
+            UIPanel panel = null;
+            var slotHeld = false;
+            try
+            {
+                if (!UIPanelCatalog.TryResolve(type, UIOpenMode.Toast, out var bind))
+                {
+                    return null;
+                }
+
+                _tips.BeginInFlight();
+                slotHeld = true;
+                panel = TakeToastIdle(type, bind);
+                if (panel == null)
+                {
+                    req = new UILoadRequest { PanelType = type };
+                    _toastLoading.Add(req);
+                    panel = await LoadPanel(type, bind, req);
+                    if (req.Cancelled || panel == null)
+                    {
+                        if (panel != null)
+                        {
+                            DestroyPanel(panel);
+                        }
+
+                        return null;
+                    }
+                }
+
+                if (!_inited)
+                {
+                    DestroyPanel(panel);
+                    return null;
+                }
+
+                PresentToast(panel, args, duration);
+                return panel;
             }
             catch (Exception ex)
             {
                 Debug.LogError($"[UIFrame] Toast 打开失败 {type.Name}: {ex}");
-                DestroyPanel(panel);
+                ReleaseToastAfterFailure(panel);
                 return null;
             }
             finally
             {
-                _toastLoading.Remove(req);
+                if (req != null)
+                {
+                    _toastLoading.Remove(req);
+                }
+
+                if (slotHeld)
+                {
+                    _tips.EndInFlight();
+                }
+
+                PumpToastQueue();
             }
+        }
+
+        void PresentToast(UIPanel panel, object args, float duration)
+        {
+            panel.OpenMode = UIOpenMode.Toast;
+            panel.ApplyArgs(args);
+            AttachToLayer(panel, _root.GetLayer(panel.Layer));
+            panel.transform.SetAsLastSibling();
+            panel.gameObject.SetActive(true);
+            AddVisibleToast(panel);
+            panel.DispatchOpen();
+            if (!IsVisibleToast(panel) || TipsChannel.IsSticky(duration))
+            {
+                return;
+            }
+
+            StartToastTimer(panel, duration);
         }
 
         async UniTask<UIPanel> LoadPanel(
@@ -521,25 +608,48 @@ namespace UIFrame
                 return;
             }
 
+            _toastSuppressPump++;
+            try
+            {
+                CloseCore(panelType, destroy);
+            }
+            finally
+            {
+                _toastSuppressPump--;
+                PumpToastQueue();
+            }
+        }
+
+        void CloseCore(Type panelType, bool destroy)
+        {
+
             if (_loading.TryGetValue(panelType, out var req))
             {
                 req.Cancelled = true;
             }
 
+            CancelToastLoads(panelType);
+            _tipsDrain.Clear();
+            _tips.DrainWhere(item => item != null && item.PanelType == panelType, _tipsDrain);
+            RejectToastWaits(_tipsDrain);
+
             if (_toasts.TryGetValue(panelType, out var toasts) && toasts != null && toasts.Count > 0)
             {
-                _closeBuffer.Clear();
+                var closing = new List<UIPanel>(toasts.Count);
                 for (var i = 0; i < toasts.Count; i++)
                 {
-                    _closeBuffer.Add(toasts[i]);
+                    closing.Add(toasts[i]);
                 }
 
-                for (var i = 0; i < _closeBuffer.Count; i++)
+                for (var i = 0; i < closing.Count; i++)
                 {
-                    ClosePanel(_closeBuffer[i], destroy: true);
+                    ClosePanel(closing[i], destroy);
                 }
+            }
 
-                _closeBuffer.Clear();
+            if (destroy)
+            {
+                DestroyToastIdle(panelType);
             }
 
             if (_opened.TryGetValue(panelType, out var opened) && opened != null)
@@ -563,6 +673,20 @@ namespace UIFrame
 
         public void CloseGroup(UIGroup group, bool destroy)
         {
+            _toastSuppressPump++;
+            try
+            {
+                CloseGroupCore(group, destroy);
+            }
+            finally
+            {
+                _toastSuppressPump--;
+                PumpToastQueue();
+            }
+        }
+
+        void CloseGroupCore(UIGroup group, bool destroy)
+        {
             foreach (var kv in _loading)
             {
                 if (!UIPanelCatalog.TryResolve(kv.Key, kv.Value.Mode, out var bind))
@@ -576,20 +700,38 @@ namespace UIFrame
                 }
             }
 
-            _closeBuffer.Clear();
-            CollectGroup(_opened.Values, group, _closeBuffer);
-            for (var i = 0; i < _closeBuffer.Count; i++)
+            foreach (var req in _toastLoading)
             {
-                ClosePanel(_closeBuffer[i], destroy);
+                if (req.PanelType != null
+                    && UIPanelCatalog.TryResolve(req.PanelType, UIOpenMode.Toast, out var toastBind)
+                    && toastBind.Group == group)
+                {
+                    req.Cancelled = true;
+                }
             }
 
-            _closeBuffer.Clear();
-            CollectGroup(_cached.Values, group, _closeBuffer);
+            _tipsDrain.Clear();
+            _tips.DrainWhere(
+                item => item != null
+                        && UIPanelCatalog.TryResolve(item.PanelType, UIOpenMode.Toast, out var waitBind)
+                        && waitBind.Group == group,
+                _tipsDrain);
+            RejectToastWaits(_tipsDrain);
+
+            var buffer = new List<UIPanel>(16);
+            CollectGroup(_opened.Values, group, buffer);
+            for (var i = 0; i < buffer.Count; i++)
+            {
+                ClosePanel(buffer[i], destroy);
+            }
+
+            buffer.Clear();
+            CollectGroup(_cached.Values, group, buffer);
             if (destroy)
             {
-                for (var i = 0; i < _closeBuffer.Count; i++)
+                for (var i = 0; i < buffer.Count; i++)
                 {
-                    var cached = _closeBuffer[i];
+                    var cached = buffer[i];
                     if (cached == null)
                     {
                         continue;
@@ -600,38 +742,52 @@ namespace UIFrame
                 }
             }
 
-            _closeBuffer.Clear();
+            buffer.Clear();
             foreach (var kv in _toasts)
             {
-                CollectGroup(kv.Value, group, _closeBuffer);
+                CollectGroup(kv.Value, group, buffer);
             }
 
-            for (var i = 0; i < _closeBuffer.Count; i++)
+            for (var i = 0; i < buffer.Count; i++)
             {
-                ClosePanel(_closeBuffer[i], destroy: true);
+                ClosePanel(buffer[i], destroy);
             }
 
-            _closeBuffer.Clear();
+            if (destroy)
+            {
+                buffer.Clear();
+                foreach (var kv in _toastIdle)
+                {
+                    CollectGroup(kv.Value, group, buffer);
+                }
+
+                for (var i = 0; i < buffer.Count; i++)
+                {
+                    var idle = buffer[i];
+                    RemoveToastIdle(idle);
+                    DestroyPanel(idle);
+                }
+            }
         }
 
         public void ClearCache()
         {
-            _closeBuffer.Clear();
+            var buffer = new List<UIPanel>(16);
             foreach (var kv in _cached)
             {
                 if (kv.Value != null)
                 {
-                    _closeBuffer.Add(kv.Value);
+                    buffer.Add(kv.Value);
                 }
             }
 
             _cached.Clear();
-            for (var i = 0; i < _closeBuffer.Count; i++)
+            for (var i = 0; i < buffer.Count; i++)
             {
-                DestroyPanel(_closeBuffer[i]);
+                DestroyPanel(buffer[i]);
             }
 
-            _closeBuffer.Clear();
+            DestroyToastIdle();
         }
 
         public TPanel Get<TPanel>() where TPanel : UIPanel
@@ -647,28 +803,30 @@ namespace UIFrame
                 _opened.Remove(type);
             }
 
+            if (_toasts.TryGetValue(type, out var toasts) && toasts != null)
+            {
+                for (var i = toasts.Count - 1; i >= 0; i--)
+                {
+                    if (toasts[i] != null)
+                    {
+                        return toasts[i] as TPanel;
+                    }
+
+                    toasts.RemoveAt(i);
+                }
+
+                if (toasts.Count == 0)
+                {
+                    _toasts.Remove(type);
+                }
+            }
+
             return null;
         }
 
         public bool IsOpen<TPanel>() where TPanel : UIPanel
         {
-            if (Get<TPanel>() != null)
-            {
-                return true;
-            }
-
-            if (_toasts.TryGetValue(typeof(TPanel), out var list) && list != null)
-            {
-                for (var i = 0; i < list.Count; i++)
-                {
-                    if (list[i] != null)
-                    {
-                        return true;
-                    }
-                }
-            }
-
-            return false;
+            return Get<TPanel>() != null;
         }
 
         void ClosePanel(UIPanel panel, bool destroy)
@@ -685,24 +843,47 @@ namespace UIFrame
 
             if (panel.OpenMode == UIOpenMode.Toast)
             {
-                if (_toasts.TryGetValue(type, out var list))
+                CancelToastTimer(panel);
+                var wasVisible = RemoveVisibleToast(panel);
+                if (!wasVisible)
                 {
-                    list.Remove(panel);
-                    if (list.Count == 0)
+                    if (destroy)
                     {
-                        _toasts.Remove(type);
+                        RemoveToastIdle(panel);
+                        DestroyPanel(panel);
                     }
-                }
-            }
-            else
-            {
-                if (_opened.TryGetValue(type, out var opened) && opened == panel)
-                {
-                    _opened.Remove(type);
+
+                    return;
                 }
 
-                _cached.Remove(type);
+                try
+                {
+                    panel.DispatchClose();
+                }
+                catch (Exception ex)
+                {
+                    Debug.LogError($"[UIFrame] OnClose 异常 {type.Name}: {ex}");
+                }
+
+                if (destroy || !panel.CacheOnClose)
+                {
+                    DestroyPanel(panel);
+                }
+                else
+                {
+                    ReturnToastIdle(panel);
+                }
+
+                PumpToastQueue();
+                return;
             }
+
+            if (_opened.TryGetValue(type, out var opened) && opened == panel)
+            {
+                _opened.Remove(type);
+            }
+
+            _cached.Remove(type);
 
             try
             {
@@ -713,8 +894,7 @@ namespace UIFrame
                 Debug.LogError($"[UIFrame] OnClose 异常 {type.Name}: {ex}");
             }
 
-            // Toast 一次性；其余默认 SetActive(false) 进缓存，Handle 不 Release。
-            if (destroy || panel.OpenMode == UIOpenMode.Toast || !panel.CacheOnClose)
+            if (destroy || !panel.CacheOnClose)
             {
                 DestroyPanel(panel);
             }
@@ -734,6 +914,366 @@ namespace UIFrame
             }
 
             RefreshMask();
+        }
+
+        void PumpToastQueue()
+        {
+            if (!_inited || _toastPumping || _toastSuppressPump > 0)
+            {
+                return;
+            }
+
+            _toastPumping = true;
+            try
+            {
+                while (_tips.HasFreeSlot(CountVisibleToasts()) && _tips.TryDequeue(out var item))
+                {
+                    DispatchQueuedToast(item).Forget();
+                }
+            }
+            finally
+            {
+                _toastPumping = false;
+            }
+        }
+
+        async UniTaskVoid DispatchQueuedToast(TipsWaitItem item)
+        {
+            UIPanel panel = null;
+            try
+            {
+                panel = await ShowToast(item.PanelType, item.Args, item.Duration);
+            }
+            catch (Exception ex)
+            {
+                Debug.LogError($"[UIFrame] 队列 Toast 打开失败: {ex}");
+            }
+            finally
+            {
+                item.Completion.TrySetResult(panel);
+                PumpToastQueue();
+            }
+        }
+
+        int CountVisibleToasts()
+        {
+            var count = 0;
+            foreach (var list in _toasts.Values)
+            {
+                if (list == null)
+                {
+                    continue;
+                }
+
+                for (var i = 0; i < list.Count; i++)
+                {
+                    if (list[i] != null)
+                    {
+                        count++;
+                    }
+                }
+            }
+
+            return count;
+        }
+
+        void AddVisibleToast(UIPanel panel)
+        {
+            var type = panel.PanelType;
+            if (!_toasts.TryGetValue(type, out var list))
+            {
+                list = new List<UIPanel>();
+                _toasts[type] = list;
+            }
+
+            list.Add(panel);
+        }
+
+        bool RemoveVisibleToast(UIPanel panel)
+        {
+            var type = panel.PanelType;
+            if (!_toasts.TryGetValue(type, out var list))
+            {
+                return false;
+            }
+
+            var removed = list.Remove(panel);
+            if (list.Count == 0)
+            {
+                _toasts.Remove(type);
+            }
+
+            return removed;
+        }
+
+        bool IsVisibleToast(UIPanel panel)
+        {
+            return panel != null
+                   && _toasts.TryGetValue(panel.PanelType, out var list)
+                   && list != null
+                   && list.Contains(panel);
+        }
+
+        UIPanel TakeToastIdle(Type type, UIPanelBind bind)
+        {
+            if (!_toastIdle.TryGetValue(type, out var list) || list.Count == 0)
+            {
+                return null;
+            }
+
+            for (var i = list.Count - 1; i >= 0; i--)
+            {
+                var panel = list[i];
+                list.RemoveAt(i);
+                if (panel == null)
+                {
+                    continue;
+                }
+
+                if (!string.Equals(panel.Location, bind.Location, StringComparison.Ordinal))
+                {
+                    DestroyPanel(panel);
+                    continue;
+                }
+
+                ApplyBind(panel, bind);
+                if (list.Count == 0)
+                {
+                    _toastIdle.Remove(type);
+                }
+
+                return panel;
+            }
+
+            if (list.Count == 0)
+            {
+                _toastIdle.Remove(type);
+            }
+
+            return null;
+        }
+
+        bool IsToastIdle(UIPanel panel)
+        {
+            return panel != null
+                   && _toastIdle.TryGetValue(panel.PanelType, out var list)
+                   && list != null
+                   && list.Contains(panel);
+        }
+
+        void ReleaseToastAfterFailure(UIPanel panel)
+        {
+            if (panel == null)
+            {
+                return;
+            }
+
+            if (IsVisibleToast(panel))
+            {
+                ClosePanel(panel, destroy: true);
+                return;
+            }
+
+            if (!IsToastIdle(panel))
+            {
+                DestroyPanel(panel);
+            }
+        }
+
+        void ReturnToastIdle(UIPanel panel)
+        {
+            if (panel == null)
+            {
+                return;
+            }
+
+            var cap = _tips.Settings.MaxVisible;
+            if (cap <= 0)
+            {
+                DestroyPanel(panel);
+                return;
+            }
+
+            var type = panel.PanelType;
+            if (!_toastIdle.TryGetValue(type, out var list))
+            {
+                list = new List<UIPanel>();
+                _toastIdle[type] = list;
+            }
+
+            while (list.Count >= cap)
+            {
+                var oldest = list[0];
+                list.RemoveAt(0);
+                DestroyPanel(oldest);
+            }
+
+            panel.gameObject.SetActive(false);
+            list.Add(panel);
+        }
+
+        void RemoveToastIdle(UIPanel panel)
+        {
+            if (panel == null)
+            {
+                return;
+            }
+
+            if (!_toastIdle.TryGetValue(panel.PanelType, out var list))
+            {
+                return;
+            }
+
+            list.Remove(panel);
+            if (list.Count == 0)
+            {
+                _toastIdle.Remove(panel.PanelType);
+            }
+        }
+
+        void DestroyToastIdle(Type type = null)
+        {
+            if (type != null)
+            {
+                if (!_toastIdle.TryGetValue(type, out var list))
+                {
+                    return;
+                }
+
+                DestroyToastIdleList(list);
+                _toastIdle.Remove(type);
+                return;
+            }
+
+            foreach (var list in _toastIdle.Values)
+            {
+                DestroyToastIdleList(list);
+            }
+
+            _toastIdle.Clear();
+        }
+
+        void DestroyToastIdleList(List<UIPanel> list)
+        {
+            if (list == null)
+            {
+                return;
+            }
+
+            for (var i = 0; i < list.Count; i++)
+            {
+                DestroyPanel(list[i]);
+            }
+
+            list.Clear();
+        }
+
+        void TrimToastIdle()
+        {
+            var cap = _tips.Settings.MaxVisible;
+            var extra = new List<UIPanel>(4);
+            foreach (var kv in _toastIdle)
+            {
+                var list = kv.Value;
+                if (list == null)
+                {
+                    continue;
+                }
+
+                while (list.Count > cap)
+                {
+                    var last = list[list.Count - 1];
+                    list.RemoveAt(list.Count - 1);
+                    extra.Add(last);
+                }
+            }
+
+            for (var i = 0; i < extra.Count; i++)
+            {
+                DestroyPanel(extra[i]);
+            }
+        }
+
+        void StartToastTimer(UIPanel panel, float duration)
+        {
+            CancelToastTimer(panel);
+            var cts = new CancellationTokenSource();
+            _toastTimers[panel] = cts;
+            RunToastTimer(panel, duration, cts.Token).Forget();
+        }
+
+        async UniTaskVoid RunToastTimer(UIPanel panel, float duration, CancellationToken token)
+        {
+            var cancelled = await UniTask.Delay(
+                TimeSpan.FromSeconds(duration),
+                DelayType.UnscaledDeltaTime,
+                PlayerLoopTiming.Update,
+                token).SuppressCancellationThrow();
+            if (cancelled || !_inited)
+            {
+                return;
+            }
+
+            ClosePanel(panel, destroy: false);
+        }
+
+        void CancelToastTimer(UIPanel panel)
+        {
+            if (panel == null || !_toastTimers.TryGetValue(panel, out var cts))
+            {
+                return;
+            }
+
+            _toastTimers.Remove(panel);
+            cts.Cancel();
+            cts.Dispose();
+        }
+
+        void CancelAllToastTimers()
+        {
+            foreach (var cts in _toastTimers.Values)
+            {
+                cts.Cancel();
+                cts.Dispose();
+            }
+
+            _toastTimers.Clear();
+        }
+
+        void CancelToastLoads(Type panelType)
+        {
+            if (panelType == null)
+            {
+                return;
+            }
+
+            foreach (var req in _toastLoading)
+            {
+                if (req.PanelType == panelType)
+                {
+                    req.Cancelled = true;
+                }
+            }
+        }
+
+        static void RejectToastWait(TipsWaitItem item)
+        {
+            item?.Completion.TrySetResult(null);
+        }
+
+        static void RejectToastWaits(List<TipsWaitItem> items)
+        {
+            if (items == null)
+            {
+                return;
+            }
+
+            for (var i = 0; i < items.Count; i++)
+            {
+                RejectToastWait(items[i]);
+            }
+
+            items.Clear();
         }
 
         void CloseAllPopups(bool destroy)

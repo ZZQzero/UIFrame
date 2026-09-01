@@ -2,6 +2,27 @@
 
 All notable changes to this package will be documented in this file.
 
+## [1.5.0] - 2026-09-01
+
+### Added
+
+- Added Tips toast policy: `UI.ConfigureTips(maxVisible, maxQueued, defaultDuration)` and `UI.Toast<T>(args, duration?)`.
+- Visible toasts share one Tips-layer cap; overflow waits in a queue and loads only when a slot opens.
+- A full queue drops the oldest waiting item. `duration <= 0` stays until CloseSelf / Close.
+- Closed toasts go into a per-type idle list (same size as maxVisible) and reuse OnOpen without a second OnCreate.
+
+### Changed
+
+- Toast close no longer always Destroy; Shutdown, ClearCache, and explicit destroy still release instances and handles.
+- Toast respects `Register(..., cache: false)` and idle overflow now evicts the oldest idle instance.
+
+### Fixed
+
+- Illegal `defaultDuration` (NaN / Infinity) falls back to 2 seconds instead of throwing in the auto-close timer.
+- Close/CloseGroup copy panels into a local list so `OnClose` cannot wipe the list being iterated.
+- Toast open failures after `OnOpen` no longer skip `OnClose` or destroy an instance already returned to idle.
+- `maxVisible == 0` rejects new toasts immediately and cancels items already waiting in the queue.
+
 ## [1.4.0] - 2026-09-01
 
 ### Added

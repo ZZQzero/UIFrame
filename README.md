@@ -111,6 +111,25 @@ Editor 可用 Device Simulator，或 `ScreenSafeArea.SetOverride(rect)` 模拟�
 
 `ScreenSafeArea.Current` 只读缓存。Root 在转屏、Canvas 尺寸变化、重新获得焦点时 `Refresh`，并再连刷两帧以等待 `safeArea` 晚到。
 
+## Tips / Toast
+
+`UI.Toast<TPanel>` 仍是 Tips 层上的 `UIPanel`，同类型可以同时有多份。时长、并发上限和等待队列在 `UIManager` 里，动画和排版做在面板 Prefab（Tips 根上也可以自己挂 LayoutGroup）。
+
+```csharp
+UI.ConfigureTips(maxVisible: 3, maxQueued: 8, defaultDuration: 2f);
+await UI.Toast<HintToast, string>("保存成功");
+await UI.Toast<HintToast, string>("保存成功", duration: 1.5f);
+await UI.Toast<StickyToast>(duration: 0f); // 常驻，点关闭或 CloseSelf
+```
+
+可见满了只把 `{type, args, duration}` 入队，**出队后才加载**。有人关掉（到时或手动）再开下一条。队列满丢掉最旧等待项。`duration` 为空用默认秒数，`<= 0` 表示不自动关。
+
+关掉后实例按类型进闲置列表（容量和 `maxVisible` 同级），再开同一类型会 `ApplyArgs` + `OnOpen`，`OnCreate` 只第一次。位移动画请在 `OnOpen` 开头自己复位。`Register(..., cache: false)` 时关闭会 Destroy。`maxVisible` 为 0 时新的 `Toast` 立即返回 `null`，已在排队的等待也会被取消。
+
+句柄仍归 `UILoader`，不要把 `UIPanel` 放进 `GameObjectPoolService`。世界坐标飘字（伤害数字）用 `UIItem` + 对象池，不是 Toast。
+
+`Get<TPanel>()` 对 Toast 返回该类型当前最上面一条；`Close<TPanel>()` 关掉该类型所有可见 Toast，并取消仍在排队的同类型请求。
+
 ## 循环列表
 
 列表面板继承 `UILoopScrollBase<TArgs>` 或 `UILoopScrollMultiBase<TArgs>`，只实现 `ProvideData`。Inspector 填 Cell 的 YooAsset location，打开前注入对象池并异步准备：
@@ -144,7 +163,7 @@ Cell 由 `LoopScrollPoolSource` 同步 `TrySpawn` / `DespawnImmediate`。不要�
 
 ## 目录
 
-- `Runtime/Core`：面板 API、生命周期、栈与缓存、循环列表基类
+- `Runtime/Core`：面板 API、生命周期、栈与缓存、Tips Toast 策略、循环列表基类
 - `Runtime/Pooling`：托管对象池与 GameObjectPoolService
 - `Runtime/LoopScroll`：循环列表组件
 - `Runtime/Load`：YooAsset 异步加载

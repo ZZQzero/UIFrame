@@ -1,3 +1,4 @@
+using System;
 using Cysharp.Threading.Tasks;
 
 namespace UIFrame
@@ -5,6 +6,7 @@ namespace UIFrame
     class UILoadRequest
     {
         public bool Cancelled;
+        public Type PanelType;
     }
 
     /// <summary>加载队列项。object 只活在队列里，不会写到面板字段。</summary>
