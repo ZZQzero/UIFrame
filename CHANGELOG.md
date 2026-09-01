@@ -2,6 +2,22 @@
 
 All notable changes to this package will be documented in this file.
 
+## [1.3.0] - 2026-09-01
+
+### Added
+
+- Added ScreenSafeArea cache, Editor override, and SafeAreaFitter that maps anchors from canvas.pixelRect.
+- Mask/Guide layers stay full-bleed.
+
+### Changed
+
+- ScreenSafeArea.Current is cache-only; UIFrameRoot refreshes on orientation, canvas resize, and focus, then for two more frames.
+- SafeAreaFitter ignores self-triggered RectTransform callbacks and keeps DrivenRectTransformTracker for the enable lifetime.
+
+### Removed
+
+- Unused ScreenSafeArea.Top, Cutouts, and PixelsToOrthoWorld.
+
 ## [1.2.0] - 2026-08-26
 
 ### Added

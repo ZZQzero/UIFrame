@@ -37,6 +37,7 @@ namespace UIFrame
         Camera _uiCamera;
         Camera _baseCamera;
         int _uiLayer = -1;
+        int _safeAreaBurst;
 
         public event Action MaskClicked;
 
@@ -147,6 +148,8 @@ namespace UIFrame
             canvasGo.AddComponent<GraphicRaycaster>();
 
             _canvasRoot = (RectTransform)canvasGo.transform;
+            var listener = canvasGo.AddComponent<SafeAreaCanvasListener>();
+            listener.Bind(this);
             UIRect.Stretch(_canvasRoot);
         }
 
@@ -202,13 +205,8 @@ namespace UIFrame
         void BindOrientation()
         {
             ScreenOrientationManager.Initialize();
-            ScreenOrientationManager.CanvasLayoutChanged += OnOrientationChanged;
+            ScreenOrientationManager.CanvasLayoutChanged += ApplyOrientation;
             ApplyOrientation(ScreenOrientationManager.Current);
-        }
-
-        void OnOrientationChanged(GameScreenOrientation orientation)
-        {
-            ApplyOrientation(orientation);
         }
 
         void ApplyOrientation(GameScreenOrientation orientation)
@@ -220,6 +218,32 @@ namespace UIFrame
 
             var landscape = ScreenOrientationManager.GetCanvasLayout(orientation) == GameUICanvasLayout.Landscape;
             _rootScaler.referenceResolution = landscape ? LandscapeReference : PortraitReference;
+            RequestSafeAreaBurst();
+        }
+
+        void LateUpdate()
+        {
+            if (_safeAreaBurst <= 0)
+            {
+                return;
+            }
+
+            _safeAreaBurst--;
+            ScreenSafeArea.Refresh();
+        }
+
+        void OnApplicationFocus(bool hasFocus)
+        {
+            if (hasFocus)
+            {
+                RequestSafeAreaBurst();
+            }
+        }
+
+        void RequestSafeAreaBurst()
+        {
+            ScreenSafeArea.Refresh();
+            _safeAreaBurst = 2;
         }
 
         void OnMaskClicked()
@@ -314,13 +338,32 @@ namespace UIFrame
 
         void OnDestroy()
         {
-            ScreenOrientationManager.CanvasLayoutChanged -= OnOrientationChanged;
+            _safeAreaBurst = 0;
+            ScreenOrientationManager.CanvasLayoutChanged -= ApplyOrientation;
             DetachFromBaseCamera();
 
             if (_whiteSprite != null)
             {
                 Destroy(_whiteSprite);
                 _whiteSprite = null;
+            }
+        }
+
+        sealed class SafeAreaCanvasListener : MonoBehaviour
+        {
+            UIFrameRoot _host;
+
+            public void Bind(UIFrameRoot host)
+            {
+                _host = host;
+            }
+
+            void OnRectTransformDimensionsChange()
+            {
+                if (_host != null)
+                {
+                    _host.RequestSafeAreaBurst();
+                }
             }
         }
     }

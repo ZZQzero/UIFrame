@@ -122,6 +122,7 @@ namespace UIFrame
 
             _loader = null;
             ScreenOrientationManager.Shutdown();
+            ScreenSafeArea.Shutdown();
             Debug.Log("[UIFrame] Shutdown 完成");
         }
 

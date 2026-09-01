@@ -1,9 +1,9 @@
 {
   "name": "com.zzq.uiframe",
   "displayName": "UIFrame",
-  "version": "1.2.0",
+  "version": "1.3.0",
   "unity": "6000.0",
-  "description": "A lightweight URP UI framework with panel lifecycle management, YooAsset loading, Camera Stack support, screen orientation, and editor code generation.",
+  "description": "A lightweight URP UI framework with panel lifecycle management, YooAsset loading, Camera Stack support, screen orientation, safe area, and editor code generation.",
   "keywords": [
     "ui",
     "ugui",

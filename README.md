@@ -1,6 +1,6 @@
 # UIFrame
 
-基于 URP、UGUI、YooAsset 和 UniTask 的轻量 Unity UI 框架，提供面板生命周期、层级栈、缓存、异步加载、URP Camera Stack、屏幕方向管理和编辑器绑定代码生成。
+基于 URP、UGUI、YooAsset 和 UniTask 的轻量 Unity UI 框架，提供面板生命周期、层级栈、缓存、异步加载、URP Camera Stack、屏幕方向管理、SafeArea 和编辑器绑定代码生成。
 
 ## 环境要求
 
@@ -98,12 +98,25 @@ UI.ConfigureURPCameraStack(baseCamera, existingUICamera);
 UI.DisableURPCameraStack();
 ```
 
+## SafeArea
+
+层和面板根保持铺满；把 `SafeAreaFitter` 挂在**内容节点**上（顶栏、按钮、列表），不要挂在 Layer、全屏背景或 Mask/Guide 上。
+
+```csharp
+// 原生壳已把 Unity 视图放在顶底栏之间时，关掉 Top/Bottom，避免扣两次
+fitter.SetPads(left: true, right: true, bottom: false, top: false);
+```
+
+Editor 可用 Device Simulator，或 `ScreenSafeArea.SetOverride(rect)` 模拟。只认 Unity 窗口里的 `Screen.safeArea`，不要用原生 dp/pt 再对一套。
+
+`ScreenSafeArea.Current` 只读缓存。Root 在转屏、Canvas 尺寸变化、重新获得焦点时 `Refresh`，并再连刷两帧以等待 `safeArea` 晚到。
+
 ## 目录
 
 - `Runtime/Core`：面板 API、生命周期、栈与缓存
 - `Runtime/Load`：YooAsset 异步加载
 - `Runtime/Root`：运行时 Canvas 与 UI 层
-- `Runtime/Screen`：屏幕方向和 Canvas 布局同步
+- `Runtime/Screen`：屏幕方向、Canvas 布局同步、SafeArea
 - `Editor`：面板脚本与绑定代码生成工具
 
 ## License
