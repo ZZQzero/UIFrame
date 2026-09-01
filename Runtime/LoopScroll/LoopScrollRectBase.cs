@@ -720,16 +720,20 @@ namespace UnityEngine.UI
 
         public void ClearCells()
         {
-            if (Application.isPlaying)
+            itemTypeStart = 0;
+            itemTypeEnd = 0;
+            itemTypeSize = 0;
+            totalCount = 0;
+            deletedItemTypeStart = 0;
+            deletedItemTypeEnd = 0;
+            if (prefabSource == null || m_Content == null)
             {
-                itemTypeStart = 0;
-                itemTypeEnd = 0;
-                itemTypeSize = 0;
-                totalCount = 0;
-                for (int i = m_Content.childCount - 1; i >= 0; i--)
-                {
-                    prefabSource.ReturnObject(m_Content.GetChild(i));
-                }
+                return;
+            }
+
+            for (int i = m_Content.childCount - 1; i >= 0; i--)
+            {
+                prefabSource.ReturnObject(m_Content.GetChild(i));
             }
         }
 

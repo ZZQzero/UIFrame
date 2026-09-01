@@ -1,4 +1,9 @@
-﻿using UnityEngine;
+using System;
+using System.Collections.Generic;
+using System.Threading;
+using Cysharp.Threading.Tasks;
+using Game.Pooling;
+using UnityEngine;
 using UnityEngine.UI;
 
 namespace UIFrame
@@ -6,13 +11,40 @@ namespace UIFrame
     [DisallowMultipleComponent]
     public abstract class UILoopScrollMultiBase<TArgs> :
         UIPanel<TArgs>,
-        LoopScrollPrefabSource,
         LoopScrollMultiDataSource
     {
         [SerializeField]
         LoopScrollRectMulti _scrollRect;
 
+        readonly LoopScrollPoolSource _poolSource = new();
+
         protected LoopScrollRectMulti ScrollRect => _scrollRect;
+
+        protected LoopScrollPoolSource PoolSource => _poolSource;
+
+        protected GameObjectPoolService Pool => _poolSource.Pool;
+
+        public void SetPool(GameObjectPoolService pool)
+        {
+            _poolSource.SetPool(pool);
+        }
+
+        public UniTask PrepareCellsAsync(
+            IReadOnlyList<string> locations,
+            GameObjectPoolOptions options = null,
+            CancellationToken cancellationToken = default)
+        {
+            return _poolSource.PrepareLocationsAsync(locations, options, cancellationToken);
+        }
+
+        public UniTask PrewarmCellsAsync(
+            IReadOnlyList<string> locations,
+            int count,
+            GameObjectPoolOptions options = null,
+            CancellationToken cancellationToken = default)
+        {
+            return _poolSource.PrewarmLocationsAsync(locations, count, options, cancellationToken);
+        }
 
         protected sealed override void OnCreate()
         {
@@ -22,9 +54,14 @@ namespace UIFrame
                 return;
             }
 
-            _scrollRect.prefabSource = this;
+            _poolSource.Bind(_scrollRect, GetCellLocation);
             _scrollRect.dataSource = this;
             OnLoopScrollCreated();
+        }
+
+        protected override void OnDisabled()
+        {
+            LoopScrollPoolSource.Clear(_scrollRect);
         }
 
         /// <summary>循环列表创建完成，可在这里绑定其他事件。</summary>
@@ -32,11 +69,8 @@ namespace UIFrame
         {
         }
 
-        /// <summary>根据索引获取对应类型的单元格。</summary>
-        public abstract GameObject GetObject(int index);
-
-        /// <summary>回收单元格。</summary>
-        public abstract void ReturnObject(Transform item);
+        /// <summary>根据索引返回对应类型的 Cell location。</summary>
+        protected abstract string GetCellLocation(int index);
 
         /// <summary>刷新指定索引的单元格数据。</summary>
         public abstract void ProvideData(Transform item, int index);

@@ -2,6 +2,25 @@
 
 All notable changes to this package will be documented in this file.
 
+## [1.4.0] - 2026-09-01
+
+### Added
+
+- Added LoopScrollPoolSource so loop-scroll cells use GameObjectPoolService TrySpawn / DespawnImmediate.
+- UILoopScrollBase and UILoopScrollMultiBase now provide the default prefab source; panels only implement ProvideData.
+- UILoopScrollMultiBase.PrewarmCellsAsync prepares each cell location.
+
+### Changed
+
+- Loop-scroll panels return cells when the GameObject is disabled, which follows both cache-close and destroy.
+- OnCreate is sealed; override OnLoopScrollCreated. OnClose / OnDestroyPanel stay overridable.
+- PrepareCellsAsync / PrewarmCellsAsync use GetCellLocation(0), not only the serialized field.
+- UIPanel routes Unity OnDisable / OnDestroy through OnDisabled / OnDestroyed so generic subclasses receive them.
+
+### Fixed
+
+- ClearCells now resets temp-pool counters so a cached list can RefillCells after close.
+
 ## [1.3.0] - 2026-09-01
 
 ### Added

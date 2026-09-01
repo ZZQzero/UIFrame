@@ -138,30 +138,30 @@ pool.TryRemoveGroup(PoolGroup.UI, force: true);
 UIFrame 的 `UILoader` 已经负责 `UIPanel` 的 YooAsset 句柄，`UIManager` 也会在
 面板关闭时缓存实例。不要再将 `UIPanel` 放入本对象池，否则会产生双重所有权。
 
-循环列表必须采用“异步准备、同步获取、同步归还”：
+循环列表必须采用“异步准备、同步获取、同步归还”。默认源是 `LoopScrollPoolSource`，
+由 `UILoopScrollBase` / `UILoopScrollMultiBase` 在 `OnCreate` 里接到 `LoopScrollRect`。
+列表面板只实现 `ProvideData`（多 Prefab 再实现 `GetCellLocation`），不要自己写
+`GetObject` / `ReturnObject`。
 
 ```csharp
-// 打开列表前
-await pool.PrepareAsync("PlayerItem", options, destroyCancellationToken);
-// 或按历史 PeakActive 进行 PrewarmAsync。
+SetPool(pool);
+await PrepareCellsAsync(options, destroyCancellationToken);
+// 或按历史 PeakActive 进行 PrewarmCellsAsync。
 
-// LoopScrollPrefabSource.GetObject
-Transform GetObject(int index)
-{
-    return pool.SpawnLoaded("PlayerItem", contentRoot).transform;
-}
-
-// LoopScrollPrefabSource.ReturnObject
-void ReturnObject(Transform item)
-{
-    pool.DespawnImmediate(item.gameObject);
-}
+ScrollRect.totalCount = items.Count;
+ScrollRect.RefillCells();
 ```
 
-`TrySpawn` 适合调用方可处理 `false` 的同步路径；`SpawnLoaded` 在分桶未准备或组件
-缺失时抛出明确异常。池空时两者都会基于已加载 Handle 同步扩容，因此快速滑动
-不会返回空，但应依据 `PrefabPoolStats.PeakActive` 调整下次预热，降低滚动卡顿。
-列表数据必须在每次展示时重新绑定，不能依赖首次创建状态。
+`GetObject` 内部走 `TrySpawn`：分桶已准备则同步取出或扩容；尚未 Prepare 时抛出
+明确异常，避免 LoopScroll 对空引用取 `transform`。单 Prefab 的 `PrepareCellsAsync` /
+`PrewarmCellsAsync` 使用 `GetCellLocation(0)`。`ReturnObject` 走
+`DespawnImmediate`。面板隐藏或销毁时 Unity 会 `OnDisable`，基类在这里 `ClearCells`
+把 Cell 还回池，并清掉 LoopScroll 的 temp pool 计数，因此缓存后再 `RefillCells`
+不会对空 Content 取子节点。
+`SpawnLoaded` 仍可用于其它必须立即拿到实例的同步路径。池空时两者都会基于已加载
+Handle 同步扩容，因此快速滑动不会返回空，但应依据 `PrefabPoolStats.PeakActive`
+调整下次预热，降低滚动卡顿。列表数据必须在每次展示时重新绑定，不能依赖首次
+创建状态。
 
 ## 性能检查
 

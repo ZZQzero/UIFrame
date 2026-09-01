@@ -111,9 +111,42 @@ Editor 可用 Device Simulator，或 `ScreenSafeArea.SetOverride(rect)` 模拟�
 
 `ScreenSafeArea.Current` 只读缓存。Root 在转屏、Canvas 尺寸变化、重新获得焦点时 `Refresh`，并再连刷两帧以等待 `safeArea` 晚到。
 
+## 循环列表
+
+列表面板继承 `UILoopScrollBase<TArgs>` 或 `UILoopScrollMultiBase<TArgs>`，只实现 `ProvideData`。Inspector 填 Cell 的 YooAsset location，打开前注入对象池并异步准备：
+
+```csharp
+public sealed class PlayerListPanel : UILoopScrollBase<UINone>
+{
+    protected override void OnOpen(UINone args)
+    {
+        BindAsync().Forget();
+    }
+
+    async UniTaskVoid BindAsync()
+    {
+        SetPool(gamePool);
+        await PrepareCellsAsync(
+            new GameObjectPoolOptions(group: PoolGroup.UI),
+            destroyCancellationToken);
+        ScrollRect.totalCount = players.Count;
+        ScrollRect.RefillCells();
+    }
+
+    public override void ProvideData(Transform item, int index)
+    {
+        item.GetComponent<PlayerItem>().Bind(players[index]);
+    }
+}
+```
+
+Cell 由 `LoopScrollPoolSource` 同步 `TrySpawn` / `DespawnImmediate`。不要把 `UIPanel` 放进这个池。多 Prefab 列表实现 `GetCellLocation(int index)`，并 `PrepareCellsAsync` 传入所有 location。
+
 ## 目录
 
-- `Runtime/Core`：面板 API、生命周期、栈与缓存
+- `Runtime/Core`：面板 API、生命周期、栈与缓存、循环列表基类
+- `Runtime/Pooling`：托管对象池与 GameObjectPoolService
+- `Runtime/LoopScroll`：循环列表组件
 - `Runtime/Load`：YooAsset 异步加载
 - `Runtime/Root`：运行时 Canvas 与 UI 层
 - `Runtime/Screen`：屏幕方向、Canvas 布局同步、SafeArea
