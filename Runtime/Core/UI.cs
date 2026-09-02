@@ -18,7 +18,12 @@ namespace UIFrame
         /// <summary>创建 Root。若 YooAsset 已初始化且只有一个包，会自动绑定。</summary>
         public static void Init()
         {
-            EnsureInit();
+            if (!EnsureInit())
+            {
+                return;
+            }
+
+            _manager.TryBindPackage();
         }
 
         /// <summary>创建 Root 并绑定指定 YooAsset 包。</summary>
@@ -94,17 +99,27 @@ namespace UIFrame
         /// </summary>
         public static void Shutdown()
         {
+            ShutdownInternal(destroyRoot: true);
+        }
+
+        internal static void NotifyRootDestroyed()
+        {
+            ShutdownInternal(destroyRoot: false);
+        }
+
+        static void ShutdownInternal(bool destroyRoot)
+        {
             if (_shuttingDown || _manager == null)
             {
                 return;
             }
 
-            var manager = _manager;
-            _manager = null;
             _shuttingDown = true;
             try
             {
-                manager.Shutdown();
+                var manager = _manager;
+                _manager = null;
+                manager.Shutdown(destroyRoot);
             }
             finally
             {

@@ -39,14 +39,13 @@ namespace UIFrame
             }
 
             _loader = new UILoader();
-            TryBindPackage();
             _root = UIFrameRoot.Create();
             _root.MaskClicked += OnMaskClicked;
             _inited = true;
             Debug.Log("[UIFrame] Init 完成");
         }
 
-        public void Shutdown()
+        public void Shutdown(bool destroyRoot = true)
         {
             if (!_inited)
             {
@@ -127,8 +126,12 @@ namespace UIFrame
             if (_root != null)
             {
                 _root.MaskClicked -= OnMaskClicked;
-                UnityEngine.Object.Destroy(_root.gameObject);
+                var root = _root;
                 _root = null;
+                if (destroyRoot && root != null)
+                {
+                    UnityEngine.Object.Destroy(root.gameObject);
+                }
             }
 
             _loader = null;
@@ -177,7 +180,7 @@ namespace UIFrame
         {
             if (_root == null)
             {
-                Debug.LogWarning("[UIFrame] 尚未 Init，无法配置 URP Camera Stack。");
+                Debug.LogWarning("[UIFrame] UIFrameRoot 未就绪，无法配置 URP Camera Stack。");
                 return null;
             }
 
@@ -192,7 +195,7 @@ namespace UIFrame
             }
         }
 
-        void TryBindPackage()
+        internal void TryBindPackage()
         {
             try
             {
