@@ -56,6 +56,8 @@ namespace Game.Pooling
 
         public int PoolCount => buckets.Count;
 
+        public bool IsDisposed => disposed;
+
         public async UniTask PrepareAsync(
             string location,
             GameObjectPoolOptions options = null,
@@ -799,7 +801,7 @@ namespace Game.Pooling
 
         internal void NotifyInstanceDestroyed(PooledInstanceMarker marker)
         {
-            if (marker == null || marker.State == PooledInstanceState.Destroyed)
+            if (disposed || marker == null || marker.State == PooledInstanceState.Destroyed)
             {
                 return;
             }

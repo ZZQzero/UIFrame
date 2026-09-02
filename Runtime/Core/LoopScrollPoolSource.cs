@@ -138,7 +138,21 @@ namespace UIFrame
                 return;
             }
 
-            if (_pool == null || !_pool.DespawnImmediate(trans.gameObject))
+            if (_pool == null)
+            {
+                Debug.LogError(
+                    $"[UIFrame] Failed to despawn LoopScroll cell '{trans.name}'. " +
+                    "Call SetPool and return only active pooled instances.",
+                    trans);
+                return;
+            }
+
+            if (_pool.IsDisposed)
+            {
+                return;
+            }
+
+            if (!_pool.DespawnImmediate(trans.gameObject))
             {
                 Debug.LogError(
                     $"[UIFrame] Failed to despawn LoopScroll cell '{trans.name}'. " +
