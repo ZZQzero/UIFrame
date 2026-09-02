@@ -255,6 +255,7 @@ namespace UIFrame
 
             if (_loading.TryGetValue(type, out var inflight))
             {
+                // 同 Type 合并为一次加载：后一次 Args/Mode 生效，并撤销已取消。
                 inflight.Cancelled = false;
                 inflight.Args = args;
                 inflight.Mode = mode;

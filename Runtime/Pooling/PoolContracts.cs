@@ -60,11 +60,7 @@ namespace Game.Pooling
 
             InitialCapacity = initialCapacity;
             MaxSize = maxSize;
-#if UNITY_EDITOR || DEVELOPMENT_BUILD
-            CollectionCheck = collectionCheck;
-#else
-            CollectionCheck = false;
-#endif
+            CollectionCheck = collectionCheck && UIFrame.UIFrameSafety.CollectionChecks;
         }
 
         public static ManagedPoolOptions Default { get; } = new();

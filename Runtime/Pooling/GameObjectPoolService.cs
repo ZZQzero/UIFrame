@@ -757,13 +757,16 @@ namespace Game.Pooling
 
         private void EnsureOwnerThread()
         {
-#if UNITY_EDITOR || DEVELOPMENT_BUILD
+            if (!UIFrame.UIFrameSafety.ThreadChecks)
+            {
+                return;
+            }
+
             if (Thread.CurrentThread.ManagedThreadId != ownerThreadId)
             {
                 throw new InvalidOperationException(
                     "GameObjectPoolService can only be used from its owner Unity thread.");
             }
-#endif
         }
 
         private static void DestroyGameObject(GameObject instance)

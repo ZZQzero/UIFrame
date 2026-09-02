@@ -130,6 +130,11 @@ pool.TryRemoveGroup(PoolGroup.UI, force: true);
 `IPrefabProvider` 可以在后台线程完成加载；服务会在创建分桶或操作 Unity 对象前
 切回主线程。
 
+主线程检查和托管池 `CollectionCheck` 由 `UIFrameSafety` 控制。默认 Editor /
+Development 打开，Release 关闭。要在正式包里打开检查，在创建池、调用红点之前
+设置 `UIFrameSafety.ThreadChecks` / `CollectionChecks`。已经建好的池不会因为
+之后改开关而改变行为。
+
 如果未传入 `poolRoot`，服务会创建 `[GameObjectPool]` 根节点，并在释放服务时
 销毁。跨场景使用时，应由调用方提供自己的常驻根节点并管理其生命周期。
 

@@ -1,6 +1,5 @@
 using System;
 using System.Collections.Generic;
-using System.Diagnostics;
 using System.Threading;
 using UnityEngine;
 
@@ -433,10 +432,13 @@ namespace UIFrame
             }
         }
 
-        [Conditional("UNITY_EDITOR")]
-        [Conditional("DEVELOPMENT_BUILD")]
         private static void EnsureMainThread()
         {
+            if (!UIFrameSafety.ThreadChecks)
+            {
+                return;
+            }
+
             int currentThreadId = Thread.CurrentThread.ManagedThreadId;
             if (mainThreadId == 0)
             {

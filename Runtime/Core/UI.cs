@@ -141,6 +141,9 @@ namespace UIFrame
             return Open<TPanel, UINone>(UIOpenMode.Push, UINone.Value);
         }
 
+        /// <summary>
+        /// 打开窗口。同一类型若正在加载，后一次 Args/Mode 覆盖前一次，两次 await 拿到同一块面板。
+        /// </summary>
         public static UniTask<TPanel> Push<TPanel, TArgs>(TArgs args) where TPanel : UIPanel<TArgs>
         {
             return Open<TPanel, TArgs>(UIOpenMode.Push, args);

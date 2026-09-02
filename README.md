@@ -71,6 +71,10 @@ public static class UIStartup
 UI.Shutdown();
 ```
 
+Hud / Push / Popup 按面板 **Type** 去重。同一类型正在加载时再次 Open，不会发起第二次加载，而是合并进这次请求：后一次的 `Args` 和 `Mode` 覆盖前一次，并把已取消扳回未取消。两次 `await` 拿到同一块面板，参数以最后一次为准。已经打开的同类型会走已有实例（`ApplyArgs`），不会再加载。Toast 是多实例通道，不走这条合并规则。
+
+主线程检查和托管池重复归还检查由 `UIFrameSafety` 控制。默认 Editor / Development 打开，Release 关闭。QA 要在正式包里抓线程错误时，在 `Init`、建池、调用红点之前设 `UIFrameSafety.ThreadChecks = true`。`CollectionChecks` 只作用于之后新建的托管池。
+
 ## URP Camera Stack
 
 `UI.Init()` 后 Canvas 默认为 `Screen Space Camera`，并绑定常驻 UI Camera；同时开启 `Vertex Color Always In Gamma Color Space`。

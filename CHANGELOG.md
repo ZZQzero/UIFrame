@@ -10,11 +10,14 @@ All notable changes to this package will be documented in this file.
 - Visible toasts share one Tips-layer cap; overflow waits in a queue and loads only when a slot opens.
 - A full queue drops the oldest waiting item. `duration <= 0` stays until CloseSelf / Close.
 - Closed toasts go into a per-type idle list (same size as maxVisible) and reuse OnOpen without a second OnCreate.
+- Added `UIFrameSafety` so thread and collection checks stay compiled and can be toggled at runtime. Editor / Development default on; Release default off.
 
 ### Changed
 
 - Toast close no longer always Destroy; Shutdown, ClearCache, and explicit destroy still release instances and handles.
 - Toast respects `Register(..., cache: false)` and idle overflow now evicts the oldest idle instance.
+- Documented Hud/Push/Popup same-type in-flight Open merge (later Args/Mode win).
+- Pool and RedDot thread checks no longer compile out of Release; they follow `UIFrameSafety.ThreadChecks`.
 
 ### Fixed
 
