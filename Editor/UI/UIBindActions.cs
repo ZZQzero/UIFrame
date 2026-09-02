@@ -497,28 +497,31 @@ namespace UIFrame.Editor
             return result;
         }
 
-        static bool TryNormalizeScriptFolder(string folder, out string normalized, out string error)
+        public static bool TryNormalizeScriptFolder(string folder, out string normalized, out string error)
         {
             error = null;
-            normalized = string.IsNullOrWhiteSpace(folder)
-                ? "Assets/Scripts/UI"
-                : folder.Replace('\\', '/').Trim().TrimEnd('/');
-            if (normalized == "Assets")
+            if (string.IsNullOrWhiteSpace(folder))
             {
                 normalized = "Assets/Scripts/UI";
+                return true;
             }
+
+            folder = folder.Replace('\\', '/').Trim().TrimEnd('/');
 
             try
             {
                 var assetsRoot = Path.GetFullPath(Application.dataPath)
                     .TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
-                var full = UIScriptWriter.ToFullPath(normalized)
-                    .TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+                var full = Path.IsPathRooted(folder)
+                    ? Path.GetFullPath(folder)
+                    : UIScriptWriter.ToFullPath(folder);
+                full = full.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
                 var assetsPrefix = assetsRoot + Path.DirectorySeparatorChar;
                 if (!string.Equals(full, assetsRoot, StringComparison.OrdinalIgnoreCase)
                     && !full.StartsWith(assetsPrefix, StringComparison.OrdinalIgnoreCase))
                 {
                     error = "脚本目录必须位于当前项目的 Assets 下。";
+                    normalized = folder;
                     return false;
                 }
 
@@ -531,6 +534,7 @@ namespace UIFrame.Editor
             catch (Exception ex)
             {
                 error = $"脚本目录无效: {ex.Message}";
+                normalized = folder;
                 return false;
             }
         }

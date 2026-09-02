@@ -44,18 +44,7 @@ namespace UIFrame.Editor
 
         static void Generate(GameObject go)
         {
-            var isItem = UICodeGenUtil.GuessIsItem(go.name);
-            var className = UICodeGenUtil.ToClassName(go.name, isItem);
-            if (!UIBindActions.TryGenerate(
-                    go,
-                    className,
-                    UICodeGenPrefs.Folder,
-                    UICodeGenPrefs.NamespaceName,
-                    isItem,
-                    out var error))
-            {
-                EditorUtility.DisplayDialog("UIFrame", error, "确定");
-            }
+            UIGenerateGui.OpenGenerateWindow(go);
         }
 
         [MenuItem("CONTEXT/RectTransform/UIFrame 生成脚本", true)]

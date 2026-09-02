@@ -27,22 +27,21 @@ namespace UIFrame.Editor
                 return;
             }
 
-            // GameObject 标题保持原生，不画任何生成/绑定 UI。
-            if (editor.target is GameObject)
+            // Unity 6 Inspector 对 Component 走 UITK，finishedDefaultHeaderGUI 经常不触发。
+            // GameObject 标题仍是 IMGUI，生成表单（含目录选择）必须画在这里。
+            if (editor.target is GameObject go)
             {
+                if (UICodeGenUtil.IsUiPrefabRoot(go)
+                    && UICodeGenUtil.FindBindHostOn(go) == null)
+                {
+                    DrawRootGenerate(go);
+                }
+
                 return;
             }
 
             if (editor.target is Component component)
             {
-                // 尚未生成脚本时，生成表单挂在根 RectTransform 上。
-                if (component is RectTransform rect
-                    && UICodeGenUtil.IsUiPrefabRoot(rect.gameObject)
-                    && UICodeGenUtil.FindBindHostOn(rect.gameObject) == null)
-                {
-                    DrawRootGenerate(rect.gameObject);
-                }
-
                 if (component is MonoBehaviour host
                     && host is not UIPanel
                     && host is not UIItem
@@ -55,7 +54,12 @@ namespace UIFrame.Editor
             }
         }
 
-        static void DrawRootGenerate(GameObject go)
+        public static void OpenGenerateWindow(GameObject go)
+        {
+            UIGenerateWindow.Open(go);
+        }
+
+        internal static void DrawRootGenerate(GameObject go)
         {
             var host = UICodeGenUtil.FindBindHostOn(go);
             var key = UICodeGenUtil.GetStoreKey(go);
@@ -107,20 +111,48 @@ namespace UIFrame.Editor
             }
 
             _className = EditorGUILayout.TextField("类名", _className);
+
             EditorGUILayout.BeginHorizontal();
+            EditorGUI.BeginChangeCheck();
             _folder = EditorGUILayout.TextField("目录", _folder);
-            if (GUILayout.Button("…", EditorStyles.miniButton, GUILayout.Width(24)))
+            if (EditorGUI.EndChangeCheck())
             {
-                var picked = EditorUtility.OpenFolderPanel("脚本目录", Application.dataPath, "");
-                if (!string.IsNullOrEmpty(picked) && picked.Replace('\\', '/').Contains("/Assets"))
+                UICodeGenPrefs.Folder = _folder;
+            }
+
+            var folderAsset = AssetDatabase.LoadAssetAtPath<DefaultAsset>(_folder);
+            EditorGUI.BeginChangeCheck();
+            var nextFolder = (DefaultAsset)EditorGUILayout.ObjectField(
+                folderAsset,
+                typeof(DefaultAsset),
+                false,
+                GUILayout.Width(36));
+            if (EditorGUI.EndChangeCheck() && nextFolder != null)
+            {
+                var assetPath = AssetDatabase.GetAssetPath(nextFolder);
+                if (AssetDatabase.IsValidFolder(assetPath))
                 {
-                    var index = picked.Replace('\\', '/').IndexOf("/Assets");
-                    _folder = picked.Replace('\\', '/').Substring(index + 1);
+                    _folder = assetPath;
+                    UICodeGenPrefs.Folder = assetPath;
                 }
             }
 
+            if (GUILayout.Button("…", EditorStyles.miniButton, GUILayout.Width(24)))
+            {
+                var start = string.IsNullOrWhiteSpace(_folder)
+                    ? Application.dataPath
+                    : UIScriptWriter.ToFullPath(_folder);
+                EditorApplication.delayCall += () => PickScriptFolder(start);
+            }
+
             EditorGUILayout.EndHorizontal();
+
+            EditorGUI.BeginChangeCheck();
             _namespaceName = EditorGUILayout.TextField("命名空间", _namespaceName);
+            if (EditorGUI.EndChangeCheck())
+            {
+                UICodeGenPrefs.NamespaceName = _namespaceName;
+            }
 
             if (_isItem)
             {
@@ -133,9 +165,31 @@ namespace UIFrame.Editor
                 {
                     EditorUtility.DisplayDialog("UIFrame", error, "确定");
                 }
+                else
+                {
+                    UIGenerateWindow.CloseIfOpen();
+                }
             }
 
             EditorGUILayout.EndVertical();
+        }
+
+        static void PickScriptFolder(string start)
+        {
+            var picked = EditorUtility.OpenFolderPanel("脚本目录", start, "");
+            if (string.IsNullOrEmpty(picked))
+            {
+                return;
+            }
+
+            if (!UIBindActions.TryNormalizeScriptFolder(picked, out var folder, out var error))
+            {
+                EditorUtility.DisplayDialog("UIFrame", error, "确定");
+                return;
+            }
+
+            _folder = folder;
+            UICodeGenPrefs.Folder = folder;
         }
 
         static void DrawAddButtons(Component component)
@@ -180,6 +234,40 @@ namespace UIFrame.Editor
 
                 EditorGUILayout.EndHorizontal();
             }
+        }
+    }
+
+    sealed class UIGenerateWindow : EditorWindow
+    {
+        GameObject _root;
+
+        public static void Open(GameObject go)
+        {
+            var window = GetWindow<UIGenerateWindow>(true, "生成 UI 脚本", true);
+            window._root = go;
+            window.minSize = new Vector2(420, 200);
+            window.ShowUtility();
+            window.Focus();
+        }
+
+        public static void CloseIfOpen()
+        {
+            var windows = Resources.FindObjectsOfTypeAll<UIGenerateWindow>();
+            for (var i = 0; i < windows.Length; i++)
+            {
+                windows[i].Close();
+            }
+        }
+
+        void OnGUI()
+        {
+            if (_root == null)
+            {
+                EditorGUILayout.HelpBox("Prefab 已丢失。", MessageType.Warning);
+                return;
+            }
+
+            UIGenerateGui.DrawRootGenerate(_root);
         }
     }
 }
