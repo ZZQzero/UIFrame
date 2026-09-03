@@ -29,7 +29,7 @@ namespace UIFrame
             }
         }
 
-        internal override void DispatchOpen()
+        internal sealed override void DispatchOpenCore()
         {
             OnOpen(Args);
         }

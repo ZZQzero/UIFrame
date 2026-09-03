@@ -1,4 +1,5 @@
 using System;
+using System.Threading;
 using UnityEngine;
 using YooAsset;
 
@@ -20,6 +21,12 @@ namespace UIFrame
         public string Location { get; internal set; }
 
         internal AssetHandle AssetHandle { get; set; }
+
+        CancellationTokenSource _openCts;
+
+        /// <summary>当前这次打开的生命周期令牌。关闭、重新打开或销毁时取消。</summary>
+        protected CancellationToken OpenCancellationToken =>
+            _openCts?.Token ?? destroyCancellationToken;
 
         /// <summary>关闭后是否进缓存（隐藏、保留实例与 YooAsset Handle）。默认 true。</summary>
         internal bool CacheOnClose { get; set; } = true;
@@ -50,7 +57,15 @@ namespace UIFrame
 
         internal abstract void ApplyArgs(object args);
 
-        internal abstract void DispatchOpen();
+        internal void DispatchOpen()
+        {
+            CancelOpenScope();
+            _openCts = CancellationTokenSource.CreateLinkedTokenSource(
+                destroyCancellationToken);
+            DispatchOpenCore();
+        }
+
+        internal abstract void DispatchOpenCore();
 
         internal void DispatchCreate()
         {
@@ -69,16 +84,19 @@ namespace UIFrame
 
         internal void DispatchClose()
         {
+            CancelOpenScope();
             OnClose();
         }
 
         internal void DispatchDestroy()
         {
+            CancelOpenScope();
             OnDestroyPanel();
         }
 
         void OnDestroy()
         {
+            CancelOpenScope();
             var handle = AssetHandle;
             if (handle == null)
             {
@@ -87,6 +105,18 @@ namespace UIFrame
 
             AssetHandle = null;
             UILoader.Release(handle);
+        }
+
+        void CancelOpenScope()
+        {
+            if (_openCts == null)
+            {
+                return;
+            }
+
+            _openCts.Cancel();
+            _openCts.Dispose();
+            _openCts = null;
         }
 
         /// <summary>关闭自己。默认隐藏进缓存，不 Destroy、不释放 Handle。</summary>
