@@ -104,7 +104,10 @@ namespace UIFrame
                 case UIOpenMode.Popup:
                     return UILayer.Popup;
                 case UIOpenMode.Toast:
+                case UIOpenMode.Tips:
                     return UILayer.Tips;
+                case UIOpenMode.Guide:
+                    return UILayer.Guide;
                 default:
                     return UILayer.Window;
             }

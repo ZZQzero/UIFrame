@@ -7,5 +7,7 @@ namespace UIFrame
         Push,
         Popup,
         Toast,
+        Tips,
+        Guide,
     }
 }

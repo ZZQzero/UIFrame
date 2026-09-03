@@ -175,6 +175,36 @@ namespace UIFrame
         }
 
         /// <summary>
+        /// 打开 Tips 层面板。同类型单实例，不进 Toast 队列，也不进 Window / Popup 栈。
+        /// 需要多实例自动关闭请用 <see cref="Toast{TPanel}"/>。
+        /// </summary>
+        public static UniTask<TPanel> Tips<TPanel>() where TPanel : UIPanel<UINone>
+        {
+            return Open<TPanel, UINone>(UIOpenMode.Tips, UINone.Value);
+        }
+
+        /// <summary>
+        /// 打开 Tips 层面板。同类型单实例，不进 Toast 队列，也不进 Window / Popup 栈。
+        /// 需要多实例自动关闭请用 <see cref="Toast{TPanel, TArgs}"/>。
+        /// </summary>
+        public static UniTask<TPanel> Tips<TPanel, TArgs>(TArgs args) where TPanel : UIPanel<TArgs>
+        {
+            return Open<TPanel, TArgs>(UIOpenMode.Tips, args);
+        }
+
+        /// <summary>打开引导层面板，叠在 Tips 之上。不进 Window / Popup 栈。</summary>
+        public static UniTask<TPanel> Guide<TPanel>() where TPanel : UIPanel<UINone>
+        {
+            return Open<TPanel, UINone>(UIOpenMode.Guide, UINone.Value);
+        }
+
+        /// <summary>打开引导层面板，叠在 Tips 之上。不进 Window / Popup 栈。</summary>
+        public static UniTask<TPanel> Guide<TPanel, TArgs>(TArgs args) where TPanel : UIPanel<TArgs>
+        {
+            return Open<TPanel, TArgs>(UIOpenMode.Guide, args);
+        }
+
+        /// <summary>
         /// 配置 Tips 层：同时可见条数、等待队列长度、默认自动关闭秒数。
         /// <paramref name="defaultDuration"/> ≤ 0 表示常驻到手动关闭。队列满时丢掉最旧等待项。
         /// Shutdown 后仍保留该配置。

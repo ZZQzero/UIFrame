@@ -149,9 +149,14 @@ UIFrame 的 `UILoader` 已经负责 `UIPanel` 的 YooAsset 句柄，`UIManager` 
 列表面板只实现 `ProvideData`（多 Prefab 再实现 `GetCellLocation`），不要自己写
 `GetObject` / `ReturnObject`。
 
+列表面板在 `OnOpen` 里做 Prepare 时，应传入 `OpenCancellationToken`（缓存关闭会取消）。
+`destroyCancellationToken` 只在面板真正销毁时取消，缓存关闭不会取消。
+
 ```csharp
 SetPool(pool);
-await PrepareCellsAsync(options, destroyCancellationToken);
+var cancelled = await PrepareCellsAsync(options, OpenCancellationToken)
+    .SuppressCancellationThrow();
+if (cancelled) return;
 // 或按历史 PeakActive 进行 PrewarmCellsAsync。
 
 ScrollRect.totalCount = items.Count;

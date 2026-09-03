@@ -2,6 +2,23 @@
 
 All notable changes to this package will be documented in this file.
 
+## [Unreleased]
+
+### Added
+
+- Added `UI.Tips` for single-instance Tips-layer panels (no queue / no auto-close).
+- Added `UI.Guide` for Guide-layer panels outside the Window / Popup stacks.
+- Added `UIPanel.OpenCancellationToken`: cancelled when the current open ends (close or re-open), so cached panels cancel in-flight work without waiting for destroy.
+
+### Changed
+
+- `ScreenOrientationManager.Initialize` detects current orientation and syncs Canvas layout only; it no longer writes `Screen.orientation` until Set / Push / Pop / ResetTo.
+- Documented Tips / Guide / OpenCancellationToken and LoopScroll size fallback in README and USAGE.
+
+### Fixed
+
+- LoopScroll preferred width / height falls back to `RectTransform` size when LayoutUtility returns `<= 0`.
+
 ## [1.5.0] - 2026-09-01
 
 ### Added

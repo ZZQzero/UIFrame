@@ -31,7 +31,7 @@ namespace UIFrame
         /// <summary>关闭后是否进缓存（隐藏、保留实例与 YooAsset Handle）。默认 true。</summary>
         internal bool CacheOnClose { get; set; } = true;
 
-        /// <summary>Popup 点遮罩是否关闭。Toast / Hud 忽略。</summary>
+        /// <summary>Popup 点遮罩是否关闭。Toast / Tips / Hud / Guide 忽略。</summary>
         public virtual bool CloseOnMaskClick => OpenMode == UIOpenMode.Popup;
 
         /// <summary>首次实例化且尚未激活时调用，适合绑按钮。</summary>

@@ -40,9 +40,12 @@ https://github.com/ZZQzero/UIFrame.git
 }
 ```
 
+各系统详细用法与注意点见 [USAGE.md](Docs/USAGE.md)。红点见 [RedDot.md](Docs/RedDot.md)，对象池见 [Pool.md](Docs/Pool.md)。
+
 ## 快速开始
 
 ```csharp
+using System;
 using Cysharp.Threading.Tasks;
 using UIFrame;
 using YooAsset;
@@ -59,30 +62,41 @@ public static class UIStartup
     public static async UniTask StartAsync(ResourcePackage package)
     {
         UI.Init(package);
+        if (UI.ConfigureURPCameraStack() == null)
+        {
+            throw new InvalidOperationException("UI Camera Stack 配置失败。");
+        }
+
         UI.Register<MainPanel>("MainPanel");
-        await UI.Push<MainPanel>();
+        var panel = await UI.Push<MainPanel>();
+        if (panel == null)
+        {
+            throw new InvalidOperationException("MainPanel 打开失败。");
+        }
     }
 }
 ```
 
-不再使用时调用：
+不再使用时调用（若还用了对象池，先 UI 再释池）：
 
 ```csharp
 UI.Shutdown();
+// GamePool.Instance.Release(); // 宿主侧对象池
 ```
 
-Hud / Push / Popup 按面板 **Type** 去重。同一类型正在加载时再次 Open，不会发起第二次加载，而是合并进这次请求：后一次的 `Args` 和 `Mode` 覆盖前一次，并把已取消扳回未取消。两次 `await` 拿到同一块面板，参数以最后一次为准。已经打开的同类型会走已有实例（`ApplyArgs`），不会再加载。Toast 是多实例通道，不走这条合并规则。
+Hud / Push / Popup / Tips / Guide 按面板 **Type** 去重。同一类型正在加载时再次 Open，不会发起第二次加载，而是合并进这次请求：后一次的 `Args` 和 `Mode` 覆盖前一次，并把已取消扳回未取消。两次 `await` 拿到同一块面板，参数以最后一次为准。已经打开的同类型会走已有实例（`ApplyArgs`），不会再加载。**Toast** 是多实例通道，不走这条合并规则。
 
 主线程检查和托管池重复归还检查由 `UIFrameSafety` 控制。默认 Editor / Development 打开，Release 关闭。QA 要在正式包里抓线程错误时，在 `Init`、建池、调用红点之前设 `UIFrameSafety.ThreadChecks = true`。`CollectionChecks` 只作用于之后新建的托管池。
 
 ## URP Camera Stack
 
-`UI.Init()` 后 Canvas 默认为 `Screen Space Camera`，并绑定常驻 UI Camera；同时开启 `Vertex Color Always In Gamma Color Space`。
-
-需要叠加到主相机时：
+`UI.Init()` 后 Canvas 默认为 `Screen Space Camera`，并绑定常驻 UI Camera；同时开启 `Vertex Color Always In Gamma Color Space`。此时 UI Camera 可能是孤立 Overlay，界面不可见，需要配置 Stack：
 
 ```csharp
-UI.ConfigureURPCameraStack(); // Base = Camera.main，复用已有 UI Camera
+if (UI.ConfigureURPCameraStack() == null)
+{
+    // Base = Camera.main，复用已有 UI Camera；失败时检查主相机 / URP
+}
 ```
 
 也可指定 Base / 外部 UI Camera：
@@ -115,15 +129,24 @@ Editor 可用 Device Simulator，或 `ScreenSafeArea.SetOverride(rect)` 模拟�
 
 `ScreenSafeArea.Current` 只读缓存。Root 在转屏、Canvas 尺寸变化、重新获得焦点时 `Refresh`，并再连刷两帧以等待 `safeArea` 晚到。
 
-## Tips / Toast
+## Tips / Toast / Guide
+
+| API | 层 | 语义 |
+|-----|----|------|
+| `UI.Tips` | Tips | 同类型单实例，不排队、不定时 |
+| `UI.Toast` | Tips | 多实例 + 队列 + 可选自动关闭 |
+| `UI.Guide` | Guide | 最上层引导，不进窗口/弹窗栈 |
 
 `UI.Toast<TPanel>` 仍是 Tips 层上的 `UIPanel`，同类型可以同时有多份。时长、并发上限和等待队列在 `UIManager` 里，动画和排版做在面板 Prefab（Tips 根上也可以自己挂 LayoutGroup）。
 
 ```csharp
 UI.ConfigureTips(maxVisible: 3, maxQueued: 8, defaultDuration: 2f);
+
+await UI.Tips<NetStatusPanel>();                         // 常驻状态条
 await UI.Toast<HintToast, string>("保存成功");
 await UI.Toast<HintToast, string>("保存成功", duration: 1.5f);
-await UI.Toast<StickyToast>(duration: 0f); // 常驻，点关闭或 CloseSelf
+await UI.Toast<StickyToast>(duration: 0f);               // 常驻，点关闭或 CloseSelf
+await UI.Guide<NewbieGuidePanel>();
 ```
 
 可见满了只把 `{type, args, duration}` 入队，**出队后才加载**。有人关掉（到时或手动）再开下一条。队列满丢掉最旧等待项。`duration` 为空用默认秒数，`<= 0` 表示不自动关。
@@ -136,22 +159,24 @@ await UI.Toast<StickyToast>(duration: 0f); // 常驻，点关闭或 CloseSelf
 
 ## 循环列表
 
-列表面板继承 `UILoopScrollBase<TArgs>` 或 `UILoopScrollMultiBase<TArgs>`，只实现 `ProvideData`。Inspector 填 Cell 的 YooAsset location，打开前注入对象池并异步准备：
+列表面板继承 `UILoopScrollBase<TArgs>` 或 `UILoopScrollMultiBase<TArgs>`，只实现 `ProvideData`。Inspector 填 Cell 的 YooAsset location，打开前注入对象池并异步准备。列表内异步请用 `OpenCancellationToken`（缓存关闭会取消；`destroyCancellationToken` 不会）：
 
 ```csharp
 public sealed class PlayerListPanel : UILoopScrollBase<UINone>
 {
     protected override void OnOpen(UINone args)
     {
-        BindAsync().Forget();
+        BindAsync(OpenCancellationToken).Forget();
     }
 
-    async UniTaskVoid BindAsync()
+    async UniTaskVoid BindAsync(CancellationToken ct)
     {
         SetPool(gamePool);
-        await PrepareCellsAsync(
+        var cancelled = await PrepareCellsAsync(
             new GameObjectPoolOptions(group: PoolGroup.UI),
-            destroyCancellationToken);
+            ct).SuppressCancellationThrow();
+        if (cancelled) return;
+
         ScrollRect.totalCount = players.Count;
         ScrollRect.RefillCells();
     }
@@ -163,11 +188,12 @@ public sealed class PlayerListPanel : UILoopScrollBase<UINone>
 }
 ```
 
-Cell 由 `LoopScrollPoolSource` 同步 `TrySpawn` / `DespawnImmediate`。不要把 `UIPanel` 放进这个池。多 Prefab 列表实现 `GetCellLocation(int index)`，并 `PrepareCellsAsync` 传入所有 location。
+Cell 由 `LoopScrollPoolSource` 同步 `TrySpawn` / `DespawnImmediate`。不要把 `UIPanel` 放进这个池。多 Prefab 列表实现 `GetCellLocation(int index)`，并 `PrepareCellsAsync` 传入所有 location。无 Sprite 的 Image 时，尺寸会回退到 RectTransform；有正数 LayoutElement 仍优先。
 
 ## 目录
 
-- `Runtime/Core`：面板 API、生命周期、栈与缓存、Tips Toast 策略、循环列表基类
+- `Docs`：USAGE / RedDot / Pool 使用说明
+- `Runtime/Core`：面板 API、生命周期、栈与缓存、Tips / Toast / Guide、循环列表基类
 - `Runtime/Pooling`：托管对象池与 GameObjectPoolService
 - `Runtime/LoopScroll`：循环列表组件
 - `Runtime/Load`：YooAsset 异步加载
