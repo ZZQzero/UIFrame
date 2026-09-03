@@ -296,8 +296,7 @@ namespace UIFrame
             {
                 if (panel != null)
                 {
-                    ApplyBind(panel, bind);
-                    ApplyAndShow(panel, mode, args);
+                    ShowReusedPanelSafely(type, bind, mode, args, ref panel);
                     return true;
                 }
 
@@ -319,9 +318,32 @@ namespace UIFrame
                 return false;
             }
 
-            ApplyBind(panel, bind);
-            ApplyAndShow(panel, mode, args);
+            ShowReusedPanelSafely(type, bind, mode, args, ref panel);
             return true;
+        }
+
+        void ShowReusedPanelSafely(
+            Type type,
+            UIPanelBind bind,
+            UIOpenMode mode,
+            object args,
+            ref UIPanel panel)
+        {
+            try
+            {
+                ApplyBind(panel, bind);
+                ApplyAndShow(panel, mode, args);
+            }
+            catch (Exception ex)
+            {
+                Debug.LogError($"[UIFrame] 打开失败 {type.Name}: {ex}");
+                if (panel != null)
+                {
+                    ClosePanel(panel, destroy: true);
+                }
+
+                panel = null;
+            }
         }
 
         async UniTask<TPanel> OpenCore<TPanel, TArgs>(
