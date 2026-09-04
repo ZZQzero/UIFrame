@@ -296,7 +296,7 @@ namespace UIFrame
             {
                 if (panel != null)
                 {
-                    ShowReusedPanelSafely(type, bind, mode, args, ref panel);
+                    ShowReusedPanel(bind, mode, args, panel);
                     return true;
                 }
 
@@ -318,31 +318,25 @@ namespace UIFrame
                 return false;
             }
 
-            ShowReusedPanelSafely(type, bind, mode, args, ref panel);
+            ShowReusedPanel(bind, mode, args, panel);
             return true;
         }
 
-        void ShowReusedPanelSafely(
-            Type type,
+        void ShowReusedPanel(
             UIPanelBind bind,
             UIOpenMode mode,
             object args,
-            ref UIPanel panel)
+            UIPanel panel)
         {
             try
             {
                 ApplyBind(panel, bind);
                 ApplyAndShow(panel, mode, args);
             }
-            catch (Exception ex)
+            catch
             {
-                Debug.LogError($"[UIFrame] 打开失败 {type.Name}: {ex}");
-                if (panel != null)
-                {
-                    ClosePanel(panel, destroy: true);
-                }
-
-                panel = null;
+                ClosePanel(panel, destroy: true);
+                throw;
             }
         }
 
@@ -375,37 +369,20 @@ namespace UIFrame
                     return null;
                 }
 
-                if (!UIPanelCatalog.TryResolve(type, req.Mode, out var finalBind))
-                {
-                    DestroyPanel(panel);
-                    req.Completion.TrySetResult(null);
-                    return null;
-                }
-
-                if (!string.Equals(panel.Location, finalBind.Location, StringComparison.Ordinal))
-                {
-                    Debug.LogError(
-                        $"[UIFrame] {type.Name} 加载期间注册地址发生变化: {panel.Location} -> {finalBind.Location}，请重新打开。");
-                    DestroyPanel(panel);
-                    req.Completion.TrySetResult(null);
-                    return null;
-                }
-
-                ApplyBind(panel, finalBind);
+                ApplyBind(panel, UIPanelCatalog.WithMode(initialBind, req.Mode));
                 ApplyAndShow(panel, req.Mode, req.Args);
                 req.Completion.TrySetResult(panel);
                 return panel as TPanel;
             }
             catch (Exception ex)
             {
-                Debug.LogError($"[UIFrame] 打开失败 {type.Name}: {ex}");
                 if (panel != null)
                 {
                     ClosePanel(panel, destroy: true);
                 }
 
-                req.Completion.TrySetResult(null);
-                return null;
+                req.Completion.TrySetException(ex);
+                throw;
             }
             finally
             {
@@ -490,11 +467,10 @@ namespace UIFrame
                 PresentToast(panel, args, duration);
                 return panel;
             }
-            catch (Exception ex)
+            catch
             {
-                Debug.LogError($"[UIFrame] Toast 打开失败 {type.Name}: {ex}");
                 ReleaseToastAfterFailure(panel);
-                return null;
+                throw;
             }
             finally
             {
@@ -886,21 +862,20 @@ namespace UIFrame
                 {
                     panel.DispatchClose();
                 }
-                catch (Exception ex)
+                finally
                 {
-                    Debug.LogError($"[UIFrame] OnClose 异常 {type.Name}: {ex}");
+                    if (destroy || !panel.CacheOnClose)
+                    {
+                        DestroyPanel(panel);
+                    }
+                    else
+                    {
+                        ReturnToastIdle(panel);
+                    }
+
+                    PumpToastQueue();
                 }
 
-                if (destroy || !panel.CacheOnClose)
-                {
-                    DestroyPanel(panel);
-                }
-                else
-                {
-                    ReturnToastIdle(panel);
-                }
-
-                PumpToastQueue();
                 return;
             }
 
@@ -915,31 +890,29 @@ namespace UIFrame
             {
                 panel.DispatchClose();
             }
-            catch (Exception ex)
+            finally
             {
-                Debug.LogError($"[UIFrame] OnClose 异常 {type.Name}: {ex}");
-            }
-
-            if (destroy || !panel.CacheOnClose)
-            {
-                DestroyPanel(panel);
-            }
-            else
-            {
-                panel.gameObject.SetActive(false);
-                _cached[type] = panel;
-            }
-
-            if (wasWindowTop)
-            {
-                var top = WindowTop;
-                if (top != null)
+                if (destroy || !panel.CacheOnClose)
                 {
-                    ResumePanel(top);
+                    DestroyPanel(panel);
                 }
-            }
+                else
+                {
+                    panel.gameObject.SetActive(false);
+                    _cached[type] = panel;
+                }
 
-            RefreshMask();
+                if (wasWindowTop)
+                {
+                    var top = WindowTop;
+                    if (top != null)
+                    {
+                        ResumePanel(top);
+                    }
+                }
+
+                RefreshMask();
+            }
         }
 
         void PumpToastQueue()
@@ -965,18 +938,17 @@ namespace UIFrame
 
         async UniTaskVoid DispatchQueuedToast(TipsWaitItem item)
         {
-            UIPanel panel = null;
             try
             {
-                panel = await ShowToast(item.PanelType, item.Args, item.Duration);
+                var panel = await ShowToast(item.PanelType, item.Args, item.Duration);
+                item.Completion.TrySetResult(panel);
             }
             catch (Exception ex)
             {
-                Debug.LogError($"[UIFrame] 队列 Toast 打开失败: {ex}");
+                item.Completion.TrySetException(ex);
             }
             finally
             {
-                item.Completion.TrySetResult(panel);
                 PumpToastQueue();
             }
         }
@@ -1321,15 +1293,13 @@ namespace UIFrame
             {
                 panel.DispatchDestroy();
             }
-            catch (Exception ex)
+            finally
             {
-                Debug.LogError($"[UIFrame] OnDestroyPanel 异常 {panel.PanelType.Name}: {ex}");
+                var handle = panel.AssetHandle;
+                panel.AssetHandle = null;
+                UnityEngine.Object.Destroy(panel.gameObject);
+                UILoader.Release(handle);
             }
-
-            var handle = panel.AssetHandle;
-            panel.AssetHandle = null;
-            UnityEngine.Object.Destroy(panel.gameObject);
-            UILoader.Release(handle);
         }
 
         void PausePanel(UIPanel panel)
@@ -1343,12 +1313,10 @@ namespace UIFrame
             {
                 panel.DispatchPause();
             }
-            catch (Exception ex)
+            finally
             {
-                Debug.LogError($"[UIFrame] OnPause 异常 {panel.PanelType.Name}: {ex}");
+                panel.gameObject.SetActive(false);
             }
-
-            panel.gameObject.SetActive(false);
         }
 
         void ResumePanel(UIPanel panel)
@@ -1360,14 +1328,7 @@ namespace UIFrame
 
             panel.gameObject.SetActive(true);
             panel.transform.SetAsLastSibling();
-            try
-            {
-                panel.DispatchResume();
-            }
-            catch (Exception ex)
-            {
-                Debug.LogError($"[UIFrame] OnResume 异常 {panel.PanelType.Name}: {ex}");
-            }
+            panel.DispatchResume();
         }
 
         static void MoveToStackEnd(List<UIPanel> stack, UIPanel panel)

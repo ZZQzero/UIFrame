@@ -68,7 +68,6 @@ namespace UIFrame
 
         internal static bool TryResolve(Type panelType, UIOpenMode mode, out UIPanelBind bind)
         {
-            var layer = InferLayer(mode);
             if (panelType == null)
             {
                 Debug.LogError("[UIFrame] Resolve 失败：panelType 为空。");
@@ -76,23 +75,20 @@ namespace UIFrame
                 return false;
             }
 
-            if (Map.TryGetValue(panelType, out var entry))
+            if (!Map.TryGetValue(panelType, out var entry))
             {
-                var location = string.IsNullOrEmpty(entry.Location) ? panelType.Name : entry.Location;
-                bind = new UIPanelBind(location, layer, entry.Group, entry.Cache);
-                return true;
+                Debug.LogError($"[UIFrame] 未注册 {panelType.Name}，请先 UI.Register<{panelType.Name}>(location)。");
+                bind = default;
+                return false;
             }
 
-#if UNITY_EDITOR
-            Debug.LogWarning($"[UIFrame] 未注册 {panelType.Name}，Editor 用类名兜底。正式包必须 UI.Register。");
-            var group = InferGroup(mode);
-            bind = new UIPanelBind(panelType.Name, layer, group, cache: true);
+            bind = new UIPanelBind(entry.Location, InferLayer(mode), entry.Group, entry.Cache);
             return true;
-#else
-            Debug.LogError($"[UIFrame] 未注册 {panelType.Name}，请先 UI.Register<{panelType.Name}>(location)。");
-            bind = default;
-            return false;
-#endif
+        }
+
+        internal static UIPanelBind WithMode(UIPanelBind bind, UIOpenMode mode)
+        {
+            return new UIPanelBind(bind.Location, InferLayer(mode), bind.Group, bind.Cache);
         }
 
         static UILayer InferLayer(UIOpenMode mode)
@@ -111,11 +107,6 @@ namespace UIFrame
                 default:
                     return UILayer.Window;
             }
-        }
-
-        static UIGroup InferGroup(UIOpenMode mode)
-        {
-            return mode == UIOpenMode.Hud ? UIGroup.Hud : UIGroup.Scene;
         }
     }
 }

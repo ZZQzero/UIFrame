@@ -79,16 +79,15 @@ namespace UIFrame
                 panel.AssetHandle = handle;
                 return panel;
             }
-            catch (Exception ex)
+            catch
             {
-                Debug.LogError($"[UIFrame] 加载异常: {location}, {ex}");
                 if (instance != null)
                 {
                     UnityEngine.Object.Destroy(instance);
                 }
 
                 Release(handle);
-                return null;
+                throw;
             }
         }
 
