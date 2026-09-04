@@ -175,6 +175,31 @@ namespace UIFrame
         }
 
         /// <summary>
+        /// 打开确认框并等待结果。点遮罩 / Back / CloseSelf 未提交结果时任务取消。
+        /// </summary>
+        public static UniTask<TResult> Popup<TPanel, TResult>()
+            where TPanel : UIPanel<UINone, TResult>
+        {
+            return Popup<TPanel, UINone, TResult>(UINone.Value);
+        }
+
+        /// <summary>
+        /// 打开确认框并等待结果。点遮罩 / Back / CloseSelf 未提交结果时任务取消。
+        /// </summary>
+        public static async UniTask<TResult> Popup<TPanel, TArgs, TResult>(TArgs args)
+            where TPanel : UIPanel<TArgs, TResult>
+        {
+            var panel = await Open<TPanel, TArgs>(UIOpenMode.Popup, args);
+            if (panel == null)
+            {
+                throw new InvalidOperationException(
+                    $"[UIFrame] 打开失败 {typeof(TPanel).Name}，无法等待结果。");
+            }
+
+            return await panel.WaitResultAsync();
+        }
+
+        /// <summary>
         /// 打开 Tips 层面板。同类型单实例，不进 Toast 队列，也不进 Window / Popup 栈。
         /// 需要多实例自动关闭请用 <see cref="Toast{TPanel}"/>。
         /// </summary>

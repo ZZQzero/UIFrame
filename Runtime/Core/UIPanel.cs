@@ -62,10 +62,21 @@ namespace UIFrame
             CancelOpenScope();
             _openCts = CancellationTokenSource.CreateLinkedTokenSource(
                 destroyCancellationToken);
+            PrepareOpen();
             DispatchOpenCore();
         }
 
         internal abstract void DispatchOpenCore();
+
+        /// <summary>每次打开前调用。带返回值的面板在这里准备结果通道。</summary>
+        protected virtual void PrepareOpen()
+        {
+        }
+
+        /// <summary>关闭或销毁后调用。未提交的结果在这里取消。</summary>
+        protected virtual void CompleteOpen()
+        {
+        }
 
         internal void DispatchCreate()
         {
@@ -85,13 +96,27 @@ namespace UIFrame
         internal void DispatchClose()
         {
             CancelOpenScope();
-            OnClose();
+            try
+            {
+                OnClose();
+            }
+            finally
+            {
+                CompleteOpen();
+            }
         }
 
         internal void DispatchDestroy()
         {
             CancelOpenScope();
-            OnDestroyPanel();
+            try
+            {
+                OnDestroyPanel();
+            }
+            finally
+            {
+                CompleteOpen();
+            }
         }
 
         void OnDestroy()
