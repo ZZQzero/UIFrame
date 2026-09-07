@@ -1,9 +1,6 @@
 using System;
 using System.Collections.Generic;
-using System.Runtime.CompilerServices;
 using Cysharp.Threading.Tasks;
-
-[assembly: InternalsVisibleTo("Tips.EditMode.Tests")]
 
 namespace UIFrame
 {

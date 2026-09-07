@@ -185,29 +185,6 @@ namespace UIFrame
             }
         }
 
-        internal void TryBindPackage()
-        {
-            if (!YooAssets.IsInitialized)
-            {
-                return;
-            }
-
-            var packages = YooAssets.GetPackages();
-            if (packages == null || packages.Count == 0)
-            {
-                return;
-            }
-
-            if (packages.Count > 1)
-            {
-                throw new InvalidOperationException(
-                    "[UIFrame] 存在多个 ResourcePackage，请调用 UI.SetPackage 指定。");
-            }
-
-            _loader.SetPackage(packages[0]);
-            Debug.Log($"[UIFrame] 已绑定 ResourcePackage: {packages[0].PackageName}");
-        }
-
         public void ConfigureTips(int maxVisible, int maxQueued, float defaultDuration)
         {
             _tipsDrain.Clear();
@@ -460,7 +437,6 @@ namespace UIFrame
 
         void PresentToast(UIPanel panel, object args, float duration)
         {
-            EnsureOpenCanContinue();
             panel.OpenMode = UIOpenMode.Toast;
             panel.ApplyArgs(args);
             AttachToLayer(panel, _root.GetLayer(panel.Layer));
@@ -514,7 +490,6 @@ namespace UIFrame
 
         void ApplyAndShow(UIPanel panel, UIOpenMode mode, object args)
         {
-            EnsureOpenCanContinue();
             var wasWindowTop = WindowTop == panel;
             var wasWindow = _windowStack.Remove(panel);
             _popupStack.Remove(panel);
@@ -558,7 +533,6 @@ namespace UIFrame
                 }
             }
 
-            EnsureOpenCanContinue();
             _opened[panel.PanelType] = panel;
             AttachToLayer(panel, _root.GetLayer(panel.Layer));
             panel.transform.SetAsLastSibling();

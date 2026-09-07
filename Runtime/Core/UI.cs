@@ -18,7 +18,7 @@ namespace UIFrame
         /// <summary>创建 Root。若 YooAsset 已初始化且只有一个包，会自动绑定。</summary>
         public static void Init()
         {
-            CreateManager(manager => manager.TryBindPackage());
+            CreateManager(ResolveAutoPackage());
         }
 
         /// <summary>创建 Root 并绑定指定 YooAsset 包。</summary>
@@ -29,7 +29,7 @@ namespace UIFrame
                 throw new ArgumentNullException(nameof(package));
             }
 
-            CreateManager(manager => manager.SetPackage(package));
+            CreateManager(package);
         }
 
         /// <summary>创建 Root 并按包名绑定 YooAsset 包。</summary>
@@ -40,7 +40,14 @@ namespace UIFrame
                 throw new ArgumentException("[UIFrame] packageName 为空。", nameof(packageName));
             }
 
-            CreateManager(manager => manager.SetPackage(packageName));
+            var package = YooAssets.GetPackage(packageName);
+            if (package == null)
+            {
+                throw new InvalidOperationException(
+                    $"[UIFrame] ResourcePackage 不存在: {packageName}");
+            }
+
+            CreateManager(package);
         }
 
         /// <summary>资源系统就绪后绑定 YooAsset 包。可在 <see cref="Init()"/> 之后再调用。</summary>
@@ -347,7 +354,29 @@ namespace UIFrame
             return IsInited && _manager.IsOpen<TPanel>();
         }
 
-        static void CreateManager(Action<UIManager> configure)
+        static ResourcePackage ResolveAutoPackage()
+        {
+            if (!YooAssets.IsInitialized)
+            {
+                return null;
+            }
+
+            var packages = YooAssets.GetPackages();
+            if (packages == null || packages.Count == 0)
+            {
+                return null;
+            }
+
+            if (packages.Count > 1)
+            {
+                throw new InvalidOperationException(
+                    "[UIFrame] 存在多个 ResourcePackage，请调用 UI.Init(package) 指定。");
+            }
+
+            return packages[0];
+        }
+
+        static void CreateManager(ResourcePackage package)
         {
             if (_shuttingDown)
             {
@@ -363,7 +392,11 @@ namespace UIFrame
             try
             {
                 manager.Init();
-                configure(manager);
+                if (package != null)
+                {
+                    manager.SetPackage(package);
+                }
+
                 manager.ConfigureTips(
                     _tipsSettings.MaxVisible,
                     _tipsSettings.MaxQueued,
@@ -372,15 +405,7 @@ namespace UIFrame
             }
             catch
             {
-                try
-                {
-                    manager.Shutdown();
-                }
-                catch (Exception exception)
-                {
-                    Debug.LogException(exception);
-                }
-
+                manager.Shutdown();
                 throw;
             }
         }

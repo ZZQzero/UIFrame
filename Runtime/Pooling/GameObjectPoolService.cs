@@ -202,15 +202,7 @@ namespace Game.Pooling
                 return false;
             }
 
-            T found = instance.GetComponent<T>();
-            if (found == null)
-            {
-                DespawnImmediate(instance);
-                throw new InvalidOperationException(
-                    $"Pooled prefab '{location}' does not contain component {typeof(T).FullName}.");
-            }
-
-            component = found;
+            component = GetRequiredComponent<T>(instance, location);
             return true;
         }
 
