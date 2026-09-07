@@ -12,20 +12,12 @@
 
 ```csharp
 UI.Init(package);                    // 或 Init() / Init(packageName)
-if (UI.ConfigureURPCameraStack() == null)
-{
-    // URP Stack 失败时 UI Camera 是孤立 Overlay，界面不可见
-    throw new InvalidOperationException("UI Camera Stack 配置失败。");
-}
+UI.ConfigureURPCameraStack();        // 失败会抛
 
 UI.Register<MainPanel>("MainPanel", UIGroup.Scene);
-GamePool.Init(package, persistRoot); // 若需要对象池。persistRoot 须比 UI.Shutdown 更久，不要用 UIFrameRoot
+GamePool.Init(package, persistRoot); // persistRoot 须比 UI.Shutdown 更久，不要用 UIFrameRoot
 
-var panel = await UI.Push<MainPanel>();
-if (panel == null)
-{
-    // 加载失败
-}
+await UI.Push<MainPanel>();          // 未 Register / 加载失败会抛
 
 // 退出时：先 UI，再池
 UI.Shutdown();
@@ -37,7 +29,8 @@ GamePool.Shutdown();
 - 先 `Init`，再 `Register` / 打开面板。
 - 退出顺序必须是 **`UI.Shutdown()` → 再 `GamePool.Shutdown()`**。面板的 `OnDestroyPanel` 可能还要还池。
 - `Shutdown` 会销毁 Root、打开中与缓存面板，并释放 YooAsset Handle；**注册表会保留**，可再次 `Init`。
-- 不要只检查“启动完成”日志：相机 Stack、首屏 `Push` 返回值都要校验。
+- 进行中的 `Push` / `Popup` / `Hud` 在 `Shutdown` 时以 **`OperationCanceledException`** 结束，不会返回 `null`。
+- 不要只检查“启动完成”日志：相机 Stack 配不上会抛，首屏 `Push` 失败也会抛。
 - 宿主需在退出 Play / `OnApplicationQuit` / `OnDestroy` 里主动 Teardown；框架本身不注册 Editor PlayMode 退出钩子。
 
 ---
@@ -128,7 +121,7 @@ async UniTask BindAsync(MyArgs args, CancellationToken ct)
 - 同类型加载中再次 Open：合并为一次加载，后一次 Args/Mode 生效。
 - **`Tips` 与 `Toast` 不要用同一面板类型**（通道不同，可能同时存在两套实例）。
 - `Back()` 只关 Popup / Window；Hud / Tips / Guide / Toast 需显式 Close。
-- 正式包必须 `UI.Register`；Editor 未注册时用类名兜底，真机不会。
+- 必须 `UI.Register`。未注册、空 Location、重复且不一致的注册都会抛。
 - 默认 `cache: true`：Close 只隐藏，不释放内存；要释放用 `destroy: true` 或 `ClearCache()`。
 
 ---
@@ -155,7 +148,7 @@ UI.DisableURPCameraStack();                   // 仅从 Stack 移除
 
 ### 注意
 
-- `ConfigureURPCameraStack` 返回 `null` 时不要继续当启动成功。
+- `ConfigureURPCameraStack` 失败会抛。不要吞掉。
 - 框架硬依赖 URP。
 
 ---
@@ -222,8 +215,10 @@ await UI.Toast<StickyToast>(duration: 0f);            // 常驻到手动关
 
 ### 注意
 
-- 可见满了只入队，出队后才加载；队列满丢掉最旧等待项。
+- 可见满了只入队，出队后才加载；队列满丢掉最旧等待项，那一次 `Toast` **返回 `null`**（产品规则，不是加载失败）。
+- `maxVisible == 0` 时 `Toast` 也返回 `null`。
 - `duration <= 0` 不自动关。
+- `Shutdown` 会取消排队中的 Toast（`OperationCanceledException`），与队列满丢弃返回 `null` 不同。
 - Toast 关掉后按类型进闲置列表复用 `OnOpen`；`Register(..., cache: false)` 时关闭会 Destroy。
 - 世界飘字（伤害数字）用 `UIItem` + 对象池，不要用 Toast。
 - 不要把 `UIPanel` 放进 `GameObjectPoolService`。
@@ -280,7 +275,9 @@ if (pool.TrySpawn("PlayerItem", parent, out PlayerItem item))
 
 - 与 `UIPanel` 缓存是两套所有权：**UIPanel 不要进这个池**。
 - 退出时先 `UI.Shutdown`，再 `GamePool.Shutdown`（或自己 `Dispose` 注入的服务）。
-- 禁止业务直接 `Destroy` 池化实例。
+- 禁止业务直接 `Destroy` 池化实例；外部 Destroy 会让分桶作废，只能 Dispose 整个服务。
+- `TrySpawn` 返回 `false` 只表示尚未 Prepare。还错、缺组件、未 Init `GamePool.Service` 都会抛。
+- 已 Init 时再 `GamePool.Init` 会抛。
 - 主线程与集合检查看 `UIFrameSafety`。
 
 ---
@@ -327,6 +324,8 @@ public sealed class RankPanel : UILoopScrollBase<RankArgs>
 
 - `OnCreate` 已 sealed；额外初始化覆写 `OnLoopScrollCreated`。
 - 覆写 `OnClose` / `OnDestroyPanel` 必须 `base.`，否则 Cell 不还池。
+- `OnCreate` 未绑 LoopScrollRect / Cell location 会抛。
+- 退出顺序必须先关 UI（还 Cell）再 `GamePool.Shutdown`。池已 Dispose 后再还 Cell 会抛。
 - 列表异步必须用 `OpenCancellationToken`，不要只用 `destroyCancellationToken`（缓存关闭不会取消后者）。
 - Cell 无 Sprite 的 Image 时，尺寸会回退到 RectTransform；有正数 LayoutElement 仍优先。
 
@@ -365,15 +364,14 @@ UIFrameSafety.CollectionChecks = true;  // 池重复归还检查
 
 ```csharp
 UI.Init(package);
-if (UI.ConfigureURPCameraStack() == null) throw ...;
+UI.ConfigureURPCameraStack();
 
 UI.Register<MainHud>("MainHud", UIGroup.Hud);
 UI.Register<HomePanel>("Home", UIGroup.Scene);
 GamePool.Init(package, transform);
 
 await UI.Hud<MainHud>();
-var home = await UI.Push<HomePanel>();
-if (home == null) throw ...;
+await UI.Push<HomePanel>();
 
 // 切场景
 UI.CloseGroup(UIGroup.Scene, destroy: true);

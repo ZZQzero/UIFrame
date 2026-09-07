@@ -55,13 +55,12 @@ namespace UIFrame
         {
             if (_scrollRect == null)
             {
-                Debug.LogError($"[UIFrame] {name} 未绑定 {nameof(LoopScrollRect)}。", this);
-                return;
+                throw new InvalidOperationException($"[UIFrame] {name} 未绑定 {nameof(LoopScrollRect)}。");
             }
 
             if (string.IsNullOrWhiteSpace(GetCellLocation(0)))
             {
-                Debug.LogError($"[UIFrame] {name} 未设置 Cell location。", this);
+                throw new InvalidOperationException($"[UIFrame] {name} 未设置 Cell location。");
             }
 
             _poolSource.Bind(_scrollRect, GetCellLocation);
@@ -100,8 +99,7 @@ namespace UIFrame
             string location = GetCellLocation(0);
             if (string.IsNullOrWhiteSpace(location))
             {
-                throw new InvalidOperationException(
-                    $"{name} 未设置 Cell location。");
+                throw new InvalidOperationException($"{name} 未设置 Cell location。");
             }
 
             return location.Trim();

@@ -20,6 +20,8 @@ UI.Shutdown();
 GamePool.Shutdown();
 ```
 
+已 Init、或上次直接 `Dispose` 了 `Service` 还没 `Shutdown` 时再 `Init` 会抛。未 Init 时读 `GamePool.Service` 也会抛。不要绕过 `Shutdown` 去 `Dispose` 默认池。
+
 `persistRoot` 由宿主提供常驻节点（例如 `DontDestroyOnLoad` 的 Launch）。不要把池根
 挂在 UIFrameRoot 下：退出顺序是先 `UI.Shutdown`（面板 `OnDestroyPanel` 还要还池），
 再 `GamePool.Shutdown`。
@@ -88,8 +90,8 @@ if (!pool.TrySpawn("PlayerItem", contentRoot, out PlayerItem item))
 `TrySpawn` 只查询已经存在的分桶。池内有闲置实例时直接复用，池空时通过已持有
 的 Prefab Handle 同步实例化；location 尚未加载或仍在加载时返回 `false`，不会
 偷偷触发同步 YooAsset 加载。该接口适合必须立即返回 Cell 的循环列表
-`GetObject`。`false` 仅表示分桶尚未准备或泛型入口缺少目标组件；参数错误、线程
-错误或分桶已损坏仍会抛出异常。
+`GetObject`。`false` 仅表示分桶尚未准备。缺组件、参数错误、线程错误、还错对象
+或分桶已因外部 Destroy 作废都会抛。
 
 `IPoolable` 回调规则：
 
@@ -119,9 +121,11 @@ bool removed = pool.TryRemoveGroup(PoolGroup.UI);
 pool.TryRemoveGroup(PoolGroup.UI, force: true);
 ```
 
-`Despawn` 与 `DespawnImmediate` 都是同步回收，不会因分组或 UGUI 全局状态改变
-语义。`DespawnDeferred` 才会延迟执行；等待期间实例仍算活跃，重复归还返回
-`false`。循环列表不得使用延迟回收。
+`Despawn` 与 `DespawnImmediate` 都是同步回收。还错对象、重复还、在 `IPoolable`
+回调里还，都会抛。`DespawnDeferred` 延迟到 LastPostLateUpdate；等待期间再
+`DespawnDeferred` 或 `DespawnGroup(..., deferred: true)` 会抛，但可以用
+`DespawnImmediate` 立刻还。`OnDespawned` 抛错会离开延迟队列，不会每帧重试。
+循环列表不得使用延迟回收。
 
 ## 加载、取消与释放
 
@@ -131,16 +135,16 @@ pool.TryRemoveGroup(PoolGroup.UI, force: true);
   或释放服务。
 - 每个分桶持有一个 `AssetHandle`，直到分桶真正移除。
 - `TryRemovePool` 在仍有活跃实例、正在加载或正在跨帧预热时返回 `false`。
+  回调里调用会抛。分桶因外部 Destroy 作废后也会抛，不要靠 Remove 再 Prepare 修复。
 - `TryRemoveGroup` 按组释放闲置实例和句柄；组内正在加载或仍有活跃实例时拒绝
   普通移除。预热进行中时即使传入 `force: true` 也会拒绝移除。
 - `Trim(location, count)` 将闲置实例收缩到指定数量，但不释放 Prefab 句柄。
-- `TryDispose()` 在存在活跃实例、加载任务或预热任务时返回 `false`，适合校验式关闭。
-- `Dispose()`/`ForceDispose()` 会终止活跃实例，并保证每个已建立分桶的 Prefab
-  Handle 被释放；可安全用于 `using/finally`。
-- 池化实例不得由业务代码直接 `Destroy`，应统一调用 `Despawn`。一旦检测到外部
-  `Destroy`，对应分桶会被标记为损坏并拒绝继续 Prepare、Prewarm、Spawn 或
-  Trim；调用方必须先移除该分桶，再重新 Prepare。从未激活过的预热实例可能没有
-  Unity `OnDestroy` 回调，此时会在下次取用发现失效引用时将分桶标记为损坏。
+  闲置实例被外部 `Destroy` 时和 Spawn / Prewarm 一样会抛，分桶作废。
+- `TryDispose()` 在存在活跃实例、加载任务或预热任务时返回 `false`。回调里调用会抛。
+- `Dispose()` 会终止活跃实例并释放每个已建立分桶的 Prefab Handle。
+- 池化实例不得由业务代码直接 `Destroy`，应统一调用 `Despawn`。外部 `Destroy`
+  会让该分桶作废，后续 Spawn / Prepare / Trim / Remove 都会抛；只能 `Dispose`
+  整个服务。未激活的预热实例可能没有 `OnDestroy`，下次取用发现失效引用时同样作废。
 
 `GameObjectPoolService` 的公开操作必须从创建它的 Unity 主线程调用。自定义
 `IPrefabProvider` 可以在后台线程完成加载；服务会在创建分桶或操作 Unity 对象前

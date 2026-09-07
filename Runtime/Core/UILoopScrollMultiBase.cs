@@ -50,8 +50,7 @@ namespace UIFrame
         {
             if (_scrollRect == null)
             {
-                Debug.LogError($"[UIFrame] {name} 未绑定 {nameof(LoopScrollRectMulti)}。", this);
-                return;
+                throw new InvalidOperationException($"[UIFrame] {name} 未绑定 {nameof(LoopScrollRectMulti)}。");
             }
 
             _poolSource.Bind(_scrollRect, GetCellLocation);

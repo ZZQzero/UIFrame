@@ -19,9 +19,7 @@ namespace Game.Pooling
 
         public static bool IsInited => service != null && !service.IsDisposed;
 
-        public static GameObjectPoolService Service => service;
-
-        /// <summary>创建默认池。重复调用会先 <see cref="Shutdown"/> 再建。</summary>
+        /// <summary>创建默认池。已 Init 或上次未 Shutdown 时抛错，要换池先 <see cref="Shutdown"/>。</summary>
         public static void Init(ResourcePackage package, Transform persistRoot)
         {
             if (package == null)
@@ -32,7 +30,7 @@ namespace Game.Pooling
             Init(new YooAssetPrefabProvider(package), persistRoot);
         }
 
-        /// <summary>用自定义 Prefab 提供者创建默认池。</summary>
+        /// <summary>用自定义 Prefab 提供者创建默认池。已 Init 或上次未 Shutdown 时抛错，要换池先 <see cref="Shutdown"/>。</summary>
         public static void Init(IPrefabProvider prefabProvider, Transform persistRoot)
         {
             if (prefabProvider == null)
@@ -45,12 +43,29 @@ namespace Game.Pooling
                 throw new ArgumentNullException(nameof(persistRoot));
             }
 
-            Shutdown();
+            if (service != null)
+            {
+                throw new InvalidOperationException(
+                    "GamePool 已经 Init 或上次未 Shutdown。要换池请先 Shutdown。");
+            }
 
             var poolRoot = new GameObject(PoolRootName).transform;
             poolRoot.SetParent(persistRoot, false);
             ownedRoot = poolRoot;
             service = new GameObjectPoolService(prefabProvider, poolRoot);
+        }
+
+        public static GameObjectPoolService Service
+        {
+            get
+            {
+                if (service == null || service.IsDisposed)
+                {
+                    throw new InvalidOperationException("GamePool 未 Init。");
+                }
+
+                return service;
+            }
         }
 
         /// <summary>释放默认池。未 Init 时为空操作。退出顺序必须是先 <c>UI.Shutdown</c>，再调本方法。</summary>

@@ -111,7 +111,7 @@ namespace Game.Pooling
                     PooledInstanceMarker marker = bucket.Pool.Get();
                     if (marker == null)
                     {
-                        bucket.RegisterMissingInactiveInstance();
+                        bucket.FailExternalDestroy();
                         throw new InvalidOperationException(
                             $"An inactive pooled instance of '{location}' was destroyed externally.");
                     }
@@ -202,15 +202,16 @@ namespace Game.Pooling
                 return false;
             }
 
-            component = instance.GetComponent<T>();
-            if (component != null)
+            T found = instance.GetComponent<T>();
+            if (found == null)
             {
-                return true;
+                DespawnImmediate(instance);
+                throw new InvalidOperationException(
+                    $"Pooled prefab '{location}' does not contain component {typeof(T).FullName}.");
             }
 
-            DespawnImmediate(instance);
-            component = null;
-            return false;
+            component = found;
+            return true;
         }
 
         public GameObject SpawnLoaded(string location, Transform parent = null)
@@ -243,57 +244,69 @@ namespace Game.Pooling
             return GetRequiredComponent<T>(instance, location);
         }
 
-        public bool Despawn(GameObject instance)
+        public void Despawn(GameObject instance)
         {
-            return DespawnImmediate(instance);
+            DespawnImmediate(instance);
         }
 
-        public bool DespawnImmediate(GameObject instance)
+        public void DespawnImmediate(GameObject instance)
         {
             EnsureUsable();
-            if (!TryGetActiveMarker(instance, out PooledInstanceMarker marker, out PoolBucket bucket))
-            {
-                return false;
-            }
-
-            return DespawnNow(marker, bucket);
-        }
-
-        private bool DespawnNow(PooledInstanceMarker marker, PoolBucket bucket)
-        {
-            using ProfilerMarker.AutoScope _ = DespawnProfilerMarker.Auto();
-            GameObject instance = marker.gameObject;
+            EnsureNoLifecycleMutation();
+            RequireMarker(instance, out PooledInstanceMarker marker, out PoolBucket bucket);
             if (marker.State != PooledInstanceState.Active &&
                 marker.State != PooledInstanceState.PendingDespawn)
             {
-                return false;
+                throw new InvalidOperationException(
+                    $"Cannot despawn '{marker.Location}' in state {marker.State}.");
             }
 
-            marker.State = PooledInstanceState.Despawning;
-            bucket.Active.Remove(marker);
-
-            InvokeDespawnedSafely(marker.Callbacks, marker.Callbacks.Length);
-            instance.SetActive(false);
-            instance.transform.SetParent(bucket.StorageRoot, false);
-            marker.State = PooledInstanceState.Inactive;
-            bucket.Pool.Release(marker);
-
-            return true;
+            DespawnNow(marker, bucket);
         }
 
-        private bool TryGetActiveMarker(
+        private void DespawnNow(PooledInstanceMarker marker, PoolBucket bucket)
+        {
+            using ProfilerMarker.AutoScope _ = DespawnProfilerMarker.Auto();
+            GameObject instance = marker.gameObject;
+            bucket.Active.Remove(marker);
+
+            try
+            {
+                InvokeDespawned(marker.Callbacks);
+            }
+            finally
+            {
+                if (instance != null)
+                {
+                    instance.SetActive(false);
+                    instance.transform.SetParent(bucket.StorageRoot, false);
+                    marker.State = PooledInstanceState.Inactive;
+                    bucket.Pool.Release(marker);
+                }
+            }
+        }
+
+        private void RequireMarker(
             GameObject instance,
             out PooledInstanceMarker marker,
             out PoolBucket bucket)
         {
-            marker = null;
-            bucket = null;
-            return instance != null &&
-                   instance.TryGetComponent(out marker) &&
-                   marker.Owner == this &&
-                   (marker.State == PooledInstanceState.Active ||
-                    marker.State == PooledInstanceState.PendingDespawn) &&
-                   buckets.TryGetValue(marker.Location, out bucket);
+            if (instance == null)
+            {
+                throw new ArgumentNullException(nameof(instance));
+            }
+
+            if (!instance.TryGetComponent(out marker) || marker.Owner != this)
+            {
+                throw new InvalidOperationException(
+                    "GameObject is not an instance of this pool.");
+            }
+
+            if (!buckets.TryGetValue(marker.Location, out bucket))
+            {
+                throw new InvalidOperationException(
+                    $"Pool '{marker.Location}' was removed.");
+            }
         }
 
         public bool TryGetStats(string location, out PoolStats stats)
@@ -332,11 +345,8 @@ namespace Game.Pooling
         public bool TryRemovePool(string location)
         {
             EnsureUsable();
+            EnsureNoLifecycleMutation();
             ValidateLocation(location);
-            if (lifecycleCallbackDepth > 0)
-            {
-                return false;
-            }
 
             if (pendingLoads.ContainsKey(location))
             {
@@ -348,6 +358,7 @@ namespace Game.Pooling
                 return true;
             }
 
+            bucket.EnsureAvailable();
             if (bucket.Active.Count > 0 || bucket.IsPrewarming)
             {
                 return false;
@@ -363,22 +374,13 @@ namespace Game.Pooling
             DisposeInternal(true);
         }
 
-        public void ForceDispose()
-        {
-            DisposeInternal(true);
-        }
-
         public bool TryDispose()
         {
             EnsureOwnerThread();
+            EnsureNoLifecycleMutation();
             if (disposed)
             {
                 return true;
-            }
-
-            if (lifecycleCallbackDepth > 0)
-            {
-                return false;
             }
 
             if (pendingLoads.Count > 0)
@@ -410,14 +412,7 @@ namespace Game.Pooling
             disposed = true;
             foreach (PoolBucket bucket in buckets.Values)
             {
-                try
-                {
-                    bucket.Dispose(force);
-                }
-                catch (Exception exception)
-                {
-                    Debug.LogException(exception);
-                }
+                bucket.Dispose(force);
             }
 
             buckets.Clear();
@@ -533,14 +528,13 @@ namespace Game.Pooling
             PooledInstanceMarker marker = bucket.Pool.Get();
             if (marker == null)
             {
-                bucket.RegisterMissingInactiveInstance();
+                bucket.FailExternalDestroy();
                 throw new InvalidOperationException(
                     $"A pooled instance of '{bucket.Location}' was destroyed externally.");
             }
             bool createdSynchronously =
                 bucket.Pool.CountAll > countAllBefore;
 
-            marker.State = PooledInstanceState.Spawning;
             bucket.Active.Add(marker);
 
             Transform instanceTransform = marker.transform;
@@ -554,24 +548,25 @@ namespace Game.Pooling
             try
             {
                 InvokeSpawned(marker.Callbacks, ref spawnedCallbackCount);
-                if (marker.State != PooledInstanceState.Spawning)
-                {
-                    throw new InvalidOperationException(
-                        $"Pooled instance '{bucket.Location}' changed state during OnSpawned.");
-                }
-
                 marker.State = PooledInstanceState.Active;
                 bucket.RegisterSpawn(createdSynchronously);
                 return marker.gameObject;
             }
             catch
             {
-                InvokeDespawnedSafely(marker.Callbacks, spawnedCallbackCount);
-                marker.State = PooledInstanceState.Inactive;
-                bucket.Active.Remove(marker);
-                marker.gameObject.SetActive(false);
-                instanceTransform.SetParent(bucket.StorageRoot, false);
-                bucket.Pool.Release(marker);
+                try
+                {
+                    InvokeDespawned(marker.Callbacks, spawnedCallbackCount);
+                }
+                finally
+                {
+                    marker.State = PooledInstanceState.Inactive;
+                    bucket.Active.Remove(marker);
+                    marker.gameObject.SetActive(false);
+                    instanceTransform.SetParent(bucket.StorageRoot, false);
+                    bucket.Pool.Release(marker);
+                }
+
                 throw;
             }
         }
@@ -683,7 +678,12 @@ namespace Game.Pooling
             }
         }
 
-        private void InvokeDespawnedSafely(IPoolable[] callbacks, int count)
+        private void InvokeDespawned(IPoolable[] callbacks)
+        {
+            InvokeDespawned(callbacks, callbacks.Length);
+        }
+
+        private void InvokeDespawned(IPoolable[] callbacks, int count)
         {
             lifecycleCallbackDepth++;
             try
@@ -691,14 +691,7 @@ namespace Game.Pooling
                 int lastIndex = Math.Min(count, callbacks.Length) - 1;
                 for (int i = lastIndex; i >= 0; i--)
                 {
-                    try
-                    {
-                        callbacks[i].OnDespawned();
-                    }
-                    catch (Exception exception)
-                    {
-                        Debug.LogException(exception);
-                    }
+                    callbacks[i].OnDespawned();
                 }
             }
             finally
@@ -795,29 +788,28 @@ namespace Game.Pooling
                 return;
             }
 
-            marker.State = PooledInstanceState.Destroyed;
+            marker.Owner = null;
             DestroyGameObject(marker.gameObject);
         }
 
         internal void NotifyInstanceDestroyed(PooledInstanceMarker marker)
         {
-            if (disposed || marker == null || marker.State == PooledInstanceState.Destroyed)
+            if (disposed || marker == null || marker.Owner != this)
             {
                 return;
             }
 
-            PooledInstanceState previousState = marker.State;
-            marker.State = PooledInstanceState.Destroyed;
+            marker.Owner = null;
             if (buckets.TryGetValue(marker.Location, out PoolBucket bucket))
             {
                 bucket.Active.Remove(marker);
-                bucket.RegisterExternalDestroy(previousState);
+                bucket.FailExternalDestroy();
             }
 
 #if UNITY_EDITOR || DEVELOPMENT_BUILD
             Debug.LogError(
-                $"Pooled instance '{marker.Location}' was destroyed externally while in state " +
-                $"{previousState}. Use DespawnImmediate or dispose the owning pool instead.");
+                $"Pooled instance '{marker.Location}' was destroyed externally. " +
+                "Use DespawnImmediate or dispose the owning pool instead.");
 #endif
         }
 
@@ -843,10 +835,8 @@ namespace Game.Pooling
             public int PeakActive { get; private set; }
             public int SynchronousExpansionCount { get; private set; }
             public bool IsPrewarming => prewarmOperationCount > 0;
-            private int externallyDestroyedCount;
-            private int externallyDestroyedInactiveCount;
             private int prewarmOperationCount;
-            private bool corrupted;
+            private bool failed;
             private bool disposed;
 
             public PoolBucket(
@@ -909,10 +899,10 @@ namespace Game.Pooling
                 {
                     Pool.Release(marker);
                 }
-                catch (Exception exception)
+                catch
                 {
                     DestroyPooledInstance(marker);
-                    Debug.LogException(exception);
+                    throw;
                 }
             }
 
@@ -923,53 +913,29 @@ namespace Game.Pooling
                     throw new ObjectDisposedException($"Pool '{Location}'");
                 }
 
-                if (corrupted)
+                if (failed)
                 {
                     throw new InvalidOperationException(
-                        $"Pool '{Location}' is corrupted because a pooled instance was destroyed " +
-                        "externally. Remove the pool and prepare it again before reuse.");
+                        $"Pool '{Location}' is unusable because a pooled instance was destroyed " +
+                        "externally. Dispose the pool service.");
                 }
             }
 
-            public void RegisterExternalDestroy(PooledInstanceState previousState)
+            public void FailExternalDestroy()
             {
-                if (corrupted)
-                {
-                    return;
-                }
-
-                corrupted = true;
-                externallyDestroyedCount++;
-                if (previousState == PooledInstanceState.Inactive)
-                {
-                    externallyDestroyedInactiveCount++;
-                }
-            }
-
-            public void RegisterMissingInactiveInstance()
-            {
-                if (corrupted)
-                {
-                    return;
-                }
-
-                corrupted = true;
-                externallyDestroyedCount++;
-                externallyDestroyedInactiveCount++;
+                failed = true;
             }
 
             public PoolStats GetStats()
             {
                 PoolStats raw = Pool.Stats;
-                int countInactive =
-                    Math.Max(0, raw.CountInactive - externallyDestroyedInactiveCount);
                 int countActive = Active.Count;
                 return new PoolStats(
-                    countActive + countInactive,
+                    countActive + raw.CountInactive,
                     countActive,
-                    countInactive,
+                    raw.CountInactive,
                     raw.TotalCreated,
-                    raw.TotalDestroyed + externallyDestroyedCount);
+                    raw.TotalDestroyed);
             }
 
             public void Dispose(bool force)
@@ -1037,10 +1003,7 @@ namespace Game.Pooling
     internal enum PooledInstanceState
     {
         Inactive = 0,
-        Spawning,
         Active,
-        PendingDespawn,
-        Despawning,
-        Destroyed
+        PendingDespawn
     }
 }

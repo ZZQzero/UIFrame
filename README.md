@@ -62,17 +62,10 @@ public static class UIStartup
     public static async UniTask StartAsync(ResourcePackage package)
     {
         UI.Init(package);
-        if (UI.ConfigureURPCameraStack() == null)
-        {
-            throw new InvalidOperationException("UI Camera Stack 配置失败。");
-        }
+        UI.ConfigureURPCameraStack();
 
         UI.Register<MainPanel>("MainPanel");
-        var panel = await UI.Push<MainPanel>();
-        if (panel == null)
-        {
-            throw new InvalidOperationException("MainPanel 打开失败。");
-        }
+        await UI.Push<MainPanel>();
     }
 }
 ```
@@ -93,10 +86,7 @@ Hud / Push / Popup / Tips / Guide 按面板 **Type** 去重。同一类型正在
 `UI.Init()` 后 Canvas 默认为 `Screen Space Camera`，并绑定常驻 UI Camera；同时开启 `Vertex Color Always In Gamma Color Space`。此时 UI Camera 可能是孤立 Overlay，界面不可见，需要配置 Stack：
 
 ```csharp
-if (UI.ConfigureURPCameraStack() == null)
-{
-    // Base = Camera.main，复用已有 UI Camera；失败时检查主相机 / URP
-}
+UI.ConfigureURPCameraStack(); // Base = Camera.main；失败会抛
 ```
 
 也可指定 Base / 外部 UI Camera：

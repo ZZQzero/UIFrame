@@ -18,55 +18,35 @@ namespace UIFrame
         /// <summary>创建 Root。若 YooAsset 已初始化且只有一个包，会自动绑定。</summary>
         public static void Init()
         {
-            if (!EnsureInit())
-            {
-                return;
-            }
-
+            EnsureInit();
             _manager.TryBindPackage();
         }
 
         /// <summary>创建 Root 并绑定指定 YooAsset 包。</summary>
         public static void Init(ResourcePackage package)
         {
-            if (!EnsureInit())
-            {
-                return;
-            }
-
+            EnsureInit();
             _manager.SetPackage(package);
         }
 
         /// <summary>创建 Root 并按包名绑定 YooAsset 包。</summary>
         public static void Init(string packageName)
         {
-            if (!EnsureInit())
-            {
-                return;
-            }
-
+            EnsureInit();
             _manager.SetPackage(packageName);
         }
 
         /// <summary>资源系统就绪后绑定 YooAsset 包。可在 <see cref="Init()"/> 之后再调用。</summary>
         public static void SetPackage(ResourcePackage package)
         {
-            if (!EnsureInit())
-            {
-                return;
-            }
-
+            EnsureInit();
             _manager.SetPackage(package);
         }
 
         /// <summary>按包名绑定 YooAsset 包。</summary>
         public static void SetPackage(string packageName)
         {
-            if (!EnsureInit())
-            {
-                return;
-            }
-
+            EnsureInit();
             _manager.SetPackage(packageName);
         }
 
@@ -76,11 +56,7 @@ namespace UIFrame
             Camera uiCamera = null,
             int uiLayer = -1)
         {
-            if (!EnsureInit())
-            {
-                return null;
-            }
-
+            EnsureInit();
             return _manager.ConfigureURPCameraStack(baseCamera, uiCamera, uiLayer);
         }
 
@@ -190,12 +166,6 @@ namespace UIFrame
             where TPanel : UIPanel<TArgs, TResult>
         {
             var panel = await Open<TPanel, TArgs>(UIOpenMode.Popup, args);
-            if (panel == null)
-            {
-                throw new InvalidOperationException(
-                    $"[UIFrame] 打开失败 {typeof(TPanel).Name}，无法等待结果。");
-            }
-
             return await panel.WaitResultAsync();
         }
 
@@ -268,11 +238,7 @@ namespace UIFrame
         public static UniTask<TPanel> Toast<TPanel, TArgs>(TArgs args, float? duration = null)
             where TPanel : UIPanel<TArgs>
         {
-            if (!EnsureInit())
-            {
-                return UniTask.FromResult<TPanel>(null);
-            }
-
+            EnsureInit();
             return _manager.Toast<TPanel>(args, duration);
         }
 
@@ -359,16 +325,16 @@ namespace UIFrame
             return IsInited && _manager.IsOpen<TPanel>();
         }
 
-        static bool EnsureInit()
+        static void EnsureInit()
         {
             if (_shuttingDown)
             {
-                return false;
+                throw new InvalidOperationException("[UIFrame] 正在 Shutdown，无法继续操作。");
             }
 
             if (_manager != null && _manager.IsInited)
             {
-                return true;
+                return;
             }
 
             _manager = new UIManager();
@@ -377,17 +343,12 @@ namespace UIFrame
                 _tipsSettings.MaxVisible,
                 _tipsSettings.MaxQueued,
                 _tipsSettings.DefaultDuration);
-            return true;
         }
 
         static UniTask<TPanel> Open<TPanel, TArgs>(UIOpenMode mode, TArgs args)
             where TPanel : UIPanel<TArgs>
         {
-            if (!EnsureInit())
-            {
-                return UniTask.FromResult<TPanel>(null);
-            }
-
+            EnsureInit();
             return _manager.Open<TPanel, TArgs>(mode, args);
         }
     }

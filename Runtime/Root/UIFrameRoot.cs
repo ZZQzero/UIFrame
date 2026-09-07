@@ -71,26 +71,23 @@ namespace UIFrame
             baseCamera = baseCamera != null ? baseCamera : Camera.main;
             if (baseCamera == null)
             {
-                Debug.LogError("[UIFrame] 配置 URP Camera Stack 失败：未找到 Base Camera。");
-                return null;
+                throw new InvalidOperationException(
+                    "[UIFrame] 配置 URP Camera Stack 失败：未找到 Base Camera。");
             }
 
             if (uiCamera == baseCamera)
             {
-                Debug.LogError("[UIFrame] 配置 URP Camera Stack 失败：Base Camera 与 UI Camera 不能相同。");
-                return null;
+                throw new InvalidOperationException(
+                    "[UIFrame] 配置 URP Camera Stack 失败：Base Camera 与 UI Camera 不能相同。");
             }
 
-            if (!TryResolveUiLayer(ref uiLayer))
-            {
-                return null;
-            }
+            ResolveUiLayer(ref uiLayer);
 
             var cameraStack = baseCamera.GetUniversalAdditionalCameraData().cameraStack;
             if (cameraStack == null)
             {
-                Debug.LogError("[UIFrame] 配置 URP Camera Stack 失败：Base Camera 的 Renderer 不支持 Camera Stack。");
-                return null;
+                throw new InvalidOperationException(
+                    "[UIFrame] 配置 URP Camera Stack 失败：Base Camera 的 Renderer 不支持 Camera Stack。");
             }
 
             DetachFromBaseCamera();
@@ -300,7 +297,7 @@ namespace UIFrame
             _baseCamera = null;
         }
 
-        bool TryResolveUiLayer(ref int uiLayer)
+        void ResolveUiLayer(ref int uiLayer)
         {
             if (uiLayer < 0)
             {
@@ -309,11 +306,11 @@ namespace UIFrame
 
             if (uiLayer >= 0 && uiLayer <= 31)
             {
-                return true;
+                return;
             }
 
-            Debug.LogError($"[UIFrame] 配置 URP Camera Stack 失败：无效 UI Layer {uiLayer}。");
-            return false;
+            throw new InvalidOperationException(
+                $"[UIFrame] 配置 URP Camera Stack 失败：无效 UI Layer {uiLayer}。");
         }
 
         static int ResolveDefaultUiLayer()

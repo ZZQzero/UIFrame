@@ -57,7 +57,7 @@ namespace UIFrame
             foreach (var req in _loading.Values)
             {
                 req.Cancelled = true;
-                req.Completion.TrySetResult(null);
+                req.Completion.TrySetCanceled();
             }
 
             _loading.Clear();
@@ -69,7 +69,7 @@ namespace UIFrame
             _toastLoading.Clear();
             _tipsDrain.Clear();
             _tips.ResetRuntime(_tipsDrain);
-            RejectToastWaits(_tipsDrain);
+            CancelToastWaits(_tipsDrain);
             CancelAllToastTimers();
             _windowStack.Clear();
             _popupStack.Clear();
@@ -144,14 +144,12 @@ namespace UIFrame
         {
             if (_loader == null)
             {
-                Debug.LogWarning("[UIFrame] 尚未 Init，无法绑定 ResourcePackage。");
-                return;
+                throw new InvalidOperationException("[UIFrame] 尚未 Init，无法绑定 ResourcePackage。");
             }
 
             if (package == null)
             {
-                Debug.LogWarning("[UIFrame] SetPackage 收到空包。");
-                return;
+                throw new ArgumentNullException(nameof(package));
             }
 
             _loader.SetPackage(package);
@@ -162,26 +160,17 @@ namespace UIFrame
         {
             if (string.IsNullOrWhiteSpace(packageName))
             {
-                Debug.LogWarning("[UIFrame] packageName 为空。");
-                return;
+                throw new ArgumentException("[UIFrame] packageName 为空。", nameof(packageName));
             }
 
-            try
-            {
-                SetPackage(YooAssets.GetPackage(packageName));
-            }
-            catch (Exception ex)
-            {
-                Debug.LogWarning($"[UIFrame] 绑定 ResourcePackage 失败: {ex.Message}");
-            }
+            SetPackage(YooAssets.GetPackage(packageName));
         }
 
         public Camera ConfigureURPCameraStack(Camera baseCamera, Camera uiCamera, int uiLayer)
         {
             if (_root == null)
             {
-                Debug.LogWarning("[UIFrame] UIFrameRoot 未就绪，无法配置 URP Camera Stack。");
-                return null;
+                throw new InvalidOperationException("[UIFrame] UIFrameRoot 未就绪，无法配置 URP Camera Stack。");
             }
 
             return _root.ConfigureURPCameraStack(baseCamera, uiCamera, uiLayer);
@@ -197,36 +186,25 @@ namespace UIFrame
 
         internal void TryBindPackage()
         {
-            try
+            if (!YooAssets.IsInitialized)
             {
-                if (!YooAssets.IsInitialized)
-                {
-                    Debug.LogWarning("[UIFrame] YooAsset 未初始化。资源就绪后请调用 UI.SetPackage。");
-                    return;
-                }
-
-                var packages = YooAssets.GetPackages();
-                if (packages == null || packages.Count == 0)
-                {
-                    Debug.LogWarning("[UIFrame] 没有可用的 ResourcePackage。请调用 UI.SetPackage。");
-                    return;
-                }
-
-                _loader.SetPackage(packages[0]);
-                if (packages.Count > 1)
-                {
-                    Debug.LogWarning(
-                        $"[UIFrame] 存在多个 ResourcePackage，已绑定第一个: {packages[0].PackageName}。可用 UI.SetPackage 指定。");
-                }
-                else
-                {
-                    Debug.Log($"[UIFrame] 已绑定 ResourcePackage: {packages[0].PackageName}");
-                }
+                return;
             }
-            catch (Exception ex)
+
+            var packages = YooAssets.GetPackages();
+            if (packages == null || packages.Count == 0)
             {
-                Debug.LogWarning($"[UIFrame] 绑定 ResourcePackage 失败: {ex.Message}");
+                return;
             }
+
+            if (packages.Count > 1)
+            {
+                throw new InvalidOperationException(
+                    "[UIFrame] 存在多个 ResourcePackage，请调用 UI.SetPackage 指定。");
+            }
+
+            _loader.SetPackage(packages[0]);
+            Debug.Log($"[UIFrame] 已绑定 ResourcePackage: {packages[0].PackageName}");
         }
 
         public void ConfigureTips(int maxVisible, int maxQueued, float defaultDuration)
@@ -247,8 +225,7 @@ namespace UIFrame
             var type = typeof(TPanel);
             if (!_inited)
             {
-                Debug.LogError("[UIFrame] 请先调用 UI.Init()");
-                return UniTask.FromResult<TPanel>(null);
+                throw new InvalidOperationException("[UIFrame] 请先调用 UI.Init()。");
             }
 
             if (mode == UIOpenMode.Toast)
@@ -258,18 +235,13 @@ namespace UIFrame
 
             if (_loading.TryGetValue(type, out var inflight))
             {
-                // 同 Type 合并为一次加载：后一次 Args/Mode 生效，并撤销已取消。
                 inflight.Cancelled = false;
                 inflight.Args = args;
                 inflight.Mode = mode;
                 return AwaitInflight<TPanel>(inflight);
             }
 
-            if (!UIPanelCatalog.TryResolve(type, mode, out var bind))
-            {
-                return UniTask.FromResult<TPanel>(null);
-            }
-
+            var bind = UIPanelCatalog.Resolve(type, mode);
             if (TryReusePanel(type, bind, mode, args, out var reused))
             {
                 return UniTask.FromResult(reused as TPanel);
@@ -314,8 +286,8 @@ namespace UIFrame
             if (!string.Equals(panel.Location, bind.Location, StringComparison.Ordinal))
             {
                 DestroyPanel(panel);
-                panel = null;
-                return false;
+                throw new InvalidOperationException(
+                    $"[UIFrame] 缓存面板 {type.Name} 的 Location 与注册不一致。");
             }
 
             ShowReusedPanel(bind, mode, args, panel);
@@ -358,21 +330,31 @@ namespace UIFrame
             try
             {
                 panel = await LoadPanel(type, initialBind, req);
-                if (req.Cancelled || panel == null)
+                if (req.Cancelled)
                 {
                     if (panel != null)
                     {
                         DestroyPanel(panel);
+                        panel = null;
                     }
 
-                    req.Completion.TrySetResult(null);
-                    return null;
+                    throw new OperationCanceledException();
                 }
 
                 ApplyBind(panel, UIPanelCatalog.WithMode(initialBind, req.Mode));
                 ApplyAndShow(panel, req.Mode, req.Args);
                 req.Completion.TrySetResult(panel);
                 return panel as TPanel;
+            }
+            catch (OperationCanceledException)
+            {
+                if (panel != null)
+                {
+                    ClosePanel(panel, destroy: true);
+                }
+
+                req.Completion.TrySetCanceled();
+                throw;
             }
             catch (Exception ex)
             {
@@ -434,11 +416,7 @@ namespace UIFrame
             var slotHeld = false;
             try
             {
-                if (!UIPanelCatalog.TryResolve(type, UIOpenMode.Toast, out var bind))
-                {
-                    return null;
-                }
-
+                var bind = UIPanelCatalog.Resolve(type, UIOpenMode.Toast);
                 _tips.BeginInFlight();
                 slotHeld = true;
                 panel = TakeToastIdle(type, bind);
@@ -447,21 +425,19 @@ namespace UIFrame
                     req = new UILoadRequest { PanelType = type };
                     _toastLoading.Add(req);
                     panel = await LoadPanel(type, bind, req);
-                    if (req.Cancelled || panel == null)
+                    if (req.Cancelled)
                     {
-                        if (panel != null)
-                        {
-                            DestroyPanel(panel);
-                        }
-
-                        return null;
+                        DestroyPanel(panel);
+                        panel = null;
+                        throw new OperationCanceledException();
                     }
                 }
 
                 if (!_inited)
                 {
                     DestroyPanel(panel);
-                    return null;
+                    panel = null;
+                    throw new InvalidOperationException("[UIFrame] 已 Shutdown，无法展示 Toast。");
                 }
 
                 PresentToast(panel, args, duration);
@@ -512,9 +488,10 @@ namespace UIFrame
         {
             var parent = _root.GetLayer(bind.Layer);
             var panel = await _loader.Load(type, bind.Location, parent, req);
-            if (panel == null)
+            if (!_inited || _root == null)
             {
-                return null;
+                DestroyPanel(panel);
+                throw new OperationCanceledException();
             }
 
             ApplyBind(panel, bind);
@@ -943,6 +920,10 @@ namespace UIFrame
                 var panel = await ShowToast(item.PanelType, item.Args, item.Duration);
                 item.Completion.TrySetResult(panel);
             }
+            catch (OperationCanceledException)
+            {
+                item.Completion.TrySetCanceled();
+            }
             catch (Exception ex)
             {
                 item.Completion.TrySetException(ex);
@@ -1031,7 +1012,8 @@ namespace UIFrame
                 if (!string.Equals(panel.Location, bind.Location, StringComparison.Ordinal))
                 {
                     DestroyPanel(panel);
-                    continue;
+                    throw new InvalidOperationException(
+                        $"[UIFrame] 闲置 Toast {type.Name} 的 Location 与注册不一致。");
                 }
 
                 ApplyBind(panel, bind);
@@ -1268,7 +1250,22 @@ namespace UIFrame
 
             for (var i = 0; i < items.Count; i++)
             {
-                RejectToastWait(items[i]);
+                items[i]?.Completion.TrySetResult(null);
+            }
+
+            items.Clear();
+        }
+
+        static void CancelToastWaits(List<TipsWaitItem> items)
+        {
+            if (items == null)
+            {
+                return;
+            }
+
+            for (var i = 0; i < items.Count; i++)
+            {
+                items[i]?.Completion.TrySetCanceled();
             }
 
             items.Clear();

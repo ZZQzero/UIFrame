@@ -14,7 +14,7 @@ namespace UIFrame
 
         public void SetPackage(ResourcePackage package)
         {
-            _package = package;
+            _package = package ?? throw new ArgumentNullException(nameof(package));
         }
 
         public async UniTask<UIPanel> Load(
@@ -25,8 +25,8 @@ namespace UIFrame
         {
             if (_package == null)
             {
-                Debug.LogError("[UIFrame] ResourcePackage 为空，无法加载 " + location);
-                return null;
+                throw new InvalidOperationException(
+                    $"[UIFrame] ResourcePackage 为空，无法加载 {location}。请先 UI.SetPackage。");
             }
 
             AssetHandle handle = null;
@@ -37,15 +37,14 @@ namespace UIFrame
                 await handle;
                 if (handle == null || handle.Status != EOperationStatus.Succeeded)
                 {
-                    Debug.LogError($"[UIFrame] 加载失败: {location}, Status={handle?.Status}");
-                    Release(handle);
-                    return null;
+                    var status = handle != null ? handle.Status.ToString() : "null";
+                    throw new InvalidOperationException(
+                        $"[UIFrame] 加载失败: {location}, Status={status}");
                 }
 
-                if (IsCancelled(req))
+                if (req != null && req.Cancelled)
                 {
-                    Release(handle);
-                    return null;
+                    throw new OperationCanceledException();
                 }
 
                 var op = handle.InstantiateAsync(new InstantiateOptions(false, parent, false));
@@ -53,16 +52,13 @@ namespace UIFrame
                 instance = op.Result;
                 if (instance == null)
                 {
-                    Debug.LogError($"[UIFrame] InstantiateAsync 失败: {location}");
-                    Release(handle);
-                    return null;
+                    throw new InvalidOperationException(
+                        $"[UIFrame] InstantiateAsync 失败: {location}");
                 }
 
-                if (IsCancelled(req))
+                if (req != null && req.Cancelled)
                 {
-                    UnityEngine.Object.Destroy(instance);
-                    Release(handle);
-                    return null;
+                    throw new OperationCanceledException();
                 }
 
                 instance.name = panelType.Name;
@@ -70,10 +66,8 @@ namespace UIFrame
                 var panel = instance.GetComponent(panelType) as UIPanel;
                 if (panel == null || panel.GetType() != panelType)
                 {
-                    Debug.LogError($"[UIFrame] Prefab 根节点缺少精确面板类型 {panelType.FullName}: {location}");
-                    UnityEngine.Object.Destroy(instance);
-                    Release(handle);
-                    return null;
+                    throw new InvalidOperationException(
+                        $"[UIFrame] Prefab 根节点缺少精确面板类型 {panelType.FullName}: {location}");
                 }
 
                 panel.AssetHandle = handle;
@@ -84,16 +78,13 @@ namespace UIFrame
                 if (instance != null)
                 {
                     UnityEngine.Object.Destroy(instance);
+                    instance = null;
                 }
 
                 Release(handle);
+                handle = null;
                 throw;
             }
-        }
-
-        static bool IsCancelled(UILoadRequest req)
-        {
-            return req != null && req.Cancelled;
         }
 
         public static void Release(AssetHandle handle)

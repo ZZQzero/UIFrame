@@ -3,8 +3,6 @@ using System.Collections.Generic;
 using System.Runtime.CompilerServices;
 using Cysharp.Threading.Tasks;
 
-[assembly: InternalsVisibleTo("Tips.EditMode.Tests")]
-
 namespace UIFrame
 {
     /// <summary>Tips 层默认配置。业务只通过 <see cref="UI.ConfigureTips"/> 修改。</summary>

@@ -42,8 +42,9 @@ namespace UIFrame
         {
             if (string.IsNullOrWhiteSpace(location))
             {
-                Debug.LogError($"[UIFrame] Register 失败：{panelType.Name} 的 Location 为空。");
-                return;
+                throw new ArgumentException(
+                    $"[UIFrame] Register 失败：{panelType.Name} 的 Location 为空。",
+                    nameof(location));
             }
 
             var entry = new Entry
@@ -59,25 +60,33 @@ namespace UIFrame
                     return;
                 }
 
-                Debug.LogWarning(
+                throw new InvalidOperationException(
                     $"[UIFrame] 重复注册 {panelType.Name}：{existing.Location} -> {entry.Location}");
             }
 
             Map[panelType] = entry;
         }
 
-        internal static bool TryResolve(Type panelType, UIOpenMode mode, out UIPanelBind bind)
+        internal static UIPanelBind Resolve(Type panelType, UIOpenMode mode)
         {
             if (panelType == null)
             {
-                Debug.LogError("[UIFrame] Resolve 失败：panelType 为空。");
-                bind = default;
-                return false;
+                throw new ArgumentNullException(nameof(panelType));
             }
 
             if (!Map.TryGetValue(panelType, out var entry))
             {
-                Debug.LogError($"[UIFrame] 未注册 {panelType.Name}，请先 UI.Register<{panelType.Name}>(location)。");
+                throw new InvalidOperationException(
+                    $"[UIFrame] 未注册 {panelType.Name}，请先 UI.Register<{panelType.Name}>(location)。");
+            }
+
+            return new UIPanelBind(entry.Location, InferLayer(mode), entry.Group, entry.Cache);
+        }
+
+        internal static bool TryResolve(Type panelType, UIOpenMode mode, out UIPanelBind bind)
+        {
+            if (panelType == null || !Map.TryGetValue(panelType, out var entry))
+            {
                 bind = default;
                 return false;
             }
