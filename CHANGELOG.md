@@ -6,6 +6,7 @@ All notable changes to this package will be documented in this file.
 
 ### Added
 
+- Added `GamePool` static facade (`Init` / `Shutdown` / `Service`) as the optional default `GameObjectPoolService`. Named `GamePool` to avoid clashing with `UILoopScrollBase.Pool`. LoopScroll still takes an injected service via `SetPool`.
 - Added `UI.Tips` for single-instance Tips-layer panels (no queue / no auto-close).
 - Added `UI.Guide` for Guide-layer panels outside the Window / Popup stacks.
 - Added `UIPanel.OpenCancellationToken`: cancelled when the current open ends (close or re-open), so cached panels cancel in-flight work without waiting for destroy.

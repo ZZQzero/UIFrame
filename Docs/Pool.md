@@ -8,6 +8,22 @@
 对象池不负责初始化 YooAsset，也不会替代 UIFrame 已有的 `UIPanel`
 缓存。建议用于 `UIItem`、循环列表项、特效、弹道等多实例对象。
 
+进程内默认入口是静态类 `GamePool`（避免和 `UILoopScrollBase.Pool` 撞名）。
+测试和隔离场景请直接 `new GameObjectPoolService`。
+LoopScroll / UIItem 仍通过 `SetPool` 注入，不要在框架内部写死 `GamePool.Service`。
+
+```csharp
+GamePool.Init(package, persistRoot); // persistRoot 须比 UI.Shutdown 更久，不要用 UIFrameRoot
+SetPool(GamePool.Service);
+
+UI.Shutdown();
+GamePool.Shutdown();
+```
+
+`persistRoot` 由宿主提供常驻节点（例如 `DontDestroyOnLoad` 的 Launch）。不要把池根
+挂在 UIFrameRoot 下：退出顺序是先 `UI.Shutdown`（面板 `OnDestroyPanel` 还要还池），
+再 `GamePool.Shutdown`。
+
 ## 纯托管对象
 
 ```csharp

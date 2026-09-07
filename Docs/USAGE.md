@@ -19,7 +19,7 @@ if (UI.ConfigureURPCameraStack() == null)
 }
 
 UI.Register<MainPanel>("MainPanel", UIGroup.Scene);
-GamePool.Instance.Init(package, persistRoot); // 若需要对象池
+GamePool.Init(package, persistRoot); // 若需要对象池。persistRoot 须比 UI.Shutdown 更久，不要用 UIFrameRoot
 
 var panel = await UI.Push<MainPanel>();
 if (panel == null)
@@ -29,13 +29,13 @@ if (panel == null)
 
 // 退出时：先 UI，再池
 UI.Shutdown();
-GamePool.Instance.Release();
+GamePool.Shutdown();
 ```
 
 ### 注意
 
 - 先 `Init`，再 `Register` / 打开面板。
-- 退出顺序必须是 **`UI.Shutdown()` → 再释放对象池**。面板的 `OnDestroyPanel` 可能还要还池。
+- 退出顺序必须是 **`UI.Shutdown()` → 再 `GamePool.Shutdown()`**。面板的 `OnDestroyPanel` 可能还要还池。
 - `Shutdown` 会销毁 Root、打开中与缓存面板，并释放 YooAsset Handle；**注册表会保留**，可再次 `Init`。
 - 不要只检查“启动完成”日志：相机 Stack、首屏 `Push` 返回值都要校验。
 - 宿主需在退出 Play / `OnApplicationQuit` / `OnDestroy` 里主动 Teardown；框架本身不注册 Editor PlayMode 退出钩子。
@@ -279,7 +279,7 @@ if (pool.TrySpawn("PlayerItem", parent, out PlayerItem item))
 ### 注意
 
 - 与 `UIPanel` 缓存是两套所有权：**UIPanel 不要进这个池**。
-- 退出时先 `UI.Shutdown`，再 `Dispose` / `GamePool.Release`。
+- 退出时先 `UI.Shutdown`，再 `GamePool.Shutdown`（或自己 `Dispose` 注入的服务）。
 - 禁止业务直接 `Destroy` 池化实例。
 - 主线程与集合检查看 `UIFrameSafety`。
 
@@ -304,7 +304,7 @@ public sealed class RankPanel : UILoopScrollBase<RankArgs>
 
     async UniTask BindAsync(RankArgs args, CancellationToken ct)
     {
-        SetPool(GamePool.Instance.Service);
+        SetPool(GamePool.Service);
         var cancelled = await PrepareCellsAsync(
             new GameObjectPoolOptions(group: PoolGroup.UI), ct)
             .SuppressCancellationThrow();
@@ -369,7 +369,7 @@ if (UI.ConfigureURPCameraStack() == null) throw ...;
 
 UI.Register<MainHud>("MainHud", UIGroup.Hud);
 UI.Register<HomePanel>("Home", UIGroup.Scene);
-GamePool.Instance.Init(package, transform);
+GamePool.Init(package, transform);
 
 await UI.Hud<MainHud>();
 var home = await UI.Push<HomePanel>();
@@ -380,7 +380,7 @@ UI.CloseGroup(UIGroup.Scene, destroy: true);
 
 // 退出
 UI.Shutdown();
-GamePool.Instance.Release();
+GamePool.Shutdown();
 ```
 
 ---
