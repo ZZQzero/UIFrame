@@ -412,7 +412,14 @@ namespace Game.Pooling
             disposed = true;
             foreach (PoolBucket bucket in buckets.Values)
             {
-                bucket.Dispose(force);
+                try
+                {
+                    bucket.Dispose(force);
+                }
+                catch (Exception exception)
+                {
+                    Debug.LogException(exception);
+                }
             }
 
             buckets.Clear();
@@ -691,7 +698,16 @@ namespace Game.Pooling
                 int lastIndex = Math.Min(count, callbacks.Length) - 1;
                 for (int i = lastIndex; i >= 0; i--)
                 {
-                    callbacks[i].OnDespawned();
+                    try
+                    {
+                        callbacks[i].OnDespawned();
+                    }
+                    catch (Exception exception)
+                    {
+                        Debug.LogException(
+                            exception,
+                            callbacks[i] as UnityEngine.Object);
+                    }
                 }
             }
             finally

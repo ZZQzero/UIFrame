@@ -99,6 +99,7 @@ if (!pool.TrySpawn("PlayerItem", contentRoot, out PlayerItem item))
 2. 归还时按相反顺序调用 `OnDespawned`，隐藏对象并移动到池根节点。
 3. 回调组件列表仅在实例首次创建时通过
    `GetComponentsInChildren<IPoolable>(true)` 扫描并缓存，稳态取还不会重复查询。
+4. 某个 `OnDespawned` 抛错时记录 Error，其余组件仍继续清理，回收流程不会因此中断。
 
 ## 显式回收与分组
 
@@ -124,7 +125,7 @@ pool.TryRemoveGroup(PoolGroup.UI, force: true);
 `Despawn` 与 `DespawnImmediate` 都是同步回收。还错对象、重复还、在 `IPoolable`
 回调里还，都会抛。`DespawnDeferred` 延迟到 LastPostLateUpdate；等待期间再
 `DespawnDeferred` 或 `DespawnGroup(..., deferred: true)` 会抛，但可以用
-`DespawnImmediate` 立刻还。`OnDespawned` 抛错会离开延迟队列，不会每帧重试。
+`DespawnImmediate` 立刻还。`OnDespawned` 异常会记录 Error，但不会中断回收或逐帧重试。
 循环列表不得使用延迟回收。
 
 ## 加载、取消与释放

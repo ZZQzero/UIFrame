@@ -18,35 +18,42 @@ namespace UIFrame
         /// <summary>创建 Root。若 YooAsset 已初始化且只有一个包，会自动绑定。</summary>
         public static void Init()
         {
-            EnsureInit();
-            _manager.TryBindPackage();
+            CreateManager(manager => manager.TryBindPackage());
         }
 
         /// <summary>创建 Root 并绑定指定 YooAsset 包。</summary>
         public static void Init(ResourcePackage package)
         {
-            EnsureInit();
-            _manager.SetPackage(package);
+            if (package == null)
+            {
+                throw new ArgumentNullException(nameof(package));
+            }
+
+            CreateManager(manager => manager.SetPackage(package));
         }
 
         /// <summary>创建 Root 并按包名绑定 YooAsset 包。</summary>
         public static void Init(string packageName)
         {
-            EnsureInit();
-            _manager.SetPackage(packageName);
+            if (string.IsNullOrWhiteSpace(packageName))
+            {
+                throw new ArgumentException("[UIFrame] packageName 为空。", nameof(packageName));
+            }
+
+            CreateManager(manager => manager.SetPackage(packageName));
         }
 
         /// <summary>资源系统就绪后绑定 YooAsset 包。可在 <see cref="Init()"/> 之后再调用。</summary>
         public static void SetPackage(ResourcePackage package)
         {
-            EnsureInit();
+            RequireInit();
             _manager.SetPackage(package);
         }
 
         /// <summary>按包名绑定 YooAsset 包。</summary>
         public static void SetPackage(string packageName)
         {
-            EnsureInit();
+            RequireInit();
             _manager.SetPackage(packageName);
         }
 
@@ -56,7 +63,7 @@ namespace UIFrame
             Camera uiCamera = null,
             int uiLayer = -1)
         {
-            EnsureInit();
+            RequireInit();
             return _manager.ConfigureURPCameraStack(baseCamera, uiCamera, uiLayer);
         }
 
@@ -78,8 +85,13 @@ namespace UIFrame
             ShutdownInternal(destroyRoot: true);
         }
 
-        internal static void NotifyRootDestroyed()
+        internal static void NotifyRootDestroyed(UIFrameRoot root)
         {
+            if (_manager == null || !_manager.OwnsRoot(root))
+            {
+                return;
+            }
+
             ShutdownInternal(destroyRoot: false);
         }
 
@@ -238,7 +250,7 @@ namespace UIFrame
         public static UniTask<TPanel> Toast<TPanel, TArgs>(TArgs args, float? duration = null)
             where TPanel : UIPanel<TArgs>
         {
-            EnsureInit();
+            RequireInit();
             return _manager.Toast<TPanel>(args, duration);
         }
 
@@ -261,6 +273,11 @@ namespace UIFrame
         /// <summary>关闭面板。默认隐藏进缓存；<paramref name="destroy"/> 为 true 时才释放内存。</summary>
         public static void Close(Type panelType, bool destroy = false)
         {
+            if (panelType == null)
+            {
+                throw new ArgumentNullException(nameof(panelType));
+            }
+
             if (!IsInited)
             {
                 return;
@@ -271,6 +288,11 @@ namespace UIFrame
 
         public static void CloseInstance(UIPanel panel, bool destroy = false)
         {
+            if (panel == null)
+            {
+                throw new ArgumentNullException(nameof(panel));
+            }
+
             if (!IsInited)
             {
                 return;
@@ -325,30 +347,61 @@ namespace UIFrame
             return IsInited && _manager.IsOpen<TPanel>();
         }
 
-        static void EnsureInit()
+        static void CreateManager(Action<UIManager> configure)
         {
             if (_shuttingDown)
             {
                 throw new InvalidOperationException("[UIFrame] 正在 Shutdown，无法继续操作。");
             }
 
-            if (_manager != null && _manager.IsInited)
+            if (_manager != null)
             {
-                return;
+                throw new InvalidOperationException("[UIFrame] 已经 Init，请勿重复初始化。");
             }
 
-            _manager = new UIManager();
-            _manager.Init();
-            _manager.ConfigureTips(
-                _tipsSettings.MaxVisible,
-                _tipsSettings.MaxQueued,
-                _tipsSettings.DefaultDuration);
+            var manager = new UIManager();
+            try
+            {
+                manager.Init();
+                configure(manager);
+                manager.ConfigureTips(
+                    _tipsSettings.MaxVisible,
+                    _tipsSettings.MaxQueued,
+                    _tipsSettings.DefaultDuration);
+                _manager = manager;
+            }
+            catch
+            {
+                try
+                {
+                    manager.Shutdown();
+                }
+                catch (Exception exception)
+                {
+                    Debug.LogException(exception);
+                }
+
+                throw;
+            }
+        }
+
+        static void RequireInit()
+        {
+            if (_shuttingDown)
+            {
+                throw new InvalidOperationException("[UIFrame] 正在 Shutdown，无法继续操作。");
+            }
+
+            if (!IsInited)
+            {
+                throw new InvalidOperationException("[UIFrame] 请先调用 UI.Init()。");
+            }
         }
 
         static UniTask<TPanel> Open<TPanel, TArgs>(UIOpenMode mode, TArgs args)
             where TPanel : UIPanel<TArgs>
         {
-            EnsureInit();
+            RequireInit();
             return _manager.Open<TPanel, TArgs>(mode, args);
         }
     }

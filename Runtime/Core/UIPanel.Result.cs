@@ -24,7 +24,6 @@ namespace UIFrame
                 return;
             }
 
-            _result = null;
             pending.TrySetCanceled();
         }
 
@@ -32,7 +31,6 @@ namespace UIFrame
         protected void CloseWithResult(TResult result, bool destroy = false)
         {
             var pending = _result;
-            _result = null;
             pending?.TrySetResult(result);
             CloseSelf(destroy);
         }

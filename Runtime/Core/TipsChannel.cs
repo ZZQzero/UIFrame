@@ -3,6 +3,8 @@ using System.Collections.Generic;
 using System.Runtime.CompilerServices;
 using Cysharp.Threading.Tasks;
 
+[assembly: InternalsVisibleTo("Tips.EditMode.Tests")]
+
 namespace UIFrame
 {
     /// <summary>Tips 层默认配置。业务只通过 <see cref="UI.ConfigureTips"/> 修改。</summary>
@@ -23,11 +25,24 @@ namespace UIFrame
 
         public TipsSettings(int maxVisible, int maxQueued, float defaultDuration)
         {
-            MaxVisible = maxVisible < 0 ? 0 : maxVisible;
-            MaxQueued = maxQueued < 0 ? 0 : maxQueued;
-            DefaultDuration = IsFiniteDuration(defaultDuration)
-                ? defaultDuration
-                : DefaultDurationSeconds;
+            if (maxVisible < 0)
+            {
+                throw new ArgumentOutOfRangeException(nameof(maxVisible));
+            }
+
+            if (maxQueued < 0)
+            {
+                throw new ArgumentOutOfRangeException(nameof(maxQueued));
+            }
+
+            if (!IsFiniteDuration(defaultDuration))
+            {
+                throw new ArgumentOutOfRangeException(nameof(defaultDuration));
+            }
+
+            MaxVisible = maxVisible;
+            MaxQueued = maxQueued;
+            DefaultDuration = defaultDuration;
         }
 
         internal static bool IsFiniteDuration(float duration)
@@ -76,7 +91,12 @@ namespace UIFrame
         public float ResolveDuration(float? duration)
         {
             var value = duration ?? Settings.DefaultDuration;
-            return TipsSettings.IsFiniteDuration(value) ? value : Settings.DefaultDuration;
+            if (!TipsSettings.IsFiniteDuration(value))
+            {
+                throw new ArgumentOutOfRangeException(nameof(duration));
+            }
+
+            return value;
         }
 
         public static bool IsSticky(float duration)

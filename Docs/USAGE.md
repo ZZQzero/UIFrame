@@ -27,6 +27,7 @@ GamePool.Shutdown();
 ### 注意
 
 - 先 `Init`，再 `Register` / 打开面板。
+- `Push` / `Popup` / `Toast` / `SetPackage` / Camera Stack 不会代替业务自动 `Init`；漏掉或重复 `Init` 都会抛。
 - 退出顺序必须是 **`UI.Shutdown()` → 再 `GamePool.Shutdown()`**。面板的 `OnDestroyPanel` 可能还要还池。
 - `Shutdown` 会销毁 Root、打开中与缓存面板，并释放 YooAsset Handle；**注册表会保留**，可再次 `Init`。
 - 进行中的 `Push` / `Popup` / `Hud` 在 `Shutdown` 时以 **`OperationCanceledException`** 结束，不会返回 `null`。
@@ -218,6 +219,7 @@ await UI.Toast<StickyToast>(duration: 0f);            // 常驻到手动关
 - 可见满了只入队，出队后才加载；队列满丢掉最旧等待项，那一次 `Toast` **返回 `null`**（产品规则，不是加载失败）。
 - `maxVisible == 0` 时 `Toast` 也返回 `null`。
 - `duration <= 0` 不自动关。
+- `maxVisible` / `maxQueued` 不能为负数，时长不能是 NaN / Infinity；这些配置错误会立即抛。
 - `Shutdown` 会取消排队中的 Toast（`OperationCanceledException`），与队列满丢弃返回 `null` 不同。
 - Toast 关掉后按类型进闲置列表复用 `OnOpen`；`Register(..., cache: false)` 时关闭会 Destroy。
 - 世界飘字（伤害数字）用 `UIItem` + 对象池，不要用 Toast。

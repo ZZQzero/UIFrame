@@ -171,6 +171,14 @@ namespace Game.Pooling
             EnsureUsable();
             EnsureNoLifecycleMutation();
 
+            foreach (PoolBucket bucket in buckets.Values)
+            {
+                if (bucket.Options.Group == group)
+                {
+                    bucket.EnsureAvailable();
+                }
+            }
+
             foreach (PendingLoad pending in pendingLoads.Values)
             {
                 if (pending.Options.Group == group)
@@ -203,7 +211,6 @@ namespace Game.Pooling
             {
                 if (pair.Value.Options.Group == group)
                 {
-                    pair.Value.EnsureAvailable();
                     locations.Add(pair.Key);
                 }
             }

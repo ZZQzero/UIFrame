@@ -21,6 +21,7 @@ namespace UIFrame
         public string Location { get; internal set; }
 
         internal AssetHandle AssetHandle { get; set; }
+        internal bool DestroyDispatched { get; private set; }
 
         CancellationTokenSource _openCts;
 
@@ -108,6 +109,12 @@ namespace UIFrame
 
         internal void DispatchDestroy()
         {
+            if (DestroyDispatched)
+            {
+                return;
+            }
+
+            DestroyDispatched = true;
             CancelOpenScope();
             try
             {

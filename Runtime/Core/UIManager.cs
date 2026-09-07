@@ -30,6 +30,7 @@ namespace UIFrame
 
         public bool IsInited => _inited;
         public Camera UICamera => _root != null ? _root.UICamera : null;
+        internal bool OwnsRoot(UIFrameRoot root) => _root == root;
 
         public void Init()
         {
@@ -101,7 +102,7 @@ namespace UIFrame
 
             for (var i = 0; i < closing.Count; i++)
             {
-                ClosePanel(closing[i], destroy: true);
+                ClosePanelAndReport(closing[i], destroy: true);
             }
 
             _opened.Clear();
@@ -120,7 +121,7 @@ namespace UIFrame
             _cached.Clear();
             for (var i = 0; i < closing.Count; i++)
             {
-                DestroyPanel(closing[i]);
+                DestroyPanelAndReport(closing[i]);
             }
 
             if (_root != null)
@@ -285,7 +286,7 @@ namespace UIFrame
             _cached.Remove(type);
             if (!string.Equals(panel.Location, bind.Location, StringComparison.Ordinal))
             {
-                DestroyPanel(panel);
+                DestroyPanelAndReport(panel);
                 throw new InvalidOperationException(
                     $"[UIFrame] 缓存面板 {type.Name} 的 Location 与注册不一致。");
             }
@@ -307,7 +308,7 @@ namespace UIFrame
             }
             catch
             {
-                ClosePanel(panel, destroy: true);
+                CleanupFailedOpen(panel);
                 throw;
             }
         }
@@ -332,37 +333,33 @@ namespace UIFrame
                 panel = await LoadPanel(type, initialBind, req);
                 if (req.Cancelled)
                 {
-                    if (panel != null)
+                    throw new OperationCanceledException();
+                }
+
+                ApplyBind(panel, UIPanelCatalog.WithMode(initialBind, req.Mode));
+                ApplyAndShow(panel, req.Mode, req.Args);
+                if (req.Cancelled || !_inited)
+                {
+                    if (!_opened.TryGetValue(type, out var opened) || opened != panel)
                     {
-                        DestroyPanel(panel);
                         panel = null;
                     }
 
                     throw new OperationCanceledException();
                 }
 
-                ApplyBind(panel, UIPanelCatalog.WithMode(initialBind, req.Mode));
-                ApplyAndShow(panel, req.Mode, req.Args);
                 req.Completion.TrySetResult(panel);
                 return panel as TPanel;
             }
             catch (OperationCanceledException)
             {
-                if (panel != null)
-                {
-                    ClosePanel(panel, destroy: true);
-                }
-
+                CleanupFailedOpen(panel);
                 req.Completion.TrySetCanceled();
                 throw;
             }
             catch (Exception ex)
             {
-                if (panel != null)
-                {
-                    ClosePanel(panel, destroy: true);
-                }
-
+                CleanupFailedOpen(panel);
                 req.Completion.TrySetException(ex);
                 throw;
             }
@@ -427,17 +424,14 @@ namespace UIFrame
                     panel = await LoadPanel(type, bind, req);
                     if (req.Cancelled)
                     {
-                        DestroyPanel(panel);
-                        panel = null;
                         throw new OperationCanceledException();
                     }
                 }
 
                 if (!_inited)
                 {
-                    DestroyPanel(panel);
-                    panel = null;
-                    throw new InvalidOperationException("[UIFrame] 已 Shutdown，无法展示 Toast。");
+                    throw new OperationCanceledException(
+                        "[UIFrame] 已 Shutdown，Toast 打开已取消。");
                 }
 
                 PresentToast(panel, args, duration);
@@ -445,7 +439,7 @@ namespace UIFrame
             }
             catch
             {
-                ReleaseToastAfterFailure(panel);
+                CleanupFailedOpen(panel);
                 throw;
             }
             finally
@@ -466,6 +460,7 @@ namespace UIFrame
 
         void PresentToast(UIPanel panel, object args, float duration)
         {
+            EnsureOpenCanContinue();
             panel.OpenMode = UIOpenMode.Toast;
             panel.ApplyArgs(args);
             AttachToLayer(panel, _root.GetLayer(panel.Layer));
@@ -473,6 +468,7 @@ namespace UIFrame
             panel.gameObject.SetActive(true);
             AddVisibleToast(panel);
             panel.DispatchOpen();
+            EnsureOpenCanContinue();
             if (!IsVisibleToast(panel) || TipsChannel.IsSticky(duration))
             {
                 return;
@@ -490,7 +486,7 @@ namespace UIFrame
             var panel = await _loader.Load(type, bind.Location, parent, req);
             if (!_inited || _root == null)
             {
-                DestroyPanel(panel);
+                DestroyPanelAndReport(panel);
                 throw new OperationCanceledException();
             }
 
@@ -501,7 +497,7 @@ namespace UIFrame
             }
             catch (Exception)
             {
-                DestroyPanel(panel);
+                DestroyPanelAndReport(panel);
                 throw;
             }
 
@@ -518,6 +514,7 @@ namespace UIFrame
 
         void ApplyAndShow(UIPanel panel, UIOpenMode mode, object args)
         {
+            EnsureOpenCanContinue();
             var wasWindowTop = WindowTop == panel;
             var wasWindow = _windowStack.Remove(panel);
             _popupStack.Remove(panel);
@@ -526,6 +523,7 @@ namespace UIFrame
             if (mode == UIOpenMode.Push)
             {
                 CloseAllPopups(destroy: false);
+                EnsureOpenCanContinue();
             }
 
             panel.OpenMode = mode;
@@ -537,6 +535,7 @@ namespace UIFrame
                 if (prev != null && prev != panel && prev.gameObject.activeSelf)
                 {
                     PausePanel(prev);
+                    EnsureOpenCanContinue();
                 }
 
                 MoveToStackEnd(_windowStack, panel);
@@ -549,6 +548,7 @@ namespace UIFrame
                     if (next != null && !next.gameObject.activeSelf)
                     {
                         ResumePanel(next);
+                        EnsureOpenCanContinue();
                     }
                 }
 
@@ -558,12 +558,23 @@ namespace UIFrame
                 }
             }
 
+            EnsureOpenCanContinue();
             _opened[panel.PanelType] = panel;
             AttachToLayer(panel, _root.GetLayer(panel.Layer));
             panel.transform.SetAsLastSibling();
             panel.gameObject.SetActive(true);
             panel.DispatchOpen();
+            EnsureOpenCanContinue();
             RefreshMask();
+        }
+
+        void EnsureOpenCanContinue()
+        {
+            if (!_inited || _root == null)
+            {
+                throw new OperationCanceledException(
+                    "[UIFrame] UI 已 Shutdown，面板打开已取消。");
+            }
         }
 
         public void Back()
@@ -584,7 +595,7 @@ namespace UIFrame
         {
             if (panelType == null)
             {
-                return;
+                throw new ArgumentNullException(nameof(panelType));
             }
 
             _toastSuppressPump++;
@@ -647,6 +658,19 @@ namespace UIFrame
 
         public void CloseInstance(UIPanel panel, bool destroy)
         {
+            if (panel == null)
+            {
+                throw new ArgumentNullException(nameof(panel));
+            }
+
+            var type = panel.PanelType;
+            var isOpened = _opened.TryGetValue(type, out var opened) && opened == panel;
+            if (!isOpened && !IsVisibleToast(panel))
+            {
+                throw new InvalidOperationException(
+                    $"[UIFrame] {type.Name} 当前未打开，不能重复关闭。");
+            }
+
             ClosePanel(panel, destroy);
         }
 
@@ -841,9 +865,9 @@ namespace UIFrame
                 }
                 finally
                 {
-                    if (destroy || !panel.CacheOnClose)
+                    if (!_inited || destroy || !panel.CacheOnClose)
                     {
-                        DestroyPanel(panel);
+                        DestroyPanelAndReport(panel);
                     }
                     else
                     {
@@ -869,9 +893,9 @@ namespace UIFrame
             }
             finally
             {
-                if (destroy || !panel.CacheOnClose)
+                if (!_inited || destroy || !panel.CacheOnClose)
                 {
-                    DestroyPanel(panel);
+                    DestroyPanelAndReport(panel);
                 }
                 else
                 {
@@ -1011,7 +1035,7 @@ namespace UIFrame
 
                 if (!string.Equals(panel.Location, bind.Location, StringComparison.Ordinal))
                 {
-                    DestroyPanel(panel);
+                    DestroyPanelAndReport(panel);
                     throw new InvalidOperationException(
                         $"[UIFrame] 闲置 Toast {type.Name} 的 Location 与注册不一致。");
                 }
@@ -1031,33 +1055,6 @@ namespace UIFrame
             }
 
             return null;
-        }
-
-        bool IsToastIdle(UIPanel panel)
-        {
-            return panel != null
-                   && _toastIdle.TryGetValue(panel.PanelType, out var list)
-                   && list != null
-                   && list.Contains(panel);
-        }
-
-        void ReleaseToastAfterFailure(UIPanel panel)
-        {
-            if (panel == null)
-            {
-                return;
-            }
-
-            if (IsVisibleToast(panel))
-            {
-                ClosePanel(panel, destroy: true);
-                return;
-            }
-
-            if (!IsToastIdle(panel))
-            {
-                DestroyPanel(panel);
-            }
         }
 
         void ReturnToastIdle(UIPanel panel)
@@ -1142,7 +1139,7 @@ namespace UIFrame
 
             for (var i = 0; i < list.Count; i++)
             {
-                DestroyPanel(list[i]);
+                DestroyPanelAndReport(list[i]);
             }
 
             list.Clear();
@@ -1279,9 +1276,59 @@ namespace UIFrame
             }
         }
 
-        void DestroyPanel(UIPanel panel)
+        void CleanupFailedOpen(UIPanel panel)
         {
             if (panel == null)
+            {
+                return;
+            }
+
+            try
+            {
+                var type = panel.PanelType;
+                if ((_opened.TryGetValue(type, out var opened) && opened == panel)
+                    || IsVisibleToast(panel))
+                {
+                    ClosePanel(panel, destroy: true);
+                }
+                else
+                {
+                    DestroyPanel(panel);
+                }
+            }
+            catch (Exception exception)
+            {
+                Debug.LogException(exception);
+            }
+        }
+
+        void ClosePanelAndReport(UIPanel panel, bool destroy)
+        {
+            try
+            {
+                ClosePanel(panel, destroy);
+            }
+            catch (Exception exception)
+            {
+                Debug.LogException(exception);
+            }
+        }
+
+        void DestroyPanelAndReport(UIPanel panel)
+        {
+            try
+            {
+                DestroyPanel(panel);
+            }
+            catch (Exception exception)
+            {
+                Debug.LogException(exception);
+            }
+        }
+
+        void DestroyPanel(UIPanel panel)
+        {
+            if (panel == null || panel.DestroyDispatched)
             {
                 return;
             }

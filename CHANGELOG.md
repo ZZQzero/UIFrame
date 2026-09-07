@@ -14,7 +14,9 @@ All notable changes to this package will be documented in this file.
 ### Changed
 
 - Fail-fast: `UI.Push` / 加载失败 / 未 Register / Camera Stack 失败会抛，不再返回 null。
-- Fail-fast: `Despawn` 还错对象会抛；`OnDespawned` 不再吞异常；外部 `Destroy` 作废分桶且不可 Remove 修复。
+- Fail-fast: `Despawn` 还错对象会抛；外部 `Destroy` 作废分桶且不可 Remove 修复。
+- `OnDespawned` 异常会记录 Error 并继续执行其余清理；Shutdown / Dispose 也会完成全部收尾后报告回调错误。
+- UI 打开、SetPackage 与 Camera Stack 不再隐式 Init；重复 Init、非法 Tips 数量和非有限时长会抛。
 - `GamePool.Init` 重复调用会抛。已删除 `ForceDispose`。
 - `ScreenOrientationManager.Initialize` detects current orientation and syncs Canvas layout only; it no longer writes `Screen.orientation` until Set / Push / Pop / ResetTo.
 - Documented Tips / Guide / OpenCancellationToken and LoopScroll size fallback in README and USAGE.
@@ -22,6 +24,8 @@ All notable changes to this package will be documented in this file.
 ### Fixed
 
 - Cancelled / Shutdown panel opens destroy the instance once and complete with `OperationCanceledException` instead of returning `null` or running `OnDestroyPanel` twice.
+- `UI.Init` now rolls back a partially created manager when package binding fails; an old Root destroyed later no longer shuts down a newly initialized manager.
+- Open / Toast failure cleanup logs secondary lifecycle errors without replacing the primary exception, including Shutdown triggered from panel callbacks.
 - `DespawnDeferred` callback failures leave the queue so they are not retried every frame; `Trim` fails fast on externally destroyed idle instances.
 - `GamePool.Init` after a direct `Service.Dispose()` now requires `Shutdown` first, so the owned pool root is not leaked.
 - LoopScroll preferred width / height falls back to `RectTransform` size when LayoutUtility returns `<= 0`.
