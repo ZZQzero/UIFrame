@@ -181,7 +181,8 @@ private void OnMailRedDotChanged(int count)
 注意：
 
 - `Bind` 后会立即回调一次当前值；
-- 重复绑定相同回调不会重复添加；
+- 重复绑定相同回调会抛出 `InvalidOperationException`；
+- `Bind` / `Unbind` 传入空回调会抛出 `ArgumentNullException`；
 - 必须使用同一个委托实例解除监听；
 - 建议在 `OnEnable` 绑定，在 `OnDisable` 解绑；
 - 单个回调抛异常时会记录异常，但不会阻断其他回调。

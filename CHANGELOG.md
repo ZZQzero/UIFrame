@@ -18,6 +18,7 @@ All notable changes to this package will be documented in this file.
 - `OnDespawned` 异常会记录 Error 并继续执行其余清理；Shutdown / Dispose 也会完成全部收尾后报告回调错误。
 - UI 打开、SetPackage 与 Camera Stack 不再隐式 Init；重复 Init、非法 Tips 数量和非有限时长会抛。
 - `GamePool.Init` 重复调用会抛。已删除 `ForceDispose`。
+- RedDot 重复绑定同一回调和传入空回调会抛，不再静默忽略。
 - `ScreenOrientationManager.Initialize` detects current orientation and syncs Canvas layout only; it no longer writes `Screen.orientation` until Set / Push / Pop / ResetTo.
 - Documented Tips / Guide / OpenCancellationToken and LoopScroll size fallback in README and USAGE.
 
@@ -28,6 +29,7 @@ All notable changes to this package will be documented in this file.
 - Open / Toast failure cleanup logs secondary lifecycle errors without replacing the primary exception, including Shutdown triggered from panel callbacks.
 - `DespawnDeferred` callback failures leave the queue so they are not retried every frame; `Trim` fails fast on externally destroyed idle instances.
 - `GamePool.Init` after a direct `Service.Dispose()` now requires `Shutdown` first, so the owned pool root is not leaked.
+- RedDot 运行态重置会保留现有监听并刷新为 0，兼容关闭 Domain Reload 的 Play Mode。
 - LoopScroll preferred width / height falls back to `RectTransform` size when LayoutUtility returns `<= 0`.
 
 ## [1.5.0] - 2026-09-01

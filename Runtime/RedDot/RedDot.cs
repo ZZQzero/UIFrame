@@ -109,7 +109,7 @@ namespace UIFrame
         }
 
         /// <summary>
-        /// 监听路径变化。首次绑定会立即同步回调当前值，重复绑定为空操作。
+        /// 监听路径变化。绑定后会立即同步回调当前值，重复绑定会抛异常。
         /// </summary>
         public static void Bind(string path, Action<int> callback)
         {
@@ -129,7 +129,8 @@ namespace UIFrame
 
             if (!bucket.Add(callback))
             {
-                return;
+                throw new InvalidOperationException(
+                    $"红点路径 \"{path}\" 已重复绑定同一回调。");
             }
 
             InvokeSafely(callback, GetUnchecked(path));
@@ -143,8 +144,12 @@ namespace UIFrame
             EnsureMainThread();
             ValidatePath(path);
 
-            if (callback == null ||
-                !Listeners.TryGetValue(path, out ListenerBucket bucket))
+            if (callback == null)
+            {
+                throw new ArgumentNullException(nameof(callback));
+            }
+
+            if (!Listeners.TryGetValue(path, out ListenerBucket bucket))
             {
                 return;
             }
@@ -233,10 +238,14 @@ namespace UIFrame
         {
             Root.Children.Clear();
             Nodes.Clear();
-            Listeners.Clear();
             DispatchEntries.Clear();
             dirtyWrite.Clear();
             dirtyRead.Clear();
+            foreach (string path in Listeners.Keys)
+            {
+                dirtyWrite.Add(path);
+            }
+
             isFlushing = false;
             mainThreadId = Thread.CurrentThread.ManagedThreadId;
         }
@@ -322,12 +331,6 @@ namespace UIFrame
             {
                 int oldValue = ToPublicCount(current.Total);
                 current.Total += delta;
-
-                if (current.Total < 0)
-                {
-                    throw new InvalidOperationException(
-                        $"红点节点 \"{current.Path}\" 的聚合数量小于 0。");
-                }
 
                 if (oldValue != ToPublicCount(current.Total))
                 {
