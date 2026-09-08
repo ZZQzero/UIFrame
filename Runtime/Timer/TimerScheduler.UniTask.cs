@@ -1,5 +1,7 @@
+using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Threading;
 using Cysharp.Threading.Tasks;
 
@@ -10,6 +12,7 @@ namespace Game.Timer
         private static readonly TimerCallback DelayCompletedCallback = OnDelayCompleted;
         private readonly ConcurrentQueue<TimerDelayPromise> externalCancellations = new();
         private readonly Queue<TimerDelayPromise> delayCompletions = new();
+        private int pendingDelayCount;
         private bool drainingDelayCompletions;
 
         public async UniTask DelayAsync(
@@ -19,14 +22,30 @@ namespace Game.Timer
         {
             EnsureUsable();
             cancellationToken.ThrowIfCancellationRequested();
+            if (pendingDelayCount >= nodes.Length)
+            {
+                throw new TimerCapacityExceededException(
+                    $"DelayAsync 未交付任务超过硬容量。SchedulerId={schedulerId}, " +
+                    $"PendingDelays={pendingDelayCount}, Capacity={nodes.Length}。");
+            }
 
+            pendingDelayCount++;
             var promise = new TimerDelayPromise(this, cancellationToken);
-            TimerHandle handle = Schedule(
-                delayMs,
-                DelayCompletedCallback,
-                clock,
-                promise);
-            promise.Bind(handle);
+            try
+            {
+                TimerHandle handle = Schedule(
+                    delayMs,
+                    DelayCompletedCallback,
+                    clock,
+                    promise);
+                promise.Bind(handle);
+            }
+            catch
+            {
+                pendingDelayCount--;
+                throw;
+            }
+
             await promise.Task;
         }
 
@@ -53,19 +72,36 @@ namespace Game.Timer
             delayCompletions.Enqueue(promise);
         }
 
-        private void DrainDelayCompletions()
+        private void DrainDelayCompletions(bool forceAll = false)
         {
             if (drainingDelayCompletions)
             {
+                if (!forceAll)
+                {
+                    throw new TimerStateException(
+                        $"Delay completion 不允许普通重入排空。SchedulerId={schedulerId}。");
+                }
+
+                DrainAllDelayCompletions();
                 return;
             }
 
             drainingDelayCompletions = true;
             try
             {
+                TimerBudget budget =
+                    HasRuntimeClock() ? runtimeBudget : simulationBudget;
+                var state = new TickBudgetState(budget);
                 while (delayCompletions.Count > 0)
                 {
-                    delayCompletions.Dequeue().CompleteTask();
+                    if (!forceAll && !CanCompleteDelay(ref state))
+                    {
+                        break;
+                    }
+
+                    TimerDelayPromise promise = delayCompletions.Dequeue();
+                    DeliverDelayCompletion(promise);
+                    state.ExecutedCallbacks++;
                 }
             }
             finally
@@ -74,11 +110,64 @@ namespace Game.Timer
             }
         }
 
+        private void DrainAllDelayCompletions()
+        {
+            while (delayCompletions.Count > 0)
+            {
+                DeliverDelayCompletion(delayCompletions.Dequeue());
+            }
+        }
+
+        private static void DeliverDelayCompletion(
+            TimerDelayPromise promise)
+        {
+            try
+            {
+                promise.CompleteTask();
+            }
+            catch (Exception exception)
+            {
+                UnityEngine.Debug.LogException(exception);
+            }
+        }
+
+        private static bool CanCompleteDelay(ref TickBudgetState state)
+        {
+            if (state.ExecutedCallbacks >= state.Budget.MaxCallbacksPerTick)
+            {
+                return false;
+            }
+
+            if (!state.Started)
+            {
+                state.Started = true;
+                state.StartTimestamp =
+                    state.Budget.MaxExecutionMicroseconds > 0
+                        ? Stopwatch.GetTimestamp()
+                        : 0;
+            }
+
+            return !ExceededTimeBudget(
+                state.StartTimestamp,
+                state.Budget.MaxExecutionMicroseconds);
+        }
+
         private void DiscardExternalCancellations()
         {
             while (externalCancellations.TryDequeue(out _))
             {
             }
+        }
+
+        private void ReleaseDelayPromise()
+        {
+            if (pendingDelayCount <= 0)
+            {
+                throw new TimerStateException(
+                    $"DelayAsync 待交付计数损坏。SchedulerId={schedulerId}。");
+            }
+
+            pendingDelayCount--;
         }
 
         private sealed class TimerDelayPromise : ITimerShutdownSink
@@ -89,7 +178,7 @@ namespace Game.Timer
 
             private readonly TimerScheduler scheduler;
             private readonly CancellationToken cancellationToken;
-            private readonly UniTaskCompletionSource<bool> completion = new();
+            private readonly UniTaskCompletionSource completion = new();
 
             private CancellationTokenRegistration registration;
             private TimerHandle handle;
@@ -104,7 +193,7 @@ namespace Game.Timer
                 this.cancellationToken = cancellationToken;
             }
 
-            public UniTask<bool> Task => completion.Task;
+            public UniTask Task => completion.Task;
 
             public void Bind(TimerHandle value)
             {
@@ -162,10 +251,11 @@ namespace Game.Timer
 
             public void CompleteTask()
             {
+                scheduler.ReleaseDelayPromise();
                 int value = Volatile.Read(ref outcome);
                 if (value == Succeeded)
                 {
-                    completion.TrySetResult(true);
+                    completion.TrySetResult();
                     return;
                 }
 

@@ -50,6 +50,8 @@ namespace Game.Timer
         private int pendingTail = -1;
 
         private long nextSequence;
+        private int runtimeClockStartIndex;
+        private bool tickCallActive;
         private bool ticking;
         private bool clearing;
         private bool shuttingDown;
@@ -463,12 +465,25 @@ namespace Game.Timer
         public TimerTickResult Tick()
         {
             EnsureUsable();
-            if (ticking)
+            if (tickCallActive)
             {
                 throw new TimerStateException(
                     $"Tick 不允许重入。SchedulerId={schedulerId}。");
             }
 
+            tickCallActive = true;
+            try
+            {
+                return TickCore();
+            }
+            finally
+            {
+                tickCallActive = false;
+            }
+        }
+
+        private TimerTickResult TickCore()
+        {
             using ProfilerMarker.AutoScope _ = TickProfilerMarker.Auto();
             bool measureTick = HasRuntimeClock();
             long tickStartTimestamp = measureTick ? Stopwatch.GetTimestamp() : 0;
@@ -480,29 +495,35 @@ namespace Game.Timer
             {
                 DrainExternalCancellations();
                 CaptureClockSnapshots();
-                for (int i = 0; i < clocks.Length; i++)
+                int firstRuntimeClock = runtimeClockStartIndex;
+                runtimeClockStartIndex =
+                    (runtimeClockStartIndex + 1) % (int)TimerClock.Simulation;
+                for (int offset = 0;
+                     offset < (int)TimerClock.Simulation;
+                     offset++)
                 {
+                    int i =
+                        (firstRuntimeClock + offset) %
+                        (int)TimerClock.Simulation;
                     ClockState clock = clocks[i];
                     if (clock == null)
                     {
                         continue;
                     }
 
-                    TimerClock clockType = (TimerClock)i;
-                    if (clockType == TimerClock.Simulation)
-                    {
-                        ProcessClock(
-                            clock,
-                            clockType,
-                            ref simulationBudgetState);
-                    }
-                    else
-                    {
-                        ProcessClock(
-                            clock,
-                            clockType,
-                            ref runtimeBudgetState);
-                    }
+                    ProcessClock(
+                        clock,
+                        (TimerClock)i,
+                        ref runtimeBudgetState);
+                }
+
+                ClockState simulationClock = clocks[(int)TimerClock.Simulation];
+                if (simulationClock != null)
+                {
+                    ProcessClock(
+                        simulationClock,
+                        TimerClock.Simulation,
+                        ref simulationBudgetState);
                 }
             }
             finally
@@ -514,13 +535,19 @@ namespace Game.Timer
                 finally
                 {
                     ticking = false;
+                }
+
+                try
+                {
+                    DrainExternalCancellations();
+                    DrainDelayCompletions();
+                }
+                finally
+                {
                     lastTickMicroseconds = measureTick
                         ? ToMicroseconds(Stopwatch.GetTimestamp() - tickStartTimestamp)
                         : 0;
                 }
-
-                DrainExternalCancellations();
-                DrainDelayCompletions();
             }
 
             return new TimerTickResult(dueThisTick, executedThisTick, deferredThisTick);
@@ -591,8 +618,14 @@ namespace Game.Timer
             }
             finally
             {
-                clearing = false;
-                DrainDelayCompletions();
+                try
+                {
+                    DrainDelayCompletions(true);
+                }
+                finally
+                {
+                    clearing = false;
+                }
             }
         }
 
@@ -628,8 +661,14 @@ namespace Game.Timer
             finally
             {
                 disposed = true;
-                shuttingDown = false;
-                DrainDelayCompletions();
+                try
+                {
+                    DrainDelayCompletions(true);
+                }
+                finally
+                {
+                    shuttingDown = false;
+                }
             }
         }
 
@@ -695,6 +734,7 @@ namespace Game.Timer
             node.MaxCatchUpPerTick = options.MaxCatchUpPerTick;
             node.ExceptionPolicy = options.ExceptionPolicy;
             node.PauseRequested = false;
+            node.CanPauseExecuting = false;
 
             if (options.Owner.IsValid)
             {
@@ -1057,7 +1097,13 @@ namespace Game.Timer
 
             if (node.RemainingCount == 1)
             {
-                InvokeCallback(slot, handle, node.DueTimeMs, nowMs, 1);
+                InvokeCallback(
+                    slot,
+                    handle,
+                    node.DueTimeMs,
+                    nowMs,
+                    1,
+                    false);
                 executed = 1;
                 CompleteAfterCallback(slot, nowMs, 1, true, false);
                 return executed;
@@ -1092,7 +1138,13 @@ namespace Game.Timer
                     int coalesced = duePeriods > int.MaxValue
                         ? int.MaxValue
                         : (int)duePeriods;
-                    InvokeCallback(slot, handle, node.DueTimeMs, nowMs, coalesced);
+                    InvokeCallback(
+                        slot,
+                        handle,
+                        node.DueTimeMs,
+                        nowMs,
+                        coalesced,
+                        HasFuturePeriods(ref node, duePeriods));
                     executed = 1;
                     CompleteAfterCallback(
                         slot,
@@ -1103,7 +1155,13 @@ namespace Game.Timer
                     break;
                 }
                 case TimerCatchUpPolicy.Skip:
-                    InvokeCallback(slot, handle, node.DueTimeMs, nowMs, 1);
+                    InvokeCallback(
+                        slot,
+                        handle,
+                        node.DueTimeMs,
+                        nowMs,
+                        1,
+                        HasFuturePeriods(ref node, duePeriods));
                     executed = 1;
                     if (duePeriods > 1)
                     {
@@ -1141,7 +1199,13 @@ namespace Game.Timer
                             node.DueTimeMs,
                             CheckedMultiply(node.IntervalMs, consumed, slot),
                             slot);
-                        InvokeCallback(slot, handle, scheduledTime, nowMs, 1);
+                        InvokeCallback(
+                            slot,
+                            handle,
+                            scheduledTime,
+                            nowMs,
+                            1,
+                            HasFuturePeriods(ref node, consumed + 1));
                         executed++;
                         consumed++;
                         if (nodes[slot].Status == TimerNodeStatus.Cancelled ||
@@ -1188,7 +1252,8 @@ namespace Game.Timer
                                 handle,
                                 scheduledTime,
                                 nowMs,
-                                coalesced);
+                                coalesced,
+                                HasFuturePeriods(ref node, duePeriods));
                             executed++;
                             logicalConsumed = duePeriods;
                         }
@@ -1216,7 +1281,8 @@ namespace Game.Timer
             TimerHandle handle,
             long scheduledTimeMs,
             long actualTimeMs,
-            int coalescedFireCount)
+            int coalescedFireCount,
+            bool canPauseExecuting)
         {
             using ProfilerMarker.AutoScope _ = CallbackProfilerMarker.Auto();
             ref TimerNode node = ref nodes[slot];
@@ -1229,6 +1295,7 @@ namespace Game.Timer
                 scheduledTimeMs,
                 actualTimeMs,
                 coalescedFireCount);
+            node.CanPauseExecuting = canPauseExecuting;
 
             try
             {
@@ -1245,6 +1312,7 @@ namespace Game.Timer
             }
             finally
             {
+                node.CanPauseExecuting = false;
                 if (measureCallback)
                 {
                     long elapsed =
@@ -1255,6 +1323,14 @@ namespace Game.Timer
                     }
                 }
             }
+        }
+
+        private static bool HasFuturePeriods(
+            ref TimerNode node,
+            long consumedPeriods)
+        {
+            return node.RemainingCount < 0 ||
+                   consumedPeriods < node.RemainingCount;
         }
 
         private void CompleteAfterCallback(
@@ -1343,7 +1419,7 @@ namespace Game.Timer
             ref TimerNode node = ref nodes[slot];
             if (node.Status == TimerNodeStatus.Executing)
             {
-                if (node.RemainingCount == 1 || node.PauseRequested)
+                if (!node.CanPauseExecuting || node.PauseRequested)
                 {
                     return false;
                 }
@@ -1357,9 +1433,10 @@ namespace Game.Timer
                 return false;
             }
 
-            RemoveFromContainer(slot);
             long nowMs = GetClockNowForApi(node.Clock);
-            node.PausedRemainingMs = Math.Max(0, node.DueTimeMs - nowMs);
+            long remainingMs = Math.Max(0, node.DueTimeMs - nowMs);
+            RemoveFromContainer(slot);
+            node.PausedRemainingMs = remainingMs;
             node.Status = TimerNodeStatus.Paused;
             pausedCount++;
             return true;
@@ -1845,6 +1922,7 @@ namespace Game.Timer
             node.Status = TimerNodeStatus.Free;
             node.Container = TimerContainer.None;
             node.PauseRequested = false;
+            node.CanPauseExecuting = false;
             node.Generation = NextGeneration(node.Generation);
             node.NextInBucket = -1;
             node.PreviousInBucket = -1;
@@ -2531,6 +2609,7 @@ namespace Game.Timer
             public TimerExceptionPolicy ExceptionPolicy;
             public byte MaxCatchUpPerTick;
             public bool PauseRequested;
+            public bool CanPauseExecuting;
         }
 
         private enum TimerNodeStatus : byte

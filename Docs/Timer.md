@@ -610,6 +610,10 @@ Runtime Tick 同时受回调数量和执行时间限制。达到任一限制后�
 - 记录 DeferredCallbackCount、OldestOverdueMs 和 ConsecutiveOverloadFrames；
 - 连续过载超过阈值时输出一次节流告警，不能每帧刷日志。
 
+Scaled、Unscaled、Realtime 共享同一个 Runtime Tick 总预算。每个 Tick 轮转优先处理
+的时钟域，避免某个持续过载的时钟永久饿死其他时钟。轮转只改变跨时钟域的服务顺序，
+同一时钟域内仍严格保持 `(DueTimeMs, Sequence)` 顺序。
+
 Simulation Scheduler 只允许固定 `MaxCallbacksPerTick`，不能依据真实执行微秒数中断，
 否则不同设备可能产生不同模拟结果。超过预算后的顺序和延后结果也必须确定。
 
@@ -652,6 +656,17 @@ UniTask DelayAsync(
 - 竞态下只能有到期、外部取消或 Shutdown 其中一个成功完成 Promise；
 - 取消注册必须在任一完成路径释放；
 - Continuation 默认回到驱动 Scheduler 的主线程阶段。
+
+Promise 结果先通过原子状态决胜，再于 Timer 派发结束后恢复 Continuation。公开 Tick
+尚未返回前禁止 Continuation 再次调用 Tick，但允许按正常生命周期调用 Clear 或
+Shutdown。普通 Tick 的完成队列单独复用对应 Runtime/Simulation Budget 作为数量和
+执行时间上限，避免大量异步续体无上限挤占一帧；Clear 和 Shutdown 为保证生命周期
+完整，会强制排空并完成所有等待。
+
+尚未交付给调用方的 Delay Promise 数量受 Scheduler 当前 Timer 容量硬限制。Timer
+节点即使已经因取消或到期释放，只要对应 Promise 仍在完成预算队列中，就继续占用该
+限制；超过容量的 DelayAsync 直接抛出 TimerCapacityExceededException，禁止通过
+反复创建和取消 Delay 绕过容量并造成无界队列。
 
 UniTask Promise 和取消注册可能产生分配，`DelayAsync` 不属于核心零 GC API。高频战斗
 逻辑应使用缓存委托和 TimerHandle，不要为每个实体每帧创建异步状态机。

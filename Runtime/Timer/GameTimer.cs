@@ -16,8 +16,12 @@ namespace Game.Timer
         private static UnityTimerRunner runner;
         private static Transform ownedRoot;
         private static bool runnerDestroyedUnexpectedly;
+        private static bool shuttingDown;
 
-        public static bool IsInited => scheduler != null && !scheduler.IsDisposed;
+        public static bool IsInited =>
+            !shuttingDown &&
+            scheduler != null &&
+            !scheduler.IsDisposed;
 
         public static void Init(
             Transform persistRoot,
@@ -33,6 +37,12 @@ namespace Game.Timer
                 throw new TimerStateException(
                     "GameTimer.Init 要求 persistRoot 处于 activeInHierarchy 状态，" +
                     "否则 UnityTimerRunner 无法驱动 Tick。");
+            }
+
+            if (shuttingDown)
+            {
+                throw new TimerStateException(
+                    "GameTimer.Init 被拒绝：GameTimer.Shutdown 正在进行。");
             }
 
             if (scheduler != null)
@@ -191,6 +201,12 @@ namespace Game.Timer
 
         public static void Shutdown()
         {
+            if (shuttingDown)
+            {
+                throw new TimerStateException(
+                    "GameTimer.Shutdown 不允许重入。");
+            }
+
             if (scheduler == null)
             {
                 throw new TimerStateException(
@@ -199,6 +215,7 @@ namespace Game.Timer
 
             TimerScheduler currentScheduler = scheduler;
             currentScheduler.ValidateShutdown();
+            shuttingDown = true;
             UnityTimerRunner currentRunner = runner;
             GameObject rootObject = ownedRoot != null ? ownedRoot.gameObject : null;
             if (currentRunner != null)
@@ -216,6 +233,7 @@ namespace Game.Timer
                 runner = null;
                 ownedRoot = null;
                 runnerDestroyedUnexpectedly = false;
+                shuttingDown = false;
                 DestroyObject(rootObject);
             }
         }
@@ -244,10 +262,17 @@ namespace Game.Timer
             runner = null;
             ownedRoot = null;
             runnerDestroyedUnexpectedly = false;
+            shuttingDown = false;
         }
 
         private static TimerScheduler RequireScheduler(string api)
         {
+            if (shuttingDown)
+            {
+                throw new TimerStateException(
+                    $"GameTimer.{api} 被拒绝：GameTimer.Shutdown 正在进行。");
+            }
+
             if (scheduler == null || scheduler.IsDisposed)
             {
                 throw new TimerStateException(
@@ -286,7 +311,6 @@ namespace Game.Timer
     internal sealed class UnityTimerRunner : MonoBehaviour
     {
         private TimerScheduler scheduler;
-        private bool stopping;
 
         internal void Initialize(TimerScheduler value)
         {
@@ -302,7 +326,6 @@ namespace Game.Timer
             }
 
             scheduler = value;
-            stopping = false;
         }
 
         internal void Stop()
@@ -313,7 +336,6 @@ namespace Game.Timer
                     "UnityTimerRunner.Stop 要求 Runner 已 Initialize 且未停止。");
             }
 
-            stopping = true;
             scheduler = null;
             enabled = false;
         }
@@ -331,7 +353,7 @@ namespace Game.Timer
 
         private void OnDestroy()
         {
-            if (!stopping)
+            if (scheduler != null)
             {
                 GameTimer.NotifyRunnerUnavailable(this, "被外部销毁");
             }
@@ -341,7 +363,7 @@ namespace Game.Timer
 
         private void OnDisable()
         {
-            if (!stopping)
+            if (scheduler != null)
             {
                 GameTimer.NotifyRunnerUnavailable(this, "被外部禁用");
             }
