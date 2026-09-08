@@ -35,11 +35,25 @@ namespace UIFrame
             CloseSelf(destroy);
         }
 
-        internal UniTask<TResult> WaitResultAsync()
+        internal async UniTask<TResult> WaitResultAsync()
         {
-            return _result != null
-                ? _result.Task
-                : UniTask.FromCanceled<TResult>();
+            var pending = _result;
+            if (pending == null)
+            {
+                return await UniTask.FromCanceled<TResult>();
+            }
+
+            try
+            {
+                return await pending.Task;
+            }
+            finally
+            {
+                if (_result == pending)
+                {
+                    _result = null;
+                }
+            }
         }
     }
 }

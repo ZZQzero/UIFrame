@@ -938,8 +938,11 @@ namespace Game.Pooling
             {
                 PoolStats raw = Pool.Stats;
                 int countActive = Active.Count;
+                int countAll = IsPrewarming
+                    ? raw.CountAll
+                    : countActive + raw.CountInactive;
                 return new PoolStats(
-                    countActive + raw.CountInactive,
+                    countAll,
                     countActive,
                     raw.CountInactive,
                     raw.TotalCreated,
