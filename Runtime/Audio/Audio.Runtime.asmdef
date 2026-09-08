@@ -1,0 +1,17 @@
+{
+  "name": "Audio.Runtime",
+  "rootNamespace": "Game.Audio",
+  "references": [
+    "UniTask",
+    "YooAsset"
+  ],
+  "includePlatforms": [],
+  "excludePlatforms": [],
+  "allowUnsafeCode": false,
+  "overrideReferences": false,
+  "precompiledReferences": [],
+  "autoReferenced": true,
+  "defineConstraints": [],
+  "versionDefines": [],
+  "noEngineReferences": false
+}
