@@ -96,7 +96,6 @@ namespace Game.Input
             Transform persistRoot,
             InputRuntimeConfig runtimeConfig)
         {
-            EnsureMainThreadId();
             RequireMainThread(nameof(Init));
             if (runtimeConfig == null)
             {
@@ -115,7 +114,6 @@ namespace Game.Input
 
         public static void Init(Transform persistRoot, InputActionAsset actions)
         {
-            EnsureMainThreadId();
             RequireMainThread(nameof(Init));
             ValidateAsset(actions, PlayerActions.Map, UiActions.Map, 1f);
             Init(
@@ -243,17 +241,27 @@ namespace Game.Input
                     "gameplayMap 不能为空。");
             }
 
-            if (actions.FindActionMap(gameplayMapName) == null)
+            InputActionMap foundGameplay = actions.FindActionMap(gameplayMapName);
+            if (foundGameplay == null)
             {
                 throw new InvalidOperationException(
                     $"InputActionAsset 中不存在 gameplayMap：{gameplayMapName}。");
             }
 
-            if (!string.IsNullOrWhiteSpace(uiMapName) &&
-                actions.FindActionMap(uiMapName) == null)
+            if (!string.IsNullOrWhiteSpace(uiMapName))
             {
-                throw new InvalidOperationException(
-                    $"InputActionAsset 中不存在 uiMap：{uiMapName}。");
+                InputActionMap foundUi = actions.FindActionMap(uiMapName);
+                if (foundUi == null)
+                {
+                    throw new InvalidOperationException(
+                        $"InputActionAsset 中不存在 uiMap：{uiMapName}。");
+                }
+
+                if (foundUi == foundGameplay)
+                {
+                    throw new InvalidOperationException(
+                        "gameplayMap 与 uiMap 不能指向同一张 Action Map。");
+                }
             }
 
             if (!float.IsFinite(lookSensitivity) || lookSensitivity <= 0f)
@@ -322,6 +330,14 @@ namespace Game.Input
                 InputAction navigate = FindOptional(clonedUi, UiActions.Navigate);
                 InputAction cancel = FindOptional(clonedUi, UiActions.Cancel);
 
+                RequireType(move, InputActionType.Value);
+                RequireType(look, InputActionType.Value);
+                RequireType(navigate, InputActionType.Value);
+                RequireType(jump, InputActionType.Button);
+                RequireType(attack, InputActionType.Button);
+                RequireType(sprint, InputActionType.Button);
+                RequireType(cancel, InputActionType.Button);
+
                 runtimeAsset = clone;
                 gameplayMap = clonedGameplay;
                 uiMap = clonedUi;
@@ -364,6 +380,17 @@ namespace Game.Input
             }
 
             return action;
+        }
+
+        static void RequireType(InputAction action, InputActionType expected)
+        {
+            if (action == null || action.type == expected)
+            {
+                return;
+            }
+
+            throw new InputStateException(
+                $"动作 '{action.name}' 必须是 {expected}，当前是 {action.type}。");
         }
 
         static void ApplyMaps()
@@ -430,14 +457,6 @@ namespace Game.Input
             {
                 throw new InputStateException(
                     $"GameInput.{api} 要求先调用 GameInput.Init。");
-            }
-        }
-
-        static void EnsureMainThreadId()
-        {
-            if (mainThreadId == 0)
-            {
-                mainThreadId = Thread.CurrentThread.ManagedThreadId;
             }
         }
 

@@ -28,14 +28,17 @@ GameInput.Init(persistRoot, inputActionAsset);
 - 先 Init 再读。未 Init、重复 Init、重复 Shutdown 抛 `InputStateException`。
 - `Init` / `Shutdown` / `PushUi` / `PopUi` / `SetGameplayEnabled` / `Find` / 写 `LookSensitivity` 只能在主线程。
 - `persistRoot` 必须非空且 `activeInHierarchy`。Init 只检查宿主还活着，不挂节点。
-- `gameplayMap` 必须有 `Move`，否则 Init 失败。Look / Jump / Attack / Sprint / Navigate / Cancel 缺失时打 Warning，轮询返回 default。
+- `gameplayMap` 必须有 `Move`（Value），且不能与 `uiMap` 是同一张 Map。Look / Navigate 须为 Value，Jump / Attack / Sprint / Cancel 须为 Button；缺失时打 Warning，轮询返回 default。
 - Init 会 Clone 一份 Action Asset，之后只改克隆。不要销毁输入资源。
 
 ---
 
 ## 玩法轮询 `GameInput.Player`
 
-每帧从静态入口读，不要在 `Update` 里 `FindAction`，不要跨 Shutdown 缓存 `Player`。
+每帧从静态入口读。`JumpPressed` / `AttackPressed` / `CancelPressed` 对应 Input System 的
+`WasPressedThisFrame`，只在 `Update` 里读，并保持项目 Input Update Mode 为 Dynamic Update。
+不要在 `FixedUpdate` 里读 `*Pressed`。不要在 `Update` 里 `FindAction`，不要跨 Shutdown 缓存
+`Player`。
 
 ```csharp
 void Update()
@@ -82,7 +85,7 @@ void Update()
 }
 ```
 
-Map / Action 不存在抛 `KeyNotFoundException`；名为空抛 `ArgumentException`。常量见 `PlayerActions` / `UiActions`。
+Map / Action 不存在抛 `KeyNotFoundException`；名为空抛 `ArgumentException`。常量见 `PlayerActions` / `UiActions`。`Find` 返回克隆上的真实 `InputAction`，不要对它 Enable/Disable Map，也不要改 Navigate 的开关。
 
 ---
 
@@ -151,8 +154,8 @@ void OnPause(bool paused)
 | 字段 | 默认 | 含义 |
 |------|------|------|
 | actions | `InputSystem_Actions` | 源 Asset |
-| gameplayMap | `Player` | 玩法 Map，必须存在且含 Move |
-| uiMap | `UI` | 可留空，则不启用 UI Map |
+| gameplayMap | `Player` | 玩法 Map，必须存在且含 Value 类型的 Move |
+| uiMap | `UI` | 可留空；不能与 gameplayMap 是同一张 Map |
 | keepUiMapEnabled | true | 玩法期间保持 UI Map Enable（Navigate 仍只在有 UI 锁时开） |
 | lookSensitivity | 1 | `Player.Look` 倍率 |
 
