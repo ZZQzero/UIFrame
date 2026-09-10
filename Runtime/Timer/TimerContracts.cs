@@ -1,6 +1,4 @@
 using System;
-using System.Threading;
-using Cysharp.Threading.Tasks;
 
 namespace Game.Timer
 {
@@ -449,52 +447,6 @@ namespace Game.Timer
             ExecutedCount = executedCount;
             DeferredCount = deferredCount;
         }
-    }
-
-    public interface ITimerScheduler : IDisposable
-    {
-        TimerHandle Schedule(
-            long delayMs,
-            TimerCallback callback,
-            TimerClock clock = TimerClock.Scaled,
-            object state = null,
-            TimerOwner owner = default);
-
-        TimerHandle Schedule(in TimerOptions options, TimerCallback callback);
-
-        TimerHandle ScheduleAt(
-            long deadlineMs,
-            TimerCallback callback,
-            TimerClock clock = TimerClock.Scaled,
-            object state = null,
-            TimerOwner owner = default);
-
-        bool TrySchedule(
-            in TimerOptions options,
-            TimerCallback callback,
-            out TimerHandle handle);
-
-        void Cancel(TimerHandle handle);
-        bool TryCancel(TimerHandle handle);
-        int CancelOwner(TimerOwner owner);
-        void Pause(TimerHandle handle);
-        bool TryPause(TimerHandle handle);
-        void Resume(TimerHandle handle);
-        bool TryResume(TimerHandle handle);
-        bool IsActive(TimerHandle handle);
-        long GetRemainingMs(TimerHandle handle);
-        bool TryGetRemainingMs(TimerHandle handle, out long remainingMs);
-        TimerOwner CreateOwner();
-        void ReleaseOwner(TimerOwner owner);
-        bool TryReleaseOwner(TimerOwner owner);
-        void Reserve(int timerCapacity, int ownerCapacity);
-        UniTask DelayAsync(
-            long delayMs,
-            TimerClock clock = TimerClock.Scaled,
-            CancellationToken cancellationToken = default);
-        TimerTickResult Tick();
-        TimerSchedulerStats GetStats();
-        void Clear();
     }
 
     public class TimerStateException : InvalidOperationException

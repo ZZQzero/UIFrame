@@ -29,9 +29,27 @@ namespace Game.Scene
                 allowSceneActivation,
                 0);
 
-            if (allowSceneActivation)
+            try
             {
-                while (!handle.IsDone)
+                if (allowSceneActivation)
+                {
+                    while (!handle.IsDone)
+                    {
+                        EnsureYooAssetAlive();
+                        report?.Invoke(handle.Progress);
+                        await UniTask.Yield();
+                    }
+
+                    report?.Invoke(handle.Progress);
+                    if (handle.Status != EOperationStatus.Succeeded)
+                    {
+                        throw new InvalidOperationException(handle.Error);
+                    }
+
+                    return new YooAssetSceneHandle(handle, mode, false);
+                }
+
+                while (!handle.IsDone && handle.Progress < SuspendReadyProgress)
                 {
                     EnsureYooAssetAlive();
                     report?.Invoke(handle.Progress);
@@ -39,28 +57,22 @@ namespace Game.Scene
                 }
 
                 report?.Invoke(handle.Progress);
-                if (handle.Status != EOperationStatus.Succeeded)
+                if (handle.Status == EOperationStatus.Failed)
                 {
                     throw new InvalidOperationException(handle.Error);
                 }
 
-                return new YooAssetSceneHandle(handle, mode, false);
+                return new YooAssetSceneHandle(handle, mode, true);
             }
-
-            while (!handle.IsDone && handle.Progress < SuspendReadyProgress)
+            catch
             {
-                EnsureYooAssetAlive();
-                report?.Invoke(handle.Progress);
-                await UniTask.Yield();
-            }
+                if (handle.IsValid)
+                {
+                    handle.Release();
+                }
 
-            report?.Invoke(handle.Progress);
-            if (handle.Status == EOperationStatus.Failed)
-            {
-                throw new InvalidOperationException(handle.Error);
+                throw;
             }
-
-            return new YooAssetSceneHandle(handle, mode, true);
         }
 
         static void EnsureYooAssetAlive()

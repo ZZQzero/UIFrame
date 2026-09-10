@@ -248,8 +248,11 @@ public readonly struct TimerContext
 Handle 是被动值对象，不提供 `handle.Cancel()`。调用方必须把 Handle 传回创建它的
 Scheduler，避免 Handle 隐式持有 Scheduler 引用或通过全局注册表查找。
 
+调度 API 在 `TimerScheduler` 上。进程内默认入口是 `GameTimer`，测试和模拟时钟直接
+`new`/`CreateSimulation` 具体 Scheduler。
+
 ```csharp
-public interface ITimerScheduler : IDisposable
+public sealed class TimerScheduler : IDisposable
 {
     TimerHandle Schedule(
         long delayMs,

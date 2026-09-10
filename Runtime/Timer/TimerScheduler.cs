@@ -6,7 +6,7 @@ using Unity.Profiling;
 
 namespace Game.Timer
 {
-    public sealed partial class TimerScheduler : ITimerScheduler
+    public sealed partial class TimerScheduler : IDisposable
     {
         private const int Level0Size = 256;
         private const int LevelSize = 64;
