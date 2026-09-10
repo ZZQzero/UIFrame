@@ -90,7 +90,7 @@ namespace Game.Audio
             int activeInstances = 0;
             for (int i = 0; i < voices.Length; i++)
             {
-                if (voices[i].Active && voices[i].Entry.Id == entry.Id)
+                if (voices[i].Active && voices[i].Entry.Id.Equals(entry.Id))
                 {
                     activeInstances++;
                 }
@@ -128,14 +128,6 @@ namespace Game.Audio
             lastStartedAt[entry.Id] = now;
             return AudioPlayResult.Played(
                 new SoundHandle(slot.Index, slot.Generation));
-        }
-
-        internal void Stop(SoundHandle handle, float fadeOutSeconds)
-        {
-            RequireRunning();
-            ValidateFadeSeconds(fadeOutSeconds, nameof(fadeOutSeconds));
-            VoiceSlot slot = RequireActiveHandle(handle, nameof(Stop));
-            StopVoice(slot, fadeOutSeconds);
         }
 
         internal bool TryStop(SoundHandle handle, float fadeOutSeconds)
@@ -239,18 +231,6 @@ namespace Game.Audio
             }
 
             return count;
-        }
-
-        internal void UnloadSceneAudio()
-        {
-            RequireRunning();
-            cache.UnloadSceneAssets();
-        }
-
-        internal void UnloadSceneAudio(int sceneHandle)
-        {
-            RequireRunning();
-            cache.UnloadSceneAssets(sceneHandle);
         }
 
         internal void Shutdown()
@@ -429,7 +409,7 @@ namespace Game.Audio
                     (!sameAudioOnly &&
                      GetBusProtection(current.Entry.Bus) >
                      GetBusProtection(incoming.Bus)) ||
-                    (sameAudioOnly && current.Entry.Id != incoming.Id))
+                    (sameAudioOnly && !current.Entry.Id.Equals(incoming.Id)))
                 {
                     continue;
                 }
@@ -537,26 +517,6 @@ namespace Game.Audio
             ClearFade(slot);
         }
 
-        private VoiceSlot RequireActiveHandle(
-            SoundHandle handle,
-            string api)
-        {
-            if (!handle.IsValid)
-            {
-                throw new ArgumentException(
-                    $"GameAudio.{api} 不接受无效 SoundHandle。",
-                    nameof(handle));
-            }
-
-            if (!TryGetActiveVoice(handle, out VoiceSlot slot))
-            {
-                throw new AudioStateException(
-                    $"GameAudio.{api} 收到已结束或已复用的句柄：{handle}。");
-            }
-
-            return slot;
-        }
-
         private bool TryGetActiveVoice(
             SoundHandle handle,
             out VoiceSlot slot)
@@ -608,8 +568,8 @@ namespace Game.Audio
             {
                 throw new ArgumentException(
                     entryIsSpatial
-                        ? $"3D 音效 '{entry.Id}' 必须提供世界坐标。"
-                        : $"2D 音效 '{entry.Id}' 不接受世界坐标。",
+                        ? $"3D 音效 '{entry.Id.Value}' 必须提供世界坐标。"
+                        : $"2D 音效 '{entry.Id.Value}' 不接受世界坐标。",
                     nameof(options));
             }
         }
@@ -623,7 +583,7 @@ namespace Game.Audio
             {
                 throw new ArgumentOutOfRangeException(
                     nameof(options),
-                    $"音效 '{entry.Id}' 的最终音量必须位于 0..1。");
+                    $"音效 '{entry.Id.Value}' 的最终音量必须位于 0..1。");
             }
 
             float pitch = entry.Pitch * options.PitchScale;
@@ -631,7 +591,7 @@ namespace Game.Audio
             {
                 throw new ArgumentOutOfRangeException(
                     nameof(options),
-                    $"音效 '{entry.Id}' 的最终音高必须位于 0.01..3。");
+                    $"音效 '{entry.Id.Value}' 的最终音高必须位于 0.01..3。");
             }
         }
 

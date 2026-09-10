@@ -4,7 +4,7 @@
 `AudioSource`，也不要销毁 `[GameAudio]` 节点。
 
 YooAsset location 按文件名寻址。当前资源在 `Assets/Art/Audio`，配置在
-`Assets/Audio/Config/DefaultAudioRuntimeConfig.asset`。业务 ID 写在
+`Assets/UIFrame1/Runtime/Audio/Config/DefaultAudioRuntimeConfig.asset`。业务 ID 写在
 `GameAudioIds`。
 
 ---
@@ -47,10 +47,9 @@ GamePool.Shutdown();
 
 ### 注意
 
-- 必须先 Init，再播放。未 Init、重复 Init、未 Shutdown 再 Init 都会抛。
+- 必须先 Init，再播放。未 Init、重复 Init、未 ShutdownAsync 再 Init 都会抛。
 - 只能在 Unity 主线程调用公开 API。
 - 退出用 `ShutdownAsync`：它会取消进行中的播放请求，等加载结束后再拆。
-- 同步 `Shutdown` 要求此时已经没有异步播放和加载，否则抛。业务退出不要用它。
 - 不要 `Destroy` `[GameAudio]`。拆掉之后 `IsInited` 为 false，播放接口会抛，且
   `Launch` 可能跳过关闭。
 - `InitAsync` / 播放可传 `CancellationToken`。启动被取消时，Init 会把已创建部分清掉再抛。
@@ -62,9 +61,8 @@ GamePool.Shutdown();
 | 场景 | API | 失败时 |
 |------|-----|--------|
 | 音效、UI 音 | `TryPlayAsync` | 返回 `AudioPlayResult`，看 `Rejection` |
-| 必须播出的音效 | `PlayAsync` | 冷却/声道满等抛 `AudioPlaybackRejectedException` |
-| BGM | `PlayBgmAsync` / `TryPlayBgmAsync` | 同上；BGM 不能走 `PlayAsync` |
-| 停某一声 | `Stop` / `TryStop` | `Stop` 遇到过期句柄会抛；`TryStop` 返回 false |
+| BGM | `TryPlayBgmAsync` | 同上；BGM 不能走 `TryPlayAsync` |
+| 停某一声 | `TryStop` | 过期或无效句柄返回 false |
 | 停当前 BGM | `StopBgm` | 没有在播则返回 0 |
 | 停一整条总线 | `StopBus` | — |
 
@@ -115,26 +113,6 @@ await GameAudio.TryPlayAsync(GameAudioIds.Eat, options, cancellationToken);
 ## 4. 播放 BGM
 
 ```csharp
-SoundHandle bgm = await GameAudio.PlayBgmAsync(
-    GameAudioIds.LudoBgm,
-    crossFadeSeconds: 0.5f,
-    cancellationToken);
-
-if (GameAudio.IsPlaying(bgm))
-{
-    GameAudio.Stop(bgm, 0.25f);
-}
-
-// 关卡进出不关心句柄时：
-GameAudio.StopBgm(0.25f);
-bool playing = GameAudio.IsBgmPlaying();
-```
-
-切换曲目再调一次 `PlayBgmAsync` 即可，旧曲会按 `crossFadeSeconds` 淡出。
-
-并行切 BGM、且冷却/声道拒绝不算事故时，用 `TryPlayBgmAsync`：
-
-```csharp
 AudioPlayResult result = await GameAudio.TryPlayBgmAsync(
     GameAudioIds.LudoBgm,
     0.5f,
@@ -145,16 +123,26 @@ if (!result.IsPlaying)
     // Superseded：被更新的 BGM 请求取代
     return;
 }
+
+if (GameAudio.IsPlaying(result.Handle))
+{
+    GameAudio.TryStop(result.Handle, 0.25f);
+}
+
+// 关卡进出不关心句柄时：
+GameAudio.StopBgm(0.25f);
 ```
+
+切换曲目再调一次 `TryPlayBgmAsync` 即可，旧曲会按 `crossFadeSeconds` 淡出。
 
 ### 注意
 
-- 配置为 BGM 的条目只能走 BGM 接口；反过来，音效 ID 不能传给 `PlayBgmAsync`。
+- 配置为 BGM 的条目只能走 BGM 接口；反过来，音效 ID 不能传给 `TryPlayBgmAsync`。
 - BGM 必须是 2D，`maxInstances` 必须为 2（交叉淡化）。
 - 关闭面板后仍可能有一次正在加载的 BGM 完成。要用打开代次或 `cancellationToken`
   判断过期，过期后 `TryStop` 刚拿到的句柄，不要写到新一轮 UI 上。
-- `IsBgmPlaying()` 在淡出结束前仍为 true。按钮「播放/停止」如果要在淡出期间允许再播，
-  应记住自己的 `SoundHandle`，不要用 `IsBgmPlaying` 做开关。
+- 按钮「播放/停止」应记住自己的 `SoundHandle`，用 `IsPlaying(handle)` 判断，
+  不要扫总线。淡出结束前句柄仍有效。
 
 ---
 
@@ -239,13 +227,10 @@ await GameAudio.TryPlayAsync(
     id,
     AudioPlayOptions.Default.InScene(gameplayScene),
     cancellationToken);
-
-GameAudio.UnloadSceneAudio(gameplayScene); // 只卸这一场景的 Scene 缓存
-GameAudio.UnloadSceneAudio();              // 卸全部 Scene 缓存
 ```
 
 不写 `InScene` 时，记的是调用当下的 Active Scene。Driver 会在 `sceneUnloaded` 时
-按 handle 释放对应空闲缓存；仍在播放的声音播完后再放。
+按 handle 释放对应空闲缓存；仍在播放的声音播完后再放。不必再手动卸载。
 
 Additive 场景请显式 `InScene`，不要依赖 Active Scene。
 
@@ -253,17 +238,15 @@ Additive 场景请显式 `InScene`，不要依赖 Active Scene。
 
 ## 8. 句柄与查询
 
-`SoundHandle` 是声道代次。声音自然结束、被抢占或 `Stop` 之后，旧句柄失效。
+`SoundHandle` 是声道代次。声音自然结束、被抢占或 `TryStop` 之后，旧句柄失效。
+比较句柄用 `Equals` / `IsValid`，不要用 `==`。
 
 ```csharp
-GameAudio.IsPlaying(handle);                 // 该句柄是否仍占着声道（含 Listener 暂停）
-GameAudio.GetActiveVoiceCount();             // 全部
-GameAudio.GetActiveVoiceCount(AudioBus.Sfx); // 某总线
-GameAudio.IsBgmPlaying();
+GameAudio.IsPlaying(handle); // 该句柄是否仍占着声道（含 Listener 暂停）
+GameAudio.TryStop(handle, 0.25f); // 过期或 default 返回 false
 ```
 
-过期句柄用 `Stop` 会抛，用 `TryStop` 得到 false。关界面、关关卡用 `TryStop` /
-`StopBgm` / `StopBus`。
+关界面、关关卡用 `TryStop` / `StopBgm` / `StopBus`。
 
 ---
 
@@ -294,7 +277,7 @@ void OnClickBgm()
 {
     if (_bgmHandle.IsValid && GameAudio.IsPlaying(_bgmHandle))
     {
-        GameAudio.Stop(_bgmHandle, 0.25f);
+        GameAudio.TryStop(_bgmHandle, 0.25f);
         _bgmHandle = default;
         return;
     }

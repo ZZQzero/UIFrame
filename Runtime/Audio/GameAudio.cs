@@ -3,16 +3,10 @@ using System.Collections.Generic;
 using System.Threading;
 using Cysharp.Threading.Tasks;
 using UnityEngine;
-using UnityEngine.SceneManagement;
 using YooAsset;
 
 namespace Game.Audio
 {
-    /// <summary>
-    /// 进程内 Audio 入口。必须由启动流程显式 InitAsync / ShutdownAsync。
-    /// 音效用 TryPlayAsync，BGM 用 PlayBgmAsync 或 TryPlayBgmAsync。
-    /// Scene 加载模式默认归属于调用时的 Active Scene，也可用 InScene 指定。
-    /// </summary>
     public static class GameAudio
     {
         private const string RootName = "[GameAudio]";
@@ -162,39 +156,6 @@ namespace Game.Audio
             }
         }
 
-        public static UniTask<SoundHandle> PlayAsync(
-            AudioId id,
-            CancellationToken cancellationToken = default)
-        {
-            return PlayAsync(
-                id,
-                AudioPlayOptions.Default,
-                cancellationToken);
-        }
-
-        public static async UniTask<SoundHandle> PlayAsync(
-            AudioId id,
-            AudioPlayOptions options,
-            CancellationToken cancellationToken = default)
-        {
-            AudioPlayResult result = await TryPlayInternalAsync(
-                nameof(PlayAsync),
-                id,
-                options,
-                requiredBus: null,
-                fadeInSeconds: 0f,
-                fadeOutPreviousBgmSeconds: 0f,
-                cancellationToken);
-            if (!result.IsPlaying)
-            {
-                throw new AudioPlaybackRejectedException(
-                    id,
-                    result.Rejection);
-            }
-
-            return result.Handle;
-        }
-
         public static UniTask<AudioPlayResult> TryPlayAsync(
             AudioId id,
             CancellationToken cancellationToken = default)
@@ -218,39 +179,6 @@ namespace Game.Audio
                 fadeInSeconds: 0f,
                 fadeOutPreviousBgmSeconds: 0f,
                 cancellationToken);
-        }
-
-        public static UniTask<SoundHandle> PlayBgmAsync(
-            AudioId id,
-            float crossFadeSeconds = 0.5f,
-            CancellationToken cancellationToken = default)
-        {
-            return PlayBgmAsync(
-                id,
-                AudioPlayOptions.Default,
-                crossFadeSeconds,
-                cancellationToken);
-        }
-
-        public static async UniTask<SoundHandle> PlayBgmAsync(
-            AudioId id,
-            AudioPlayOptions options,
-            float crossFadeSeconds = 0.5f,
-            CancellationToken cancellationToken = default)
-        {
-            AudioPlayResult result = await TryPlayBgmAsync(
-                id,
-                options,
-                crossFadeSeconds,
-                cancellationToken);
-            if (!result.IsPlaying)
-            {
-                throw new AudioPlaybackRejectedException(
-                    id,
-                    result.Rejection);
-            }
-
-            return result.Handle;
         }
 
         public static UniTask<AudioPlayResult> TryPlayBgmAsync(
@@ -279,14 +207,6 @@ namespace Game.Audio
                 crossFadeSeconds,
                 crossFadeSeconds,
                 cancellationToken);
-        }
-
-        public static void Stop(
-            SoundHandle handle,
-            float fadeOutSeconds = 0f)
-        {
-            RequireMainThread(nameof(Stop));
-            RequireDriver(nameof(Stop)).Stop(handle, fadeOutSeconds);
         }
 
         public static bool TryStop(
@@ -354,79 +274,11 @@ namespace Game.Audio
             return GetMixerVolume(current.VolumeParameters[bus]);
         }
 
-        public static int GetActiveVoiceCount()
-        {
-            RequireMainThread(nameof(GetActiveVoiceCount));
-            return RequireDriver(nameof(GetActiveVoiceCount))
-                .GetActiveVoiceCount();
-        }
-
-        public static int GetActiveVoiceCount(AudioBus bus)
-        {
-            RequireMainThread(nameof(GetActiveVoiceCount));
-            ValidateBus(bus);
-            return RequireDriver(nameof(GetActiveVoiceCount))
-                .GetActiveVoiceCount(bus);
-        }
-
-        public static bool IsBgmPlaying()
-        {
-            RequireMainThread(nameof(IsBgmPlaying));
-            return RequireDriver(nameof(IsBgmPlaying))
-                .GetActiveVoiceCount(AudioBus.Bgm) > 0;
-        }
-
         public static int StopBgm(float fadeOutSeconds = 0f)
         {
             RequireMainThread(nameof(StopBgm));
             return RequireDriver(nameof(StopBgm))
                 .StopBus(AudioBus.Bgm, fadeOutSeconds);
-        }
-
-        public static void UnloadSceneAudio()
-        {
-            RequireMainThread(nameof(UnloadSceneAudio));
-            RequireDriver(nameof(UnloadSceneAudio)).UnloadSceneAudio();
-        }
-
-        public static void UnloadSceneAudio(Scene scene)
-        {
-            RequireMainThread(nameof(UnloadSceneAudio));
-            if (!scene.IsValid())
-            {
-                throw new ArgumentException(
-                    "UnloadSceneAudio 要求传入有效 Scene。",
-                    nameof(scene));
-            }
-
-            RequireDriver(nameof(UnloadSceneAudio))
-                .UnloadSceneAudio(scene.handle);
-        }
-
-        public static void Shutdown()
-        {
-            RequireMainThread(nameof(Shutdown));
-            if (state != RuntimeState.Running)
-            {
-                throw new AudioStateException(
-                    "GameAudio.Shutdown 只能在成功 InitAsync 后调用一次。");
-            }
-
-            if (pendingOperations != 0)
-            {
-                throw new AudioStateException(
-                    $"GameAudio.Shutdown 被拒绝：仍有 {pendingOperations} 个异步播放请求。" +
-                    "调用方必须先取消并等待这些请求结束。");
-            }
-
-            if (cache.LoadingCount != 0)
-            {
-                throw new AudioStateException(
-                    $"GameAudio.Shutdown 被拒绝：仍有 {cache.LoadingCount} 个资源加载。");
-            }
-
-            BeginShutdown();
-            CompleteShutdown();
         }
 
         public static async UniTask ShutdownAsync()
@@ -469,7 +321,7 @@ namespace Game.Audio
             driverDestroyedUnexpectedly = true;
             Debug.LogError(
                 "[GameAudio] AudioRuntimeDriver 被意外销毁。" +
-                "禁止直接销毁 [GameAudio]，请修复调用方生命周期并由 Launch 调用 Shutdown。");
+                "禁止直接销毁 [GameAudio]，请修复调用方生命周期并由 Launch 调用 ShutdownAsync。");
         }
 
         [RuntimeInitializeOnLoadMethod(RuntimeInitializeLoadType.SubsystemRegistration)]
@@ -526,7 +378,7 @@ namespace Game.Audio
             if (!config.Catalog.TryGetValue(id, out AudioEntry entry))
             {
                 throw new KeyNotFoundException(
-                    $"AudioRuntimeConfig 未配置 AudioId：{id}。");
+                    $"AudioRuntimeConfig 未配置 AudioId：{id.Value}。");
             }
 
             if (requiredBus.HasValue)
@@ -534,14 +386,14 @@ namespace Game.Audio
                 if (entry.Bus != requiredBus.Value)
                 {
                     throw new ArgumentException(
-                        $"AudioId '{id}' 属于 {entry.Bus}，不能通过 BGM 接口播放。",
+                        $"AudioId '{id.Value}' 属于 {entry.Bus}，不能通过 BGM 接口播放。",
                         nameof(id));
                 }
             }
             else if (entry.Bus == AudioBus.Bgm)
             {
                 throw new ArgumentException(
-                    $"BGM '{id}' 必须通过 PlayBgmAsync 播放。",
+                    $"BGM '{id.Value}' 必须通过 TryPlayBgmAsync 播放。",
                     nameof(id));
             }
 

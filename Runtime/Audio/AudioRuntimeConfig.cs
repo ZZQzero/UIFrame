@@ -227,7 +227,7 @@ namespace Game.Audio
                 if (!catalog.TryAdd(entry.Id, entry))
                 {
                     throw new InvalidOperationException(
-                        $"AudioRuntimeConfig 存在重复 AudioId：{entry.Id}。");
+                        $"AudioRuntimeConfig 存在重复 AudioId：{entry.Id.Value}。");
                 }
 
                 if (entry.Bus == AudioBus.Bgm)
@@ -235,14 +235,14 @@ namespace Game.Audio
                     if (entry.MaxInstances != AudioRuntimeLimits.BgmVoiceCount)
                     {
                         throw new InvalidOperationException(
-                            $"BGM '{entry.Id}' 的 maxInstances 必须为 " +
+                            $"BGM '{entry.Id.Value}' 的 maxInstances 必须为 " +
                             $"{AudioRuntimeLimits.BgmVoiceCount}，以支持交叉淡化。");
                     }
                 }
                 else if (entry.MaxInstances > maxVoices)
                 {
                     throw new InvalidOperationException(
-                        $"AudioEntry '{entry.Id}' 的 maxInstances " +
+                        $"AudioEntry '{entry.Id.Value}' 的 maxInstances " +
                         $"不能超过常规声道容量 {maxVoices}。");
                 }
 

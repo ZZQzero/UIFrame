@@ -65,14 +65,6 @@ namespace Game.Audio
 
         public override int GetHashCode() =>
             value == null ? 0 : StringComparer.Ordinal.GetHashCode(value);
-
-        public override string ToString() => value ?? "<invalid>";
-
-        public static bool operator ==(AudioId left, AudioId right) =>
-            left.Equals(right);
-
-        public static bool operator !=(AudioId left, AudioId right) =>
-            !left.Equals(right);
     }
 
     public readonly struct SoundHandle : IEquatable<SoundHandle>
@@ -97,17 +89,6 @@ namespace Game.Audio
             obj is SoundHandle other && Equals(other);
 
         public override int GetHashCode() => HashCode.Combine(slot, generation);
-
-        public override string ToString() =>
-            IsValid ? $"SoundHandle({slot}:{generation})" : "SoundHandle(invalid)";
-
-        public static bool operator ==(SoundHandle left, SoundHandle right) =>
-            left.Equals(right);
-
-        public static bool operator !=(SoundHandle left, SoundHandle right) =>
-            !left.Equals(right);
-
-        public static SoundHandle Invalid => new(-1, 0);
     }
 
     public readonly struct AudioPlayOptions
@@ -202,10 +183,6 @@ namespace Game.Audio
                 SceneHandle);
         }
 
-        /// <summary>
-        /// 将 Scene 加载模式的音频缓存归属于指定场景。
-        /// 未显式指定时，播放接口使用调用时的 Active Scene。
-        /// </summary>
         public AudioPlayOptions InScene(Scene scene)
         {
             RequireInitialized();
@@ -253,7 +230,7 @@ namespace Game.Audio
             new(handle, AudioPlayRejection.None);
 
         internal static AudioPlayResult Rejected(AudioPlayRejection rejection) =>
-            new(SoundHandle.Invalid, rejection);
+            new(default, rejection);
     }
 
     public sealed class AudioStateException : InvalidOperationException
@@ -261,21 +238,6 @@ namespace Game.Audio
         public AudioStateException(string message) : base(message)
         {
         }
-    }
-
-    public sealed class AudioPlaybackRejectedException : InvalidOperationException
-    {
-        public AudioPlaybackRejectedException(
-            AudioId id,
-            AudioPlayRejection rejection)
-            : base($"音效 {id} 的播放请求被策略拒绝：{rejection}。")
-        {
-            AudioId = id;
-            Rejection = rejection;
-        }
-
-        public AudioId AudioId { get; }
-        public AudioPlayRejection Rejection { get; }
     }
 
     internal static class AudioRuntimeLimits
@@ -327,7 +289,7 @@ namespace Game.Audio
                 if (options.HasSceneScope)
                 {
                     throw new ArgumentException(
-                        $"音效 '{entry.Id}' 不是 Scene 加载模式，不能指定 Scene 作用域。",
+                        $"音效 '{entry.Id.Value}' 不是 Scene 加载模式，不能指定 Scene 作用域。",
                         nameof(options));
                 }
 
@@ -342,7 +304,7 @@ namespace Game.Audio
             if (!IsLoaded(options.SceneHandle))
             {
                 throw new AudioStateException(
-                    $"音效 '{entry.Id}' 指定的 Scene 已不再处于加载状态。");
+                    $"音效 '{entry.Id.Value}' 指定的 Scene 已不再处于加载状态。");
             }
 
             return options.SceneHandle;
