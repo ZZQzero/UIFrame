@@ -32,11 +32,6 @@ namespace Game.Pooling
 
         public async UniTask<IPrefabHandle> LoadAsync(string location)
         {
-            if (string.IsNullOrWhiteSpace(location))
-            {
-                throw new ArgumentException("Prefab location cannot be empty.", nameof(location));
-            }
-
             AssetHandle handle = package.LoadAssetAsync<GameObject>(location);
             await handle;
 
@@ -68,14 +63,7 @@ namespace Game.Pooling
                 }
 
                 var options = new InstantiateOptions(false, parent, false);
-                GameObject instance = handle.InstantiateSync(options);
-                if (instance == null)
-                {
-                    throw new InvalidOperationException(
-                        "YooAsset returned a null prefab instance.");
-                }
-
-                return instance;
+                return handle.InstantiateSync(options);
             }
 
             public void Dispose()

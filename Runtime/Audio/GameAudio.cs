@@ -85,15 +85,6 @@ namespace Game.Audio
             try
             {
                 ResolvedAudioConfig resolved = runtimeConfig.Resolve();
-                foreach (AudioEntry entry in resolved.Catalog.Values)
-                {
-                    if (!package.IsLocationValid(entry.Location))
-                    {
-                        throw new InvalidOperationException(
-                            $"YooAsset 中不存在配置的音频 location：{entry.Location}。");
-                    }
-                }
-
                 var createdCache = new AudioClipCache(
                     package,
                     resolved.CacheRetentionSeconds);

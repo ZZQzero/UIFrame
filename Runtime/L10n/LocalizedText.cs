@@ -46,8 +46,7 @@ namespace Game.L10n
                 return;
             }
 
-            text.text = LanguageManager.Get(key);
-            LanguageManager.ApplyRtl(text);
+            LanguageManager.SetText(text, key);
             if (fitter != null && (layout == null || !layout.isActiveAndEnabled))
             {
                 text.ForceMeshUpdate();

@@ -273,7 +273,7 @@ namespace Game.Timer
                     $"GameTimer.{api} 被拒绝：GameTimer.Shutdown 正在进行。");
             }
 
-            if (scheduler == null || scheduler.IsDisposed)
+            if (scheduler == null)
             {
                 throw new TimerStateException(
                     $"GameTimer.{api} 要求先调用 GameTimer.Init。");

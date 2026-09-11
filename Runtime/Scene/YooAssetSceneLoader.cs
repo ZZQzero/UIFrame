@@ -35,7 +35,6 @@ namespace Game.Scene
                 {
                     while (!handle.IsDone)
                     {
-                        EnsureYooAssetAlive();
                         report?.Invoke(handle.Progress);
                         await UniTask.Yield();
                     }
@@ -51,7 +50,6 @@ namespace Game.Scene
 
                 while (!handle.IsDone && handle.Progress < SuspendReadyProgress)
                 {
-                    EnsureYooAssetAlive();
                     report?.Invoke(handle.Progress);
                     await UniTask.Yield();
                 }
@@ -72,14 +70,6 @@ namespace Game.Scene
                 }
 
                 throw;
-            }
-        }
-
-        static void EnsureYooAssetAlive()
-        {
-            if (!YooAssets.IsInitialized)
-            {
-                throw new InvalidOperationException("YooAsset 未初始化。");
             }
         }
 
@@ -137,7 +127,6 @@ namespace Game.Scene
 
                 while (!handle.IsDone)
                 {
-                    EnsureYooAssetAlive();
                     await UniTask.Yield();
                 }
 

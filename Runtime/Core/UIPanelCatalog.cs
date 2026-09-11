@@ -69,11 +69,6 @@ namespace UIFrame
 
         internal static UIPanelBind Resolve(Type panelType, UIOpenMode mode)
         {
-            if (panelType == null)
-            {
-                throw new ArgumentNullException(nameof(panelType));
-            }
-
             if (!Map.TryGetValue(panelType, out var entry))
             {
                 throw new InvalidOperationException(

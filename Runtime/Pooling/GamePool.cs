@@ -22,11 +22,6 @@ namespace Game.Pooling
         /// <summary>创建默认池。已 Init 或上次未 Shutdown 时抛错，要换池先 <see cref="Shutdown"/>。</summary>
         public static void Init(ResourcePackage package, Transform persistRoot)
         {
-            if (package == null)
-            {
-                throw new ArgumentNullException(nameof(package));
-            }
-
             Init(new YooAssetPrefabProvider(package), persistRoot);
         }
 

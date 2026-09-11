@@ -54,6 +54,11 @@ namespace UIFrame
         public static void SetPackage(ResourcePackage package)
         {
             RequireInit();
+            if (package == null)
+            {
+                throw new ArgumentNullException(nameof(package));
+            }
+
             _manager.SetPackage(package);
         }
 
@@ -362,7 +367,7 @@ namespace UIFrame
             }
 
             var packages = YooAssets.GetPackages();
-            if (packages == null || packages.Count == 0)
+            if (packages.Count == 0)
             {
                 return null;
             }

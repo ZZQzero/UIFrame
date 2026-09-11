@@ -14,7 +14,7 @@ namespace UIFrame
 
         public void SetPackage(ResourcePackage package)
         {
-            _package = package ?? throw new ArgumentNullException(nameof(package));
+            _package = package;
         }
 
         public async UniTask<UIPanel> Load(
@@ -35,14 +35,13 @@ namespace UIFrame
             {
                 handle = _package.LoadAssetAsync<GameObject>(location);
                 await handle;
-                if (handle == null || handle.Status != EOperationStatus.Succeeded)
+                if (handle.Status != EOperationStatus.Succeeded)
                 {
-                    var status = handle != null ? handle.Status.ToString() : "null";
                     throw new InvalidOperationException(
-                        $"[UIFrame] 加载失败: {location}, Status={status}");
+                        $"[UIFrame] 加载失败: {location}, Status={handle.Status}");
                 }
 
-                if (req != null && req.Cancelled)
+                if (req is { Cancelled: true })
                 {
                     throw new OperationCanceledException();
                 }
@@ -56,7 +55,7 @@ namespace UIFrame
                         $"[UIFrame] InstantiateAsync 失败: {location}");
                 }
 
-                if (req != null && req.Cancelled)
+                if (req is { Cancelled: true })
                 {
                     throw new OperationCanceledException();
                 }

@@ -143,16 +143,6 @@ namespace UIFrame
 
         public void SetPackage(ResourcePackage package)
         {
-            if (_loader == null)
-            {
-                throw new InvalidOperationException("[UIFrame] 尚未 Init，无法绑定 ResourcePackage。");
-            }
-
-            if (package == null)
-            {
-                throw new ArgumentNullException(nameof(package));
-            }
-
             _loader.SetPackage(package);
             Debug.Log($"[UIFrame] 已绑定 ResourcePackage: {package.PackageName}");
         }
@@ -164,16 +154,18 @@ namespace UIFrame
                 throw new ArgumentException("[UIFrame] packageName 为空。", nameof(packageName));
             }
 
-            SetPackage(YooAssets.GetPackage(packageName));
+            var package = YooAssets.GetPackage(packageName);
+            if (package == null)
+            {
+                throw new InvalidOperationException(
+                    $"[UIFrame] ResourcePackage 不存在: {packageName}");
+            }
+
+            SetPackage(package);
         }
 
         public Camera ConfigureURPCameraStack(Camera baseCamera, Camera uiCamera, int uiLayer)
         {
-            if (_root == null)
-            {
-                throw new InvalidOperationException("[UIFrame] UIFrameRoot 未就绪，无法配置 URP Camera Stack。");
-            }
-
             return _root.ConfigureURPCameraStack(baseCamera, uiCamera, uiLayer);
         }
 
@@ -201,11 +193,6 @@ namespace UIFrame
             where TPanel : UIPanel<TArgs>
         {
             var type = typeof(TPanel);
-            if (!_inited)
-            {
-                throw new InvalidOperationException("[UIFrame] 请先调用 UI.Init()。");
-            }
-
             if (mode == UIOpenMode.Toast)
             {
                 return OpenToast<TPanel>(type, args, duration: null);
@@ -405,12 +392,6 @@ namespace UIFrame
                     }
                 }
 
-                if (!_inited)
-                {
-                    throw new OperationCanceledException(
-                        "[UIFrame] 已 Shutdown，Toast 打开已取消。");
-                }
-
                 PresentToast(panel, args, duration);
                 return panel;
             }
@@ -460,12 +441,6 @@ namespace UIFrame
         {
             var parent = _root.GetLayer(bind.Layer);
             var panel = await _loader.Load(type, bind.Location, parent, req);
-            if (!_inited || _root == null)
-            {
-                DestroyPanelAndReport(panel);
-                throw new OperationCanceledException();
-            }
-
             ApplyBind(panel, bind);
             try
             {
@@ -567,11 +542,6 @@ namespace UIFrame
 
         public void Close(Type panelType, bool destroy)
         {
-            if (panelType == null)
-            {
-                throw new ArgumentNullException(nameof(panelType));
-            }
-
             _toastSuppressPump++;
             try
             {
@@ -632,11 +602,6 @@ namespace UIFrame
 
         public void CloseInstance(UIPanel panel, bool destroy)
         {
-            if (panel == null)
-            {
-                throw new ArgumentNullException(nameof(panel));
-            }
-
             var type = panel.PanelType;
             var isOpened = _opened.TryGetValue(type, out var opened) && opened == panel;
             if (!isOpened && !IsVisibleToast(panel))

@@ -10,10 +10,9 @@ namespace Game.L10n
     {
         const string PrefsKey = "game.language";
 
-        static TbLanguage table;
+        static Dictionary<string, LanguageTexts> table;
         static readonly List<LocalizedText> ActiveTexts = new();
         static readonly List<LanguageResponsiveText> ActiveLayouts = new();
-        static readonly List<LanguageResponsiveText> LayoutSnapshot = new();
         static readonly ConditionalWeakTable<TMP_Text, AlignmentState> savedAlignment = new();
 #if UNITY_EDITOR
         static readonly HashSet<string> WarnedKeys = new();
@@ -25,14 +24,9 @@ namespace Game.L10n
 
         public static GameLanguage Current { get; private set; } = GameLanguage.ZhCN;
 
-        public static void Init(TbLanguage languageTable)
+        public static void Init(Dictionary<string, LanguageTexts> rows)
         {
-            if (languageTable == null)
-            {
-                throw new ArgumentNullException(nameof(languageTable));
-            }
-
-            table = languageTable;
+            table = rows ?? throw new ArgumentNullException(nameof(rows));
             Current = ReadSavedLanguage();
 #if UNITY_EDITOR
             WarnedKeys.Clear();
@@ -50,7 +44,6 @@ namespace Game.L10n
             ActiveLayouts.Clear();
             LanguageChanged = null;
             savedAlignment.Clear();
-            LayoutSnapshot.Clear();
 #if UNITY_EDITOR
             WarnedKeys.Clear();
 #endif
@@ -79,15 +72,13 @@ namespace Game.L10n
                 return string.Empty;
             }
 
-            var row = table.GetOrDefault(key);
-            if (row == null)
+            if (!table.TryGetValue(key, out var texts))
             {
                 WarnMissing(key, "missing or empty");
                 return key;
             }
 
-            var text = Pick(row);
-            return string.IsNullOrEmpty(text) ? key : text;
+            return Pick(key, in texts);
         }
 
         public static string Format(string key, params object[] args)
@@ -255,15 +246,9 @@ namespace Game.L10n
 
         static void RefreshLayouts()
         {
-            LayoutSnapshot.Clear();
             for (int i = 0; i < ActiveLayouts.Count; i++)
             {
-                LayoutSnapshot.Add(ActiveLayouts[i]);
-            }
-
-            for (int i = 0; i < LayoutSnapshot.Count; i++)
-            {
-                var layout = LayoutSnapshot[i];
+                var layout = ActiveLayouts[i];
                 if (layout != null)
                 {
                     layout.Apply();
@@ -318,7 +303,7 @@ namespace Game.L10n
             return GameLanguage.EnUS;
         }
 
-        static string Pick(LanguageTable row)
+        static string Pick(string key, in LanguageTexts row)
         {
             string primary;
             switch (Current)
@@ -339,13 +324,13 @@ namespace Game.L10n
                 return primary;
             }
 
-            WarnMissing(row.Key, "empty text for");
+            WarnMissing(key, "empty text for");
             if (Current != GameLanguage.EnUS && !string.IsNullOrEmpty(row.EnUS))
             {
                 return row.EnUS;
             }
 
-            return row.ZhCN;
+            return string.IsNullOrEmpty(row.ZhCN) ? key : row.ZhCN;
         }
 
         static void EnsureInited()
