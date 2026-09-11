@@ -45,7 +45,7 @@ namespace Game
             for (int i = 0; i < count; i++)
             {
                 IEventBucket bucket = items[i];
-                if (bucket == null || !bucket.IsPublishing)
+                if (!bucket.IsPublishing)
                 {
                     continue;
                 }
@@ -60,7 +60,7 @@ namespace Game
             Snapshot(out IEventBucket[] items, out int count);
             for (int i = 0; i < count; i++)
             {
-                items[i]?.Clear();
+                items[i].Clear();
             }
         }
 
@@ -76,11 +76,6 @@ namespace Game
             for (int i = 0; i < count && remaining > 0; i++)
             {
                 IEventBucket bucket = items[i];
-                if (bucket == null)
-                {
-                    continue;
-                }
-
                 int perType = remaining < MaxDrainPerType ? remaining : MaxDrainPerType;
                 remaining -= bucket.DrainPosted(perType);
             }
@@ -95,11 +90,6 @@ namespace Game
             for (int i = 0; i < count; i++)
             {
                 IEventBucket bucket = items[i];
-                if (bucket == null)
-                {
-                    continue;
-                }
-
                 UnityEngine.Debug.Log($"[EventSystem] {bucket.TypeName}: {bucket.ListenerCount}");
             }
         }

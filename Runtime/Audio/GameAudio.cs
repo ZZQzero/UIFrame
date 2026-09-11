@@ -26,15 +26,11 @@ namespace Game.Audio
         private static int pendingOperations;
         private static bool driverDestroyedUnexpectedly;
 
-        public static bool IsInited =>
-            state == RuntimeState.Running &&
-            driver != null &&
-            !driverDestroyedUnexpectedly;
+        public static bool IsInited => state == RuntimeState.Running;
 
         public static async UniTask InitAsync(
             ResourcePackage package,
             AudioRuntimeConfig runtimeConfig,
-            Transform persistRoot,
             CancellationToken cancellationToken = default)
         {
             RequireMainThread(nameof(InitAsync));
@@ -59,17 +55,6 @@ namespace Game.Audio
             if (runtimeConfig == null)
             {
                 throw new ArgumentNullException(nameof(runtimeConfig));
-            }
-
-            if (persistRoot == null)
-            {
-                throw new ArgumentNullException(nameof(persistRoot));
-            }
-
-            if (!persistRoot.gameObject.activeInHierarchy)
-            {
-                throw new AudioStateException(
-                    "GameAudio.InitAsync 要求 persistRoot 处于 activeInHierarchy 状态。");
             }
 
             cancellationToken.ThrowIfCancellationRequested();
@@ -123,11 +108,7 @@ namespace Game.Audio
                 DisposeResidentLeases();
                 if (driverInitialized)
                 {
-                    if (cache.LoadingCount != 0)
-                    {
-                        await cache.WaitForIdleAsync();
-                    }
-
+                    await cache.WaitForIdleAsync();
                     driver.Shutdown();
                 }
                 else
@@ -220,7 +201,6 @@ namespace Game.Audio
             float fadeOutSeconds = 0f)
         {
             RequireMainThread(nameof(StopBus));
-            ValidateBus(bus);
             return RequireDriver(nameof(StopBus))
                 .StopBus(bus, fadeOutSeconds);
         }
@@ -248,7 +228,6 @@ namespace Game.Audio
             float linearVolume)
         {
             RequireMainThread(nameof(SetBusVolume));
-            ValidateBus(bus);
             ResolvedAudioConfig current = RequireConfig(
                 nameof(SetBusVolume));
             SetMixerVolume(
@@ -259,7 +238,6 @@ namespace Game.Audio
         public static float GetBusVolume(AudioBus bus)
         {
             RequireMainThread(nameof(GetBusVolume));
-            ValidateBus(bus);
             ResolvedAudioConfig current = RequireConfig(
                 nameof(GetBusVolume));
             return GetMixerVolume(current.VolumeParameters[bus]);
@@ -312,7 +290,7 @@ namespace Game.Audio
             driverDestroyedUnexpectedly = true;
             Debug.LogError(
                 "[GameAudio] AudioRuntimeDriver 被意外销毁。" +
-                "禁止直接销毁 [GameAudio]，请修复调用方生命周期并由 Launch 调用 ShutdownAsync。");
+                "禁止直接销毁 [GameAudio]。后续播放/停止将抛出异常，请从调用栈定位销毁来源。");
         }
 
         [RuntimeInitializeOnLoadMethod(RuntimeInitializeLoadType.SubsystemRegistration)]
@@ -357,9 +335,10 @@ namespace Game.Audio
                     nameof(options));
             }
 
-            if (!float.IsFinite(fadeInSeconds) || fadeInSeconds < 0f ||
-                !float.IsFinite(fadeOutPreviousBgmSeconds) ||
-                fadeOutPreviousBgmSeconds < 0f)
+            if (requiredBus == AudioBus.Bgm &&
+                (!float.IsFinite(fadeInSeconds) || fadeInSeconds < 0f ||
+                 !float.IsFinite(fadeOutPreviousBgmSeconds) ||
+                 fadeOutPreviousBgmSeconds < 0f))
             {
                 throw new ArgumentOutOfRangeException(
                     nameof(fadeInSeconds),
@@ -424,6 +403,7 @@ namespace Game.Audio
                     sceneHandle,
                     operationCancellation);
                 operationCancellation.ThrowIfCancellationRequested();
+                ThrowIfDriverDestroyed(api);
 
                 if (requiredBus == AudioBus.Bgm &&
                     !bgmRequestGate.IsCurrent(bgmRequestVersion))
@@ -519,16 +499,26 @@ namespace Game.Audio
 
         private static AudioRuntimeDriver RequireDriver(string api)
         {
-            if (state != RuntimeState.Running ||
-                driver == null ||
-                driverDestroyedUnexpectedly)
+            ThrowIfDriverDestroyed(api);
+            if (state != RuntimeState.Running)
             {
                 throw new AudioStateException(
-                    $"GameAudio.{api} 要求 GameAudio 已成功 InitAsync，" +
-                    "且运行节点未被外部破坏。");
+                    $"GameAudio.{api} 要求 GameAudio 已成功 InitAsync。");
             }
 
             return driver;
+        }
+
+        private static void ThrowIfDriverDestroyed(string api)
+        {
+            if (!driverDestroyedUnexpectedly)
+            {
+                return;
+            }
+
+            throw new AudioStateException(
+                $"GameAudio.{api} 失败：AudioRuntimeDriver 已被意外销毁。" +
+                "禁止直接销毁 [GameAudio]，请从本次调用栈向上查找销毁来源。");
         }
 
         private static ResolvedAudioConfig RequireConfig(string api)
@@ -583,14 +573,6 @@ namespace Game.Audio
             }
 
             ResidentLeases.Clear();
-        }
-
-        private static void ValidateBus(AudioBus bus)
-        {
-            if (!Enum.IsDefined(typeof(AudioBus), bus))
-            {
-                throw new ArgumentOutOfRangeException(nameof(bus));
-            }
         }
 
         private static void RequireMainThread(string api)

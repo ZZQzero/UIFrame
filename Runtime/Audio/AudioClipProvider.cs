@@ -7,7 +7,6 @@ namespace Game.Audio
 {
     internal interface IAudioClipProvider
     {
-        bool Contains(string location);
         IAudioClipHandle Load(string location);
     }
 
@@ -25,12 +24,8 @@ namespace Game.Audio
 
         internal YooAssetAudioClipProvider(ResourcePackage package)
         {
-            this.package = package ??
-                throw new ArgumentNullException(nameof(package));
+            this.package = package;
         }
-
-        public bool Contains(string location) =>
-            package.IsLocationValid(location);
 
         public IAudioClipHandle Load(string location) =>
             new YooAssetAudioClipHandle(
@@ -44,8 +39,7 @@ namespace Game.Audio
 
         internal YooAssetAudioClipHandle(AssetHandle handle)
         {
-            this.handle = handle ??
-                throw new ArgumentNullException(nameof(handle));
+            this.handle = handle;
             completion = AwaitHandleAsync(handle);
         }
 

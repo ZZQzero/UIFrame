@@ -1,4 +1,3 @@
-using System;
 using UnityEngine;
 using UnityEngine.InputSystem;
 
@@ -26,7 +25,7 @@ namespace Game.Input
             InputAction sprint,
             float lookSensitivity)
         {
-            this.move = move ?? throw new ArgumentNullException(nameof(move));
+            this.move = move;
             this.look = look;
             this.jump = jump;
             this.attack = attack;

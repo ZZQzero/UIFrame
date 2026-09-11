@@ -115,7 +115,7 @@ namespace Game.Input
         public static void Init(Transform persistRoot, InputActionAsset actions)
         {
             RequireMainThread(nameof(Init));
-            ValidateAsset(actions, PlayerActions.Map, UiActions.Map, 1f);
+            ValidateAsset(actions, PlayerActions.Map, UiActions.Map);
             Init(
                 persistRoot,
                 actions,
@@ -212,10 +212,7 @@ namespace Game.Input
             ClearRuntimeState();
             try
             {
-                if (clone != null)
-                {
-                    clone.Disable();
-                }
+                clone.Disable();
             }
             finally
             {
@@ -228,6 +225,19 @@ namespace Game.Input
             string gameplayMapName,
             string uiMapName,
             float lookSensitivity)
+        {
+            ValidateAsset(actions, gameplayMapName, uiMapName);
+            if (!float.IsFinite(lookSensitivity) || lookSensitivity <= 0f)
+            {
+                throw new InvalidOperationException(
+                    "lookSensitivity 必须是大于 0 的有限值。");
+            }
+        }
+
+        internal static void ValidateAsset(
+            InputActionAsset actions,
+            string gameplayMapName,
+            string uiMapName)
         {
             if (actions == null)
             {
@@ -262,12 +272,6 @@ namespace Game.Input
                     throw new InvalidOperationException(
                         "gameplayMap 与 uiMap 不能指向同一张 Action Map。");
                 }
-            }
-
-            if (!float.IsFinite(lookSensitivity) || lookSensitivity <= 0f)
-            {
-                throw new InvalidOperationException(
-                    "lookSensitivity 必须是大于 0 的有限值。");
             }
         }
 

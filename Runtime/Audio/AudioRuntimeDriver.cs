@@ -523,7 +523,6 @@ namespace Game.Audio
         {
             slot = null;
             if (!handle.IsValid ||
-                handle.Slot < 0 ||
                 handle.Slot >= voices.Length)
             {
                 return false;

@@ -52,10 +52,6 @@ namespace Game
 
             EventDispatcher current = instance;
             instance = null;
-            if (current == null)
-            {
-                return;
-            }
 
             GameObject go = current.gameObject;
             if (Application.isPlaying)

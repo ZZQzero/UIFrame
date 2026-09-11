@@ -1,20 +1,20 @@
 {
-  "name": "UIFrame.Runtime",
-  "rootNamespace": "UIFrame",
-  "references": [
-    "UniTask",
-    "YooAsset",
-    "Unity.ugui",
-    "Unity.TextMeshPro",
-    "Unity.RenderPipelines.Universal.Runtime"
-  ],
-  "includePlatforms": [],
-  "excludePlatforms": [],
-  "allowUnsafeCode": false,
-  "overrideReferences": false,
-  "precompiledReferences": [],
-  "autoReferenced": true,
-  "defineConstraints": [],
-  "versionDefines": [],
-  "noEngineReferences": false
+    "name": "UIFrame.Runtime",
+    "rootNamespace": "UIFrame",
+    "references": [
+        "UniTask",
+        "YooAsset",
+        "Unity.TextMeshPro",
+        "Unity.RenderPipelines.Universal.Runtime",
+        "Unity.InputSystem"
+    ],
+    "includePlatforms": [],
+    "excludePlatforms": [],
+    "allowUnsafeCode": false,
+    "overrideReferences": false,
+    "precompiledReferences": [],
+    "autoReferenced": true,
+    "defineConstraints": [],
+    "versionDefines": [],
+    "noEngineReferences": false
 }

@@ -16,7 +16,7 @@ namespace Game.Audio
         }
 
         internal bool IsCurrent(uint requestVersion) =>
-            requestVersion != 0 && requestVersion == version;
+            requestVersion == version;
 
         internal void Invalidate()
         {

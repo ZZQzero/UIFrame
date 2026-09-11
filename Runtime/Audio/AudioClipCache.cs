@@ -33,12 +33,6 @@ namespace Game.Audio
         {
             this.provider = provider ??
                 throw new ArgumentNullException(nameof(provider));
-            if (!float.IsFinite(retentionSeconds) || retentionSeconds < 0f)
-            {
-                throw new ArgumentOutOfRangeException(
-                    nameof(retentionSeconds));
-            }
-
             this.retentionSeconds = retentionSeconds;
         }
 
@@ -71,12 +65,6 @@ namespace Game.Audio
                 throw new ArgumentException(
                     "AudioClip location 不能为空。",
                     nameof(location));
-            }
-
-            if (!provider.Contains(location))
-            {
-                throw new InvalidOperationException(
-                    $"YooAsset 中不存在音频 location：{location}。");
             }
 
             AudioSceneScope.Validate(loadMode, sceneHandle);

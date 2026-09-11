@@ -90,11 +90,6 @@ namespace Game
             for (int i = 0; i < list.Count; i++)
             {
                 EventHandle handle = list[i];
-                if (!handle.IsValid)
-                {
-                    continue;
-                }
-
                 IEventBucket bucket = EventRegistry.GetBucket(handle.TypeId);
                 bucket?.Unsubscribe(handle.Slot, handle.Generation, updateOwner: false);
             }

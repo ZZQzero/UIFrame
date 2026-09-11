@@ -85,12 +85,8 @@ namespace Game.Input
 
         public bool TryPop(InputLayerHandle handle)
         {
-            if (!handle.IsValid || layers.Count == 0)
-            {
-                return false;
-            }
-
-            if (layers[layers.Count - 1] != handle.Generation)
+            if (layers.Count == 0 ||
+                layers[layers.Count - 1] != handle.Generation)
             {
                 return false;
             }
