@@ -289,8 +289,8 @@ if (pool.TrySpawn("PlayerItem", parent, out PlayerItem item))
 
 - 与 `UIPanel` 缓存是两套所有权：**UIPanel 不要进这个池**。
 - 退出时先 `UI.Shutdown`，再 `GamePool.Shutdown`（或自己 `Dispose` 注入的服务）。
-- 禁止业务直接 `Destroy` 池化实例；外部 Destroy 会让分桶作废，只能 Dispose 整个服务。
-- `TrySpawn` 返回 `false` 只表示尚未 Prepare。还错、缺组件、未 Init `GamePool.Service` 都会抛。
+- 禁止业务直接 `Destroy` 池化实例。外部 Destroy 打 Error，并从集合摘掉该实例；分桶仍可用，下一次 Spawn 拿还活着的或新建。
+- `TrySpawn` 返回 `false` 只表示尚未 Prepare。还错走 `Despawn` 会抛；`TrySpawn<T>` 缺组件会抛；未 Init 读 `GamePool.Service` 会抛。
 - 已 Init 时再 `GamePool.Init` 会抛。
 - 主线程与集合检查看 `UIFrameSafety`。
 

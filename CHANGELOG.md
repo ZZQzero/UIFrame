@@ -14,8 +14,8 @@ All notable changes to this package will be documented in this file.
 ### Changed
 
 - Fail-fast: `UI.Push` / 加载失败 / 未 Register / Camera Stack 失败会抛，不再返回 null。
-- Fail-fast: `Despawn` 还错对象会抛；外部 `Destroy` 作废分桶且不可 Remove 修复。
-- `OnDespawned` 异常会记录 Error 并继续执行其余清理；Shutdown / Dispose 也会完成全部收尾后报告回调错误。
+- Fail-fast: `Despawn` 还错对象会抛。外部 `Destroy` 打 Error 并从集合摘掉该实例，分桶仍可用，不可靠 Destroy 当还池。
+- `OnDespawned` 抛错时：同步 `Despawn` 立刻停、不还栈、异常给调用方；`DespawnDeferred` 打日志、该条不还、其余继续。Shutdown / Dispose 仍完成收尾。
 - UI 打开、SetPackage 与 Camera Stack 不再隐式 Init；重复 Init、非法 Tips 数量和非有限时长会抛。
 - `GamePool.Init` 重复调用会抛。已删除 `ForceDispose`。
 - RedDot 重复绑定同一回调和传入空回调会抛，不再静默忽略。

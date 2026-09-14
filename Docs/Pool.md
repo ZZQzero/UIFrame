@@ -20,7 +20,7 @@ UI.Shutdown();
 GamePool.Shutdown();
 ```
 
-已 Init、或上次直接 `Dispose` 了 `Service` 还没 `Shutdown` 时再 `Init` 会抛。未 Init 时读 `GamePool.Service` 也会抛。不要绕过 `Shutdown` 去 `Dispose` 默认池。
+已 Init、或上次直接 `Dispose` 了 `Service` 还没 `Shutdown` 时再 `Init` 会抛。未 Init 时读 `GamePool.Service` 也会抛。不要绕过 `Shutdown` 去 `Dispose` 默认池。未 Init 时 `GamePool.Shutdown` 是空操作。
 
 `persistRoot` 由宿主提供常驻节点（例如 `DontDestroyOnLoad` 的 Launch）。不要把池根
 挂在 UIFrameRoot 下：退出顺序是先 `UI.Shutdown`（面板 `OnDestroyPanel` 还要还池），
@@ -90,9 +90,12 @@ if (!pool.TrySpawn("PlayerItem", contentRoot, out PlayerItem item))
 `TrySpawn` 只查询已经存在的分桶。池内有闲置实例时直接复用，池空时通过已持有
 的 Prefab Handle 同步实例化；location 尚未加载或仍在加载时返回 `false`，不会
 偷偷触发同步 YooAsset 加载。该接口适合必须立即返回 Cell 的循环列表
-`GetObject`。`false` 仅表示分桶尚未准备。缺组件、参数错误、线程错误、还错对象
-或尚未 Prepare 都会抛。外部 `Destroy` 了池对象时，`OnDestroy` 打 Error 并从
-活跃/闲置集合摘掉；下一次 Spawn 拿出还活着的实例或新建。
+`GetObject`。**`false` 只表示分桶尚未准备**，不会抛。空 location、错线程、
+已 Dispose、在 `IPoolable` 回调里取还，会抛。`TrySpawn<T>` 取出后缺组件会抛，
+实例已是取出状态，不还回池。还错对象是 `Despawn` 的事，不是 `TrySpawn`。
+外部 `Destroy` 了池对象时，`OnDestroy` 打 Error 并从活跃/闲置集合摘掉；分桶
+还在，下一次 Spawn 拿出还活着的实例或新建。循环列表的 `GetObject` / `SpawnLoaded`
+在尚未 Prepare 时抛，不要和 `TrySpawn` 的 `false` 混为一谈。
 
 `IPoolable` 回调规则：
 
