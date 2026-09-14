@@ -22,7 +22,6 @@ var package = await ResourcesLoadManager.Instance.CreatePackageAsync();
 await GameAudio.InitAsync(
     package,
     audioConfig,          // Launch 上的 AudioRuntimeConfig
-    transform,
     startupCancellation.Token);
 
 UI.Init(package);
@@ -42,16 +41,14 @@ GamePool.Shutdown();
 ```
 
 `InitAsync` 会校验 Mixer、目录和 YooAsset location，并预加载 `Resident` 条目。
-`persistRoot` 只要求 Init 时物体仍在 Hierarchy 中；音频节点自己 `DontDestroyOnLoad`，
-不要把它当成父节点去挂。
+音频节点自己 `DontDestroyOnLoad`，不要把它当成父节点去挂。
 
 ### 注意
 
 - 必须先 Init，再播放。未 Init、重复 Init、未 ShutdownAsync 再 Init 都会抛。
 - 只能在 Unity 主线程调用公开 API。
 - 退出用 `ShutdownAsync`：它会取消进行中的播放请求，等加载结束后再拆。
-- 不要 `Destroy` `[GameAudio]`。拆掉之后 `IsInited` 为 false，播放接口会抛，且
-  `Launch` 可能跳过关闭。
+- 不要 `Destroy` `[GameAudio]`。生命周期只有 Init → 使用 → ShutdownAsync。
 - `InitAsync` / 播放可传 `CancellationToken`。启动被取消时，Init 会把已创建部分清掉再抛。
 
 ---

@@ -16,7 +16,6 @@ namespace Game.Audio
         private VoiceSlot[] voices;
         private double nextCacheCollectionAt;
         private bool initialized;
-        private bool shuttingDown;
 
         internal void Initialize(
             ResolvedAudioConfig resolvedConfig,
@@ -236,30 +235,22 @@ namespace Game.Audio
         internal void Shutdown()
         {
             RequireRunning();
-            shuttingDown = true;
-            try
+            for (int i = 0; i < voices.Length; i++)
             {
-                for (int i = 0; i < voices.Length; i++)
+                if (voices[i].Active)
                 {
-                    if (voices[i].Active)
-                    {
-                        ReleaseVoice(voices[i]);
-                    }
+                    ReleaseVoice(voices[i]);
                 }
+            }
 
-                cache.Dispose();
-                SceneManager.sceneUnloaded -= OnSceneUnloaded;
-                initialized = false;
-            }
-            finally
-            {
-                shuttingDown = false;
-            }
+            cache.Dispose();
+            SceneManager.sceneUnloaded -= OnSceneUnloaded;
+            initialized = false;
         }
 
         private void Update()
         {
-            if (!initialized || shuttingDown)
+            if (!initialized)
             {
                 return;
             }
@@ -312,15 +303,17 @@ namespace Game.Audio
         private void OnDestroy()
         {
             SceneManager.sceneUnloaded -= OnSceneUnloaded;
-            if (initialized && !shuttingDown)
+            if (initialized)
             {
-                GameAudio.NotifyDriverDestroyed(this);
+                Debug.LogError(
+                    "[GameAudio] AudioRuntimeDriver 被意外销毁。" +
+                    "禁止直接销毁 [GameAudio]。请从调用栈定位销毁来源。");
             }
         }
 
         private void OnSceneUnloaded(Scene scene)
         {
-            if (initialized && !shuttingDown)
+            if (initialized)
             {
                 cache.UnloadSceneAssets(scene.handle);
             }
@@ -541,7 +534,7 @@ namespace Game.Audio
 
         private void RequireRunning()
         {
-            if (!initialized || shuttingDown)
+            if (!initialized)
             {
                 throw new AudioStateException(
                     "AudioRuntimeDriver 当前不可用。");

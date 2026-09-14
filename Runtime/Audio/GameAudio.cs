@@ -24,7 +24,6 @@ namespace Game.Audio
         private static UniTaskCompletionSource operationsIdle;
         private static BgmRequestGate bgmRequestGate = new();
         private static int pendingOperations;
-        private static bool driverDestroyedUnexpectedly;
 
         public static bool IsInited => state == RuntimeState.Running;
 
@@ -277,22 +276,6 @@ namespace Game.Audio
             CompleteShutdown();
         }
 
-        internal static void NotifyDriverDestroyed(
-            AudioRuntimeDriver unavailable)
-        {
-            if (driver != unavailable ||
-                state != RuntimeState.Running ||
-                driverDestroyedUnexpectedly)
-            {
-                return;
-            }
-
-            driverDestroyedUnexpectedly = true;
-            Debug.LogError(
-                "[GameAudio] AudioRuntimeDriver 被意外销毁。" +
-                "禁止直接销毁 [GameAudio]。后续播放/停止将抛出异常，请从调用栈定位销毁来源。");
-        }
-
         [RuntimeInitializeOnLoadMethod(RuntimeInitializeLoadType.SubsystemRegistration)]
         private static void ResetOnDomainReload()
         {
@@ -307,7 +290,6 @@ namespace Game.Audio
             operationsIdle = null;
             bgmRequestGate = new BgmRequestGate();
             pendingOperations = 0;
-            driverDestroyedUnexpectedly = false;
         }
 
         private static async UniTask<AudioPlayResult> TryPlayInternalAsync(
@@ -403,7 +385,7 @@ namespace Game.Audio
                     sceneHandle,
                     operationCancellation);
                 operationCancellation.ThrowIfCancellationRequested();
-                ThrowIfDriverDestroyed(api);
+                currentDriver = RequireDriver(api);
 
                 if (requiredBus == AudioBus.Bgm &&
                     !bgmRequestGate.IsCurrent(bgmRequestVersion))
@@ -492,14 +474,12 @@ namespace Game.Audio
             runtimeCancellation = null;
             operationsIdle = null;
             pendingOperations = 0;
-            driverDestroyedUnexpectedly = false;
             state = RuntimeState.None;
             DestroyObject(rootObject);
         }
 
         private static AudioRuntimeDriver RequireDriver(string api)
         {
-            ThrowIfDriverDestroyed(api);
             if (state != RuntimeState.Running)
             {
                 throw new AudioStateException(
@@ -507,18 +487,6 @@ namespace Game.Audio
             }
 
             return driver;
-        }
-
-        private static void ThrowIfDriverDestroyed(string api)
-        {
-            if (!driverDestroyedUnexpectedly)
-            {
-                return;
-            }
-
-            throw new AudioStateException(
-                $"GameAudio.{api} 失败：AudioRuntimeDriver 已被意外销毁。" +
-                "禁止直接销毁 [GameAudio]，请从本次调用栈向上查找销毁来源。");
         }
 
         private static ResolvedAudioConfig RequireConfig(string api)

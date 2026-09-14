@@ -90,11 +90,18 @@ namespace Game.Audio
             entry.ReferenceCount++;
             try
             {
-                AudioClip clip = entry.IsLoaded
-                    ? entry.Clip
-                    : await entry.Completion.Task.AttachExternalCancellation(
+                AudioClip clip;
+                if (entry.IsLoaded)
+                {
+                    clip = entry.Clip;
+                }
+                else
+                {
+                    clip = await entry.Completion.Task.AttachExternalCancellation(
                         cancellationToken);
-                await UniTask.SwitchToMainThread();
+                    await UniTask.SwitchToMainThread();
+                }
+
                 if (loadMode == AudioLoadMode.Scene &&
                     !entry.SceneOwners.Contains(sceneHandle))
                 {
@@ -133,30 +140,6 @@ namespace Game.Audio
                 }
 
                 removalBuffer.Add(pair.Key);
-            }
-
-            ReleaseEntries(removalBuffer);
-            removalBuffer.Clear();
-        }
-
-        internal void UnloadSceneAssets()
-        {
-            ThrowIfDisposed();
-            removalBuffer.Clear();
-            foreach (KeyValuePair<string, CacheEntry> pair in entries)
-            {
-                CacheEntry entry = pair.Value;
-                if (entry.LoadMode != AudioLoadMode.Scene)
-                {
-                    continue;
-                }
-
-                entry.SceneOwners.Clear();
-                entry.PendingSceneUnload = true;
-                if (entry.ReferenceCount == 0 && entry.IsLoaded)
-                {
-                    removalBuffer.Add(pair.Key);
-                }
             }
 
             ReleaseEntries(removalBuffer);
