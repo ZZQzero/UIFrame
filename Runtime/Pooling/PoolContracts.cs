@@ -98,14 +98,6 @@ namespace Game.Pooling
             Group = group;
         }
 
-        internal ManagedPoolOptions ToManagedOptions()
-        {
-            return new ManagedPoolOptions(
-                InitialCapacity,
-                MaxSize,
-                CollectionCheck);
-        }
-
         public static GameObjectPoolOptions Default { get; } = new();
     }
 
@@ -129,27 +121,6 @@ namespace Game.Pooling
             CountInactive = countInactive;
             TotalCreated = totalCreated;
             TotalDestroyed = totalDestroyed;
-        }
-    }
-
-    public readonly struct PrefabPoolStats
-    {
-        public PoolStats Pool { get; }
-        public int PeakActive { get; }
-        public int SynchronousExpansionCount { get; }
-
-        public int CountAll => Pool.CountAll;
-        public int CountActive => Pool.CountActive;
-        public int CountInactive => Pool.CountInactive;
-
-        public PrefabPoolStats(
-            PoolStats pool,
-            int peakActive,
-            int synchronousExpansionCount)
-        {
-            Pool = pool;
-            PeakActive = peakActive;
-            SynchronousExpansionCount = synchronousExpansionCount;
         }
     }
 }

@@ -91,7 +91,8 @@ if (!pool.TrySpawn("PlayerItem", contentRoot, out PlayerItem item))
 的 Prefab Handle 同步实例化；location 尚未加载或仍在加载时返回 `false`，不会
 偷偷触发同步 YooAsset 加载。该接口适合必须立即返回 Cell 的循环列表
 `GetObject`。`false` 仅表示分桶尚未准备。缺组件、参数错误、线程错误、还错对象
-或下次取用碰到被外部 Destroy 的假 null 都会抛。
+或尚未 Prepare 都会抛。外部 `Destroy` 了池对象时，`OnDestroy` 打 Error 并从
+活跃/闲置集合摘掉；下一次 Spawn 拿出还活着的实例或新建。
 
 `IPoolable` 回调规则：
 
@@ -99,8 +100,9 @@ if (!pool.TrySpawn("PlayerItem", contentRoot, out PlayerItem item))
 2. 归还时按相反顺序调用 `OnDespawned`，隐藏对象并移动到池根节点。
 3. 回调组件列表仅在实例首次创建时通过
    `GetComponentsInChildren<IPoolable>(true)` 扫描并缓存，稳态取还不会重复查询。
-4. 某个 `OnDespawned` 抛错时立刻停，其余回调不跑；实例不会还回闲置区，异常交给调用方。
-   `OnSpawned` 抛错同样不回滚，半成品留在场景里便于排查。
+4. 某个 `OnDespawned` 抛错时立刻停，其余回调不跑；实例不还回闲置区，仍留在活跃集合和场景里，这次 `Despawn` 把异常抛给调用方。
+   `OnSpawned` 抛错不回滚，半成品留在场景里且已是取出状态，这次 Spawn 仍抛给调用方；之后可以正常 `DespawnImmediate`。
+   回调里不能再取还、预热、拆桶或 Dispose。
 5. 缺组件时抛错，已取出的实例不还回池。
 
 ## 显式回收与分组
@@ -127,8 +129,8 @@ pool.TryRemoveGroup(PoolGroup.UI, force: true);
 `Despawn` 与 `DespawnImmediate` 都是同步回收。还错对象、重复还、在 `IPoolable`
 回调里还，都会抛。`DespawnDeferred` 延迟到 LastPostLateUpdate；等待期间再
 `DespawnDeferred` 同一对象会抛，但可以用 `DespawnImmediate` 立刻还。
-`DespawnGroup(..., deferred: true)` 对已经在排队的实例会跳过。延迟回收时
-`OnDespawned` 失败、排队对象被外部 `Destroy`、或分桶已被拆掉，都直接抛，不再吞掉后继续收。
+`DespawnGroup(..., deferred: true)` 对已经在排队的实例会跳过。延迟回收按条还：
+无效票（已 Immediate、已 Destroy、桶已拆）丢掉；某条 `OnDespawned` 失败则打日志、该条不还栈，其余继续。
 循环列表不得使用延迟回收。
 
 ## 加载、取消与释放
@@ -143,12 +145,10 @@ pool.TryRemoveGroup(PoolGroup.UI, force: true);
 - `TryRemoveGroup` 按组释放闲置实例和句柄；组内正在加载或仍有活跃实例时拒绝
   普通移除。预热进行中时即使传入 `force: true` 也会拒绝移除。
 - `Trim(location, count)` 将闲置实例收缩到指定数量，但不释放 Prefab 句柄。
-  闲置实例被外部 `Destroy` 时和 Spawn / Prewarm 一样当场抛。
 - `TryDispose()` 在存在活跃实例、加载任务或预热任务时返回 `false`。回调里调用会抛。
 - `Dispose()` 会终止活跃实例并释放每个已建立分桶的 Prefab Handle。
 - 池化实例不得由业务代码直接 `Destroy`，应统一调用 `Despawn`。外部 `Destroy`
-  会在 Editor/Development 打 Error，并从活跃集合摘掉；下次 `Get` 碰到假 null
-  当场抛。未激活的预热实例可能没有 `OnDestroy`，同样在下次取用时抛。
+  打 Error，并从活跃集合和闲置栈摘掉。下一次 `Spawn` / `Trim` / 预热只看到还活着的实例。
 
 `GameObjectPoolService` 的公开操作必须从创建它的 Unity 主线程调用。自定义
 `IPrefabProvider` 可以在后台线程完成加载；服务会在创建分桶或操作 Unity 对象前
@@ -181,7 +181,7 @@ SetPool(pool);
 var cancelled = await PrepareCellsAsync(options, OpenCancellationToken)
     .SuppressCancellationThrow();
 if (cancelled) return;
-// 或按历史 PeakActive 进行 PrewarmCellsAsync。
+// 或 PrewarmCellsAsync 预热可见数量。
 
 ScrollRect.totalCount = items.Count;
 ScrollRect.RefillCells();
@@ -194,9 +194,8 @@ ScrollRect.RefillCells();
 把 Cell 还回池，并清掉 LoopScroll 的 temp pool 计数，因此缓存后再 `RefillCells`
 不会对空 Content 取子节点。
 `SpawnLoaded` 仍可用于其它必须立即拿到实例的同步路径。池空时两者都会基于已加载
-Handle 同步扩容，因此快速滑动不会返回空，但应依据 `PrefabPoolStats.PeakActive`
-调整下次预热，降低滚动卡顿。列表数据必须在每次展示时重新绑定，不能依赖首次
-创建状态。
+Handle 同步扩容，因此快速滑动不会返回空；可见数量变化大时用 `PrewarmAsync`
+分摊实例化。列表数据必须在每次展示时重新绑定，不能依赖首次创建状态。
 
 ## 性能检查
 

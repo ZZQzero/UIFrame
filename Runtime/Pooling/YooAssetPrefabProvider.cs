@@ -33,7 +33,15 @@ namespace Game.Pooling
         public async UniTask<IPrefabHandle> LoadAsync(string location)
         {
             AssetHandle handle = package.LoadAssetAsync<GameObject>(location);
-            await handle;
+            try
+            {
+                await handle;
+            }
+            catch
+            {
+                handle.Release();
+                throw;
+            }
 
             if (handle.Status != EOperationStatus.Succeeded)
             {

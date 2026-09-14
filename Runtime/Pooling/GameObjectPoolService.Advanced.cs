@@ -53,8 +53,7 @@ namespace Game.Pooling
                     PooledInstanceMarker marker = active[i];
                     if (marker == null)
                     {
-                        throw new InvalidOperationException(
-                            $"A pooled instance of '{bucket.Location}' was destroyed externally.");
+                        continue;
                     }
 
                     if (deferred)
@@ -90,33 +89,14 @@ namespace Game.Pooling
             }
 
             bucket.EnsureAvailable();
-            int before = bucket.Pool.CountInactive;
-            var inactive = new List<PooledInstanceMarker>(before);
-            for (int i = 0; i < before; i++)
+            int trimmed = 0;
+            while (bucket.InactiveCount > targetInactive)
             {
-                PooledInstanceMarker marker = bucket.Pool.Get();
-                if (marker == null)
-                {
-                    throw new InvalidOperationException(
-                        $"An inactive pooled instance of '{location}' was destroyed externally.");
-                }
-
-                inactive.Add(marker);
+                DestroyPooledInstance(bucket.TryPopInactive());
+                trimmed++;
             }
 
-            int retainedCount = Math.Min(before, targetInactive);
-            for (int i = retainedCount; i < inactive.Count; i++)
-            {
-                bucket.Pool.Release(inactive[i]);
-            }
-
-            bucket.Pool.Clear();
-            for (int i = 0; i < retainedCount; i++)
-            {
-                bucket.Pool.Release(inactive[i]);
-            }
-
-            return before - retainedCount;
+            return trimmed;
         }
 
         public bool TryRemoveGroup(PoolGroup group, bool force = false)
@@ -152,10 +132,15 @@ namespace Game.Pooling
 
             for (int i = 0; i < locations.Count; i++)
             {
+                buckets[locations[i]].EnsureAvailable();
+            }
+
+            for (int i = 0; i < locations.Count; i++)
+            {
                 string location = locations[i];
                 PoolBucket bucket = buckets[location];
-                bucket.EnsureAvailable();
                 buckets.Remove(location);
+                DropPendingDespawns(location);
                 bucket.Dispose(force);
             }
 
@@ -199,24 +184,25 @@ namespace Game.Pooling
                     for (int i = 0; i < pendingDespawnBatch.Count; i++)
                     {
                         PooledInstanceMarker marker = pendingDespawnBatch[i];
-                        if (marker == null)
-                        {
-                            throw new InvalidOperationException(
-                                "A pooled instance waiting for deferred despawn was destroyed externally.");
-                        }
-
-                        if (marker.State != PooledInstanceState.PendingDespawn)
+                        if (marker == null ||
+                            marker.State != PooledInstanceState.PendingDespawn)
                         {
                             continue;
                         }
 
                         if (!buckets.TryGetValue(marker.Location, out PoolBucket bucket))
                         {
-                            throw new InvalidOperationException(
-                                $"Pool '{marker.Location}' was removed.");
+                            continue;
                         }
 
-                        DespawnNow(marker, bucket);
+                        try
+                        {
+                            DespawnNow(marker, bucket);
+                        }
+                        catch (Exception exception)
+                        {
+                            Debug.LogException(exception);
+                        }
                     }
 
                     pendingDespawnBatch.Clear();
