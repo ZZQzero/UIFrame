@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Runtime.CompilerServices;
 using Cysharp.Threading.Tasks;
+using UnityEngine;
 using UnityEngine.SceneManagement;
 using YooAsset;
 
@@ -166,9 +167,18 @@ namespace Game.Scene
                     LoadSceneMode.Additive,
                     true,
                     RelayProgress);
-                Loaded.Add(location, handle);
-                handle.ActivateScene();
-                activeId = location;
+                try
+                {
+                    handle.ActivateScene();
+                    Loaded.Add(location, handle);
+                    activeId = location;
+                }
+                catch
+                {
+                    await AbandonUnregisteredAsync(handle);
+                    throw;
+                }
+
                 if (previous != null)
                 {
                     await UnloadLoadedAsync(previous);
@@ -214,10 +224,18 @@ namespace Game.Scene
                     LoadSceneMode.Single,
                     true,
                     RelayProgress);
-                Loaded.Add(location, handle);
-                activeId = location;
-                await DiscardOthersExceptAsync(location);
-                handle.ActivateScene();
+                try
+                {
+                    await DiscardOthersExceptAsync(location);
+                    handle.ActivateScene();
+                    Loaded.Add(location, handle);
+                    activeId = location;
+                }
+                catch
+                {
+                    await AbandonUnregisteredAsync(handle);
+                    throw;
+                }
             }
             finally
             {
@@ -235,13 +253,13 @@ namespace Game.Scene
                     await handle.ActivatePreloadedAsync();
                 }
 
-                activeId = location;
                 if (handle.Mode == LoadSceneMode.Single)
                 {
                     await DiscardOthersExceptAsync(location);
                 }
 
                 handle.ActivateScene();
+                activeId = location;
             }
             finally
             {
@@ -275,13 +293,14 @@ namespace Game.Scene
 
         static async UniTask DiscardOthersExceptAsync(string keep)
         {
-            if (Loaded.Count <= 1)
+            int count = Loaded.Count;
+            if (count == 0)
             {
                 return;
             }
 
-            var remove = new string[Loaded.Count - 1];
-            var handles = new ISceneHandle[Loaded.Count - 1];
+            var remove = new string[count];
+            var handles = new ISceneHandle[count];
             int index = 0;
             foreach (KeyValuePair<string, ISceneHandle> pair in Loaded)
             {
@@ -297,6 +316,22 @@ namespace Game.Scene
             {
                 await handles[i].UnloadAsync();
                 Loaded.Remove(remove[i]);
+                if (string.Equals(activeId, remove[i], StringComparison.Ordinal))
+                {
+                    activeId = null;
+                }
+            }
+        }
+
+        static async UniTask AbandonUnregisteredAsync(ISceneHandle handle)
+        {
+            try
+            {
+                await handle.UnloadAsync();
+            }
+            catch (Exception exception)
+            {
+                Debug.LogException(exception);
             }
         }
 
