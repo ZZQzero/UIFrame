@@ -16,8 +16,22 @@ YooAsset location 按文件名寻址。当前资源在 `Assets/Art/Audio`，配�
 `Launch` 里的顺序：
 
 ```csharp
-GameTimer.Init(transform, TimerSchedulerOptions.LargeGameDefault());
+GameTimer.Init(
+    transform,
+    new TimerSchedulerOptions
+    {
+        InitialCapacity = 1024,
+        MaxCapacity = 4096,
+        InitialOwnerCapacity = 64,
+        MaxOwnerCapacity = 256,
+        AllowRuntimeGrowth = false,
+        TickResolutionMs = 1,
+        FastForwardThresholdTicks = 4096,
+        RuntimeBudget = TimerBudget.RuntimeDefault,
+        SimulationBudget = TimerBudget.SimulationDefault
+    });
 var package = await ResourcesLoadManager.Instance.CreatePackageAsync();
+GameScene.Init(package);
 
 await GameAudio.InitAsync(
     package,
@@ -32,6 +46,10 @@ GamePool.Init(package, transform);
 
 ```csharp
 UI.Shutdown();
+if (GameScene.IsInited)
+{
+    await GameScene.ShutdownAsync(); // 只清静态，不卸场
+}
 if (GameAudio.IsInited)
 {
     await GameAudio.ShutdownAsync();

@@ -131,6 +131,7 @@ EventSystem.DumpListenerCounts();    // 每种类型的监听数打到 Console
 | 场景 | 用什么 |
 |------|--------|
 | 打开/关闭面板、弹窗要返回值 | `UI.Push` / `UI.Popup<..., TResult>` |
+| 切 / 加 / 卸 Unity 场景 | `GameScene` |
 | 红点数量 | `RedDot.Set` / `Bind` |
 | 背包变了、任务完成、多模块广播 | `EventSystem` |
 | 列表面板刷 Cell | `ProvideData`，不要对每个 Cell 发全局事件 |

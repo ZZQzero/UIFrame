@@ -40,7 +40,7 @@ https://github.com/ZZQzero/UIFrame.git
 }
 ```
 
-各系统详细用法与注意点见 [USAGE.md](Docs/USAGE.md)。红点见 [RedDot.md](Docs/RedDot.md)，对象池见 [Pool.md](Docs/Pool.md)。
+各系统详细用法与注意点见 [USAGE.md](Docs/USAGE.md)。场景见 [Scene.md](Docs/Scene.md)，红点见 [RedDot.md](Docs/RedDot.md)，对象池见 [Pool.md](Docs/Pool.md)。Timer / 音频 / 输入 / 事件 / FSM 见 `Docs/` 下对应文档。
 
 ## 快速开始
 
@@ -182,8 +182,12 @@ Cell 由 `LoopScrollPoolSource` 同步 `TrySpawn` / `DespawnImmediate`。不要�
 
 ## 目录
 
-- `Docs`：USAGE / RedDot / Pool 使用说明
+- `Docs`：USAGE / Scene / Timer / Audio / Input / Event / Fsm / RedDot / Pool
 - `Runtime/Core`：面板 API、生命周期、栈与缓存、Tips / Toast / Guide、循环列表基类
+- `Runtime/Scene`：`GameScene` 场景加载与激活
+- `Runtime/Timer`：`GameTimer` 调度
+- `Runtime/Audio`：`GameAudio`
+- `Runtime/Input`：`GameInput`
 - `Runtime/Pooling`：托管对象池与 GameObjectPoolService
 - `Runtime/LoopScroll`：循环列表组件
 - `Runtime/Load`：YooAsset 异步加载

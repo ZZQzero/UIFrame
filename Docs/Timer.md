@@ -719,14 +719,22 @@ Dispose 或 Shutdown。销毁整个调度器必须在回调批次结束后执行
 
 ## 15. Unity 生命周期
 
-默认 Scheduler 显式初始化，不通过访问属性自动创建 GameObject：
+默认 Scheduler 显式初始化，不通过访问属性自动创建 GameObject。
+`TimerSchedulerOptions.LargeGameDefault()` 按大游戏预留约 10 万槽，不要默认抄进小项目。
+宿主按实际规模传 options；本工程 `Launch` 使用：
 
 ```csharp
 GameTimer.Init(transform, new TimerSchedulerOptions
 {
-    InitialCapacity = 100_000,
-    MaxCapacity = 131_072,
-    AllowRuntimeGrowth = false
+    InitialCapacity = 1024,
+    MaxCapacity = 4096,
+    InitialOwnerCapacity = 64,
+    MaxOwnerCapacity = 256,
+    AllowRuntimeGrowth = false,
+    TickResolutionMs = 1,
+    FastForwardThresholdTicks = 4096,
+    RuntimeBudget = TimerBudget.RuntimeDefault,
+    SimulationBudget = TimerBudget.SimulationDefault
 });
 ```
 
@@ -739,11 +747,19 @@ Tick。Simulation Scheduler 由战斗循环主动驱动，不能由 Runner 自�
 启动：
 EventSystem.EnsureDispatcher
 GameTimer.Init
-初始化资源、UI、对象池
+GameInput.Init
+初始化资源包
+GameScene.Init
+GameAudio.InitAsync
+UI.Init
+GamePool.Init
 
 退出：
 UI.Shutdown
+GameScene.ShutdownAsync   // 只清静态，不走 YooAsset 卸场
+GameAudio.ShutdownAsync
 GameTimer.Shutdown
+GameInput.Shutdown
 EventSystem.ClearAll
 EventSystem.ShutdownDispatcher
 GamePool.Shutdown

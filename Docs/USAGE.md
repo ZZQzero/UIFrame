@@ -1,6 +1,17 @@
 # UIFrame 各系统用法与注意点
 
-本文按系统说明用法，以及接入时必须遵守的边界。更细的红点与对象池见 [RedDot.md](RedDot.md)、[Pool.md](Pool.md)。
+本文按系统说明用法，以及接入时必须遵守的边界。Audio、Input、Timer、Scene、对象池、
+Event、红点是并列模块，不要互相套门面或 Shutdown 顺序以外的依赖。
+
+- UI / Tips / 循环列表：本文
+- 场景：[Scene.md](Scene.md)
+- Timer：[Timer.md](Timer.md)
+- 音频：[Audio.md](Audio.md)
+- 输入：[Input.md](Input.md)
+- 事件：[EventSystem.md](EventSystem.md)
+- FSM：[Fsm.md](Fsm.md)
+- 红点：[RedDot.md](RedDot.md)
+- 对象池：[Pool.md](Pool.md)
 
 ---
 
@@ -28,7 +39,8 @@ GamePool.Shutdown();
 
 - 先 `Init`，再 `Register` / 打开面板。
 - `Push` / `Popup` / `Toast` / `SetPackage` / Camera Stack 不会代替业务自动 `Init`；漏掉或重复 `Init` 都会抛。
-- 退出顺序必须是 **`UI.Shutdown()` → 再 `GamePool.Shutdown()`**。面板的 `OnDestroyPanel` 可能还要还池。
+- 未 Init 时 **`UI.Shutdown` 直接返回**（进程收尾）。`Close` / `Back` / `ClearCache` 未 Init 仍会抛。
+- 退出顺序必须是 **`UI.Shutdown()` → 再 `GamePool.Shutdown()`**。面板的 `OnDestroyPanel` 可能还要还池。若还用了场景 / 音频 / Timer，见 [Scene.md](Scene.md)、[Audio.md](Audio.md)、[Timer.md](Timer.md) 与 `Launch` 的 Teardown。
 - `Shutdown` 会销毁 Root、打开中与缓存面板，并释放 YooAsset Handle；**注册表会保留**，可再次 `Init`。
 - 进行中的 `Push` / `Popup` / `Hud` 在 `Shutdown` 时以 **`OperationCanceledException`** 结束，不会返回 `null`。
 - 不要只检查“启动完成”日志：相机 Stack 配不上会抛，首屏 `Push` 失败也会抛。
@@ -365,6 +377,7 @@ UIFrameSafety.CollectionChecks = true;  // 池重复归还检查
 ## 12. 推荐宿主模板
 
 ```csharp
+GameScene.Init(package);             // 资源包装好后；见 Scene.md
 UI.Init(package);
 UI.ConfigureURPCameraStack();
 
@@ -375,7 +388,8 @@ GamePool.Init(package, transform);
 await UI.Hud<MainHud>();
 await UI.Push<HomePanel>();
 
-// 切场景
+// 切 Unity 场景（见 Scene.md）；关本场景组面板
+await GameScene.SwitchAsync("Battle");
 UI.CloseGroup(UIGroup.Scene, destroy: true);
 
 // 退出
@@ -397,3 +411,4 @@ GamePool.Shutdown();
 | 新手引导遮罩层 | `Guide` |
 | 列表 Cell / 特效多实例 | `GameObjectPool` + `UIItem` |
 | 未读角标 | `RedDot` / `RedDotView` |
+| 切 / 加 / 卸 Unity 场景 | `GameScene`（见 [Scene.md](Scene.md)） |

@@ -20,7 +20,9 @@ All notable changes to this package will be documented in this file.
 - `GamePool.Init` 重复调用会抛。已删除 `ForceDispose`。
 - RedDot 重复绑定同一回调和传入空回调会抛，不再静默忽略。
 - `ScreenOrientationManager.Initialize` detects current orientation and syncs Canvas layout only; it no longer writes `Screen.orientation` until Set / Push / Pop / ResetTo.
-- Documented Tips / Guide / OpenCancellationToken and LoopScroll size fallback in README and USAGE.
+- `UI.Shutdown` 未 Init 时直接返回，不再当作错误抛出。
+- `GameScene`：激活成功后再写入 `Loaded` / `ActiveId`；未登记 handle 激活失败会卸掉再抛原异常。`ShutdownAsync` 只清静态、不卸场。文档见 `Docs/Scene.md`。
+- 本工程 `Launch` 的 Timer 初始容量改为显式小配置，不再使用 `LargeGameDefault()`。
 
 ### Fixed
 
