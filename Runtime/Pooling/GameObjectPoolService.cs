@@ -14,17 +14,13 @@ namespace Game.Pooling
     public sealed partial class GameObjectPoolService : IDisposable
     {
         private readonly IPrefabProvider prefabProvider;
-        private static readonly ProfilerMarker SpawnProfilerMarker =
-            new("Game.Pooling.Spawn");
-        private static readonly ProfilerMarker DespawnProfilerMarker =
-            new("Game.Pooling.Despawn");
+        private static readonly ProfilerMarker SpawnProfilerMarker = new("Game.Pooling.Spawn");
+        private static readonly ProfilerMarker DespawnProfilerMarker = new("Game.Pooling.Despawn");
         private readonly Transform poolRoot;
         private readonly bool ownsPoolRoot;
         private readonly int ownerThreadId;
-        private readonly Dictionary<string, PoolBucket> buckets =
-            new(StringComparer.Ordinal);
-        private readonly Dictionary<string, PendingLoad> pendingLoads =
-            new(StringComparer.Ordinal);
+        private readonly Dictionary<string, PoolBucket> buckets = new(StringComparer.Ordinal);
+        private readonly Dictionary<string, PendingLoad> pendingLoads = new(StringComparer.Ordinal);
         private readonly Dictionary<PoolGroup, Transform> groupRoots = new();
 
         private bool disposed;
@@ -37,8 +33,7 @@ namespace Game.Pooling
 
         public GameObjectPoolService(IPrefabProvider prefabProvider, Transform poolRoot = null)
         {
-            this.prefabProvider =
-                prefabProvider ?? throw new ArgumentNullException(nameof(prefabProvider));
+            this.prefabProvider = prefabProvider ?? throw new ArgumentNullException(nameof(prefabProvider));
             ownerThreadId = Thread.CurrentThread.ManagedThreadId;
 
             if (poolRoot == null)
@@ -81,8 +76,7 @@ namespace Game.Pooling
                 throw new ArgumentOutOfRangeException(nameof(targetCount));
             }
 
-            PoolBucket bucket =
-                await GetOrCreateBucketAsync(location, options, cancellationToken);
+            PoolBucket bucket = await GetOrCreateBucketAsync(location, options, cancellationToken);
             int cappedTarget = Math.Min(targetCount, bucket.Options.MaxSize);
             if (bucket.Pool.CountAll >= cappedTarget)
             {
@@ -101,8 +95,7 @@ namespace Game.Pooling
                     PooledInstanceMarker marker = bucket.Pool.Get();
                     if (marker == null)
                     {
-                        throw new InvalidOperationException(
-                            $"An inactive pooled instance of '{location}' was destroyed externally.");
+                        throw new InvalidOperationException($"An inactive pooled instance of '{location}' was destroyed externally.");
                     }
 
                     rented.Add(marker);
@@ -146,8 +139,7 @@ namespace Game.Pooling
             GameObjectPoolOptions options = null,
             CancellationToken cancellationToken = default)
         {
-            PoolBucket bucket =
-                await GetOrCreateBucketAsync(location, options, cancellationToken);
+            PoolBucket bucket = await GetOrCreateBucketAsync(location, options, cancellationToken);
             cancellationToken.ThrowIfCancellationRequested();
             return Spawn(bucket, parent);
         }
@@ -204,8 +196,7 @@ namespace Game.Pooling
                 return instance;
             }
 
-            throw new InvalidOperationException(
-                $"Pool '{location}' is not prepared. Call PrepareAsync or PrewarmAsync first.");
+            throw new InvalidOperationException($"Pool '{location}' is not prepared. Call PrepareAsync or PrewarmAsync first.");
         }
 
         public T SpawnLoaded<T>(string location, Transform parent = null)
@@ -222,8 +213,7 @@ namespace Game.Pooling
             CancellationToken cancellationToken = default)
             where T : Component
         {
-            GameObject instance =
-                await SpawnAsync(location, parent, options, cancellationToken);
+            GameObject instance = await SpawnAsync(location, parent, options, cancellationToken);
             return GetRequiredComponent<T>(instance, location);
         }
 
@@ -240,8 +230,7 @@ namespace Game.Pooling
             if (marker.State != PooledInstanceState.Active &&
                 marker.State != PooledInstanceState.PendingDespawn)
             {
-                throw new InvalidOperationException(
-                    $"Cannot despawn '{marker.Location}' in state {marker.State}.");
+                throw new InvalidOperationException($"Cannot despawn '{marker.Location}' in state {marker.State}.");
             }
 
             DespawnNow(marker, bucket);
@@ -255,8 +244,7 @@ namespace Game.Pooling
             GameObject instance = marker.gameObject;
             if (instance == null)
             {
-                throw new InvalidOperationException(
-                    $"A pooled instance of '{bucket.Location}' was destroyed externally.");
+                throw new InvalidOperationException($"A pooled instance of '{bucket.Location}' was destroyed externally.");
             }
 
             try
@@ -284,14 +272,12 @@ namespace Game.Pooling
 
             if (!instance.TryGetComponent(out marker) || marker.Owner != this)
             {
-                throw new InvalidOperationException(
-                    "GameObject is not an instance of this pool.");
+                throw new InvalidOperationException("GameObject is not an instance of this pool.");
             }
 
             if (!buckets.TryGetValue(marker.Location, out bucket))
             {
-                throw new InvalidOperationException(
-                    $"Pool '{marker.Location}' was removed.");
+                throw new InvalidOperationException($"Pool '{marker.Location}' was removed.");
             }
         }
 
@@ -503,11 +489,9 @@ namespace Game.Pooling
             PooledInstanceMarker marker = bucket.Pool.Get();
             if (marker == null)
             {
-                throw new InvalidOperationException(
-                    $"A pooled instance of '{bucket.Location}' was destroyed externally.");
+                throw new InvalidOperationException($"A pooled instance of '{bucket.Location}' was destroyed externally.");
             }
-            bool createdSynchronously =
-                bucket.Pool.CountAll > countAllBefore;
+            bool createdSynchronously = bucket.Pool.CountAll > countAllBefore;
 
             bucket.Active.Add(marker);
 
@@ -554,8 +538,7 @@ namespace Game.Pooling
             GameObject instance = marker.gameObject;
             if (instance == null || bucket.StorageRoot == null)
             {
-                throw new InvalidOperationException(
-                    $"A pooled instance of '{bucket.Location}' was destroyed externally.");
+                throw new InvalidOperationException($"A pooled instance of '{bucket.Location}' was destroyed externally.");
             }
 
             instance.SetActive(false);
@@ -575,8 +558,7 @@ namespace Game.Pooling
             if (marker.Owner != null && marker.Owner != this)
             {
                 DestroyGameObject(instance);
-                throw new InvalidOperationException(
-                    $"Prefab '{bucket.Location}' is already owned by another pool.");
+                throw new InvalidOperationException($"Prefab '{bucket.Location}' is already owned by another pool.");
             }
 
             marker.Owner = this;
@@ -620,16 +602,14 @@ namespace Game.Pooling
         {
             if (poolRoot == null)
             {
-                throw new InvalidOperationException(
-                    "GameObjectPoolService root was destroyed externally.");
+                throw new InvalidOperationException("GameObjectPoolService root was destroyed externally.");
             }
 
             if (groupRoots.TryGetValue(group, out Transform groupRoot))
             {
                 if (groupRoot == null)
                 {
-                    throw new InvalidOperationException(
-                        $"Pool group root [{group}] was destroyed externally.");
+                    throw new InvalidOperationException($"Pool group root [{group}] was destroyed externally.");
                 }
 
                 return groupRoot;
@@ -644,8 +624,7 @@ namespace Game.Pooling
 
         private static IPoolable[] CollectCallbacks(GameObject instance)
         {
-            IPoolable[] callbacks =
-                instance.GetComponentsInChildren<IPoolable>(true);
+            IPoolable[] callbacks = instance.GetComponentsInChildren<IPoolable>(true);
             return callbacks.Length == 0
                 ? Array.Empty<IPoolable>()
                 : callbacks;
@@ -660,8 +639,7 @@ namespace Game.Pooling
                 return component;
             }
 
-            throw new InvalidOperationException(
-                $"Pooled prefab '{location}' does not contain component {typeof(T).FullName}.");
+            throw new InvalidOperationException($"Pooled prefab '{location}' does not contain component {typeof(T).FullName}.");
         }
 
         private void InvokeSpawned(IPoolable[] callbacks)
@@ -714,8 +692,7 @@ namespace Game.Pooling
                 current.CollectionCheck != value.CollectionCheck ||
                 current.Group != value.Group)
             {
-                throw new InvalidOperationException(
-                    $"Pool '{location}' already exists with different options.");
+                throw new InvalidOperationException($"Pool '{location}' already exists with different options.");
             }
         }
 
@@ -723,9 +700,7 @@ namespace Game.Pooling
         {
             if (string.IsNullOrWhiteSpace(location))
             {
-                throw new ArgumentException(
-                    "Prefab location cannot be empty.",
-                    nameof(location));
+                throw new ArgumentException("Prefab location cannot be empty.", nameof(location));
             }
         }
 
@@ -742,8 +717,7 @@ namespace Game.Pooling
         {
             if (lifecycleCallbackDepth > 0)
             {
-                throw new InvalidOperationException(
-                    "This pool operation cannot run from an IPoolable lifecycle callback.");
+                throw new InvalidOperationException("This pool operation cannot run from an IPoolable lifecycle callback.");
             }
         }
 
@@ -756,8 +730,7 @@ namespace Game.Pooling
 
             if (Thread.CurrentThread.ManagedThreadId != ownerThreadId)
             {
-                throw new InvalidOperationException(
-                    "GameObjectPoolService can only be used from its owner Unity thread.");
+                throw new InvalidOperationException("GameObjectPoolService can only be used from its owner Unity thread.");
             }
         }
 
@@ -873,8 +846,7 @@ namespace Game.Pooling
             {
                 if (prewarmOperationCount <= 0)
                 {
-                    throw new InvalidOperationException(
-                        $"Pool '{Location}' prewarm counter underflow.");
+                    throw new InvalidOperationException($"Pool '{Location}' prewarm counter underflow.");
                 }
 
                 prewarmOperationCount--;
@@ -894,8 +866,7 @@ namespace Game.Pooling
 
                 if (marker == null)
                 {
-                    throw new InvalidOperationException(
-                        $"An inactive pooled instance of '{Location}' was destroyed externally.");
+                    throw new InvalidOperationException($"An inactive pooled instance of '{Location}' was destroyed externally.");
                 }
 
                 try
@@ -918,8 +889,7 @@ namespace Game.Pooling
 
                 if (StorageRoot == null)
                 {
-                    throw new InvalidOperationException(
-                        $"Pool '{Location}' storage root was destroyed externally.");
+                    throw new InvalidOperationException($"Pool '{Location}' storage root was destroyed externally.");
                 }
             }
 
@@ -947,8 +917,7 @@ namespace Game.Pooling
 
                 if (!force && IsPrewarming)
                 {
-                    throw new InvalidOperationException(
-                        $"Pool '{Location}' cannot be disposed while prewarming.");
+                    throw new InvalidOperationException($"Pool '{Location}' cannot be disposed while prewarming.");
                 }
 
                 disposed = true;
