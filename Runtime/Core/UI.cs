@@ -87,11 +87,15 @@ namespace UIFrame
 
         /// <summary>
         /// 完整关闭 UIFrame：取消加载、销毁已打开与缓存面板、释放 Handle，并销毁 Root。
-        /// 注册目录会保留，之后可再次调用 Init。
+        /// 注册目录会保留，之后可再次调用 Init。未 Init 时直接返回。
         /// </summary>
         public static void Shutdown()
         {
-            RequireInit();
+            if (!IsInited)
+            {
+                return;
+            }
+
             var manager = _manager;
             _manager = null;
             manager.Shutdown();

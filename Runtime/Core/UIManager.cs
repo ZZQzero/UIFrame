@@ -18,7 +18,6 @@ namespace UIFrame
             new Dictionary<UIPanel, CancellationTokenSource>();
         readonly HashSet<UILoadRequest> _toastLoading = new HashSet<UILoadRequest>();
         readonly TipsChannel _tips = new TipsChannel();
-        readonly List<TipsWaitItem> _tipsDrain = new List<TipsWaitItem>(8);
         readonly List<UIPanel> _windowStack = new List<UIPanel>();
         readonly List<UIPanel> _popupStack = new List<UIPanel>();
         bool _toastPumping;
@@ -67,9 +66,9 @@ namespace UIFrame
             }
 
             _toastLoading.Clear();
-            _tipsDrain.Clear();
-            _tips.ResetRuntime(_tipsDrain);
-            CancelToastWaits(_tipsDrain);
+            var drained = new List<TipsWaitItem>(8);
+            _tips.ResetRuntime(drained);
+            CancelToastWaits(drained);
             CancelAllToastTimers();
             _windowStack.Clear();
             _popupStack.Clear();
@@ -169,9 +168,9 @@ namespace UIFrame
 
         public void ConfigureTips(int maxVisible, int maxQueued, float defaultDuration)
         {
-            _tipsDrain.Clear();
-            _tips.Configure(maxVisible, maxQueued, defaultDuration, _tipsDrain);
-            RejectToastWaits(_tipsDrain);
+            var dropped = new List<TipsWaitItem>(8);
+            _tips.Configure(maxVisible, maxQueued, defaultDuration, dropped);
+            RejectToastWaits(dropped);
             TrimToastIdle();
             if (_inited)
             {
@@ -502,7 +501,7 @@ namespace UIFrame
 
         void EnsureOpenCanContinue()
         {
-            if (!_inited || _root == null)
+            if (!_inited)
             {
                 throw new OperationCanceledException(
                     "[UIFrame] UI 已 Shutdown，面板打开已取消。");
@@ -546,9 +545,9 @@ namespace UIFrame
             }
 
             CancelToastLoads(panelType);
-            _tipsDrain.Clear();
-            _tips.DrainWhere(item => item != null && item.PanelType == panelType, _tipsDrain);
-            RejectToastWaits(_tipsDrain);
+            var drained = new List<TipsWaitItem>(8);
+            _tips.DrainWhere(item => item != null && item.PanelType == panelType, drained);
+            RejectToastWaits(drained);
 
             if (_toasts.TryGetValue(panelType, out var toasts) && toasts != null && toasts.Count > 0)
             {
@@ -634,13 +633,13 @@ namespace UIFrame
                 }
             }
 
-            _tipsDrain.Clear();
+            var drained = new List<TipsWaitItem>(8);
             _tips.DrainWhere(
                 item => item != null
                         && UIPanelCatalog.TryResolve(item.PanelType, UIOpenMode.Toast, out var waitBind)
                         && waitBind.Group == group,
-                _tipsDrain);
-            RejectToastWaits(_tipsDrain);
+                drained);
+            RejectToastWaits(drained);
 
             var buffer = new List<UIPanel>(16);
             CollectGroup(_opened.Values, group, buffer);
@@ -775,11 +774,22 @@ namespace UIFrame
                 return;
             }
 
-            if (_opened.TryGetValue(type, out var opened) && opened == panel)
+            if (!_opened.TryGetValue(type, out var opened) || opened != panel)
             {
-                _opened.Remove(type);
+                if (destroy)
+                {
+                    if (_cached.TryGetValue(type, out var cached) && cached == panel)
+                    {
+                        _cached.Remove(type);
+                    }
+
+                    DestroyPanelAndReport(panel);
+                }
+
+                return;
             }
 
+            _opened.Remove(type);
             _cached.Remove(type);
 
             try

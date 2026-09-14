@@ -129,6 +129,12 @@ namespace UIFrame
         void OnDestroy()
         {
             CancelOpenScope();
+            if (!DestroyDispatched)
+            {
+                Debug.LogError(
+                    $"[UIFrame] 面板 {GetType().Name} 被外部 Destroy，未经过 UI.Close/Shutdown。");
+            }
+
             var handle = AssetHandle;
             if (handle == null)
             {
