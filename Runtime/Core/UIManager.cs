@@ -30,7 +30,6 @@ namespace UIFrame
 
         public bool IsInited => _inited;
         public Camera UICamera => _root != null ? _root.UICamera : null;
-        internal bool OwnsRoot(UIFrameRoot root) => _root == root;
 
         public void Init()
         {
@@ -78,10 +77,7 @@ namespace UIFrame
             var closing = new List<UIPanel>(16);
             foreach (var panel in _opened.Values)
             {
-                if (panel != null)
-                {
-                    closing.Add(panel);
-                }
+                closing.Add(panel);
             }
 
             foreach (var list in _toasts.Values)
@@ -93,10 +89,7 @@ namespace UIFrame
 
                 for (var i = 0; i < list.Count; i++)
                 {
-                    if (list[i] != null)
-                    {
-                        closing.Add(list[i]);
-                    }
+                    closing.Add(list[i]);
                 }
             }
 
@@ -112,10 +105,7 @@ namespace UIFrame
             closing.Clear();
             foreach (var panel in _cached.Values)
             {
-                if (panel != null)
-                {
-                    closing.Add(panel);
-                }
+                closing.Add(panel);
             }
 
             _cached.Clear();
@@ -200,7 +190,6 @@ namespace UIFrame
 
             if (_loading.TryGetValue(type, out var inflight))
             {
-                inflight.Cancelled = false;
                 inflight.Args = args;
                 inflight.Mode = mode;
                 return AwaitInflight<TPanel>(inflight);
@@ -231,17 +220,11 @@ namespace UIFrame
         {
             if (_opened.TryGetValue(type, out panel))
             {
-                if (panel != null)
-                {
-                    ShowReusedPanel(bind, mode, args, panel);
-                    return true;
-                }
-
-                _opened.Remove(type);
+                ShowReusedPanel(bind, mode, args, panel);
+                return true;
             }
 
-            TryRemoveDeadCache(type);
-            if (!_cached.TryGetValue(type, out panel) || panel == null)
+            if (!_cached.TryGetValue(type, out panel))
             {
                 panel = null;
                 return false;
@@ -586,14 +569,13 @@ namespace UIFrame
                 DestroyToastIdle(panelType);
             }
 
-            if (_opened.TryGetValue(panelType, out var opened) && opened != null)
+            if (_opened.TryGetValue(panelType, out var opened))
             {
                 ClosePanel(opened, destroy);
                 return;
             }
 
-            TryRemoveDeadCache(panelType);
-            if (destroy && _cached.TryGetValue(panelType, out var cached) && cached != null)
+            if (destroy && _cached.TryGetValue(panelType, out var cached))
             {
                 _cached.Remove(panelType);
                 DestroyPanel(cached);
@@ -674,11 +656,6 @@ namespace UIFrame
                 for (var i = 0; i < buffer.Count; i++)
                 {
                     var cached = buffer[i];
-                    if (cached == null)
-                    {
-                        continue;
-                    }
-
                     _cached.Remove(cached.PanelType);
                     DestroyPanel(cached);
                 }
@@ -717,10 +694,7 @@ namespace UIFrame
             var buffer = new List<UIPanel>(16);
             foreach (var kv in _cached)
             {
-                if (kv.Value != null)
-                {
-                    buffer.Add(kv.Value);
-                }
+                buffer.Add(kv.Value);
             }
 
             _cached.Clear();
@@ -737,30 +711,12 @@ namespace UIFrame
             var type = typeof(TPanel);
             if (_opened.TryGetValue(type, out var panel))
             {
-                if (panel != null)
-                {
-                    return panel as TPanel;
-                }
-
-                _opened.Remove(type);
+                return panel as TPanel;
             }
 
-            if (_toasts.TryGetValue(type, out var toasts) && toasts != null)
+            if (_toasts.TryGetValue(type, out var toasts) && toasts != null && toasts.Count > 0)
             {
-                for (var i = toasts.Count - 1; i >= 0; i--)
-                {
-                    if (toasts[i] != null)
-                    {
-                        return toasts[i] as TPanel;
-                    }
-
-                    toasts.RemoveAt(i);
-                }
-
-                if (toasts.Count == 0)
-                {
-                    _toasts.Remove(type);
-                }
+                return toasts[toasts.Count - 1] as TPanel;
             }
 
             return null;
@@ -902,17 +858,9 @@ namespace UIFrame
             var count = 0;
             foreach (var list in _toasts.Values)
             {
-                if (list == null)
+                if (list != null)
                 {
-                    continue;
-                }
-
-                for (var i = 0; i < list.Count; i++)
-                {
-                    if (list[i] != null)
-                    {
-                        count++;
-                    }
+                    count += list.Count;
                 }
             }
 
@@ -963,37 +911,22 @@ namespace UIFrame
                 return null;
             }
 
-            for (var i = list.Count - 1; i >= 0; i--)
-            {
-                var panel = list[i];
-                list.RemoveAt(i);
-                if (panel == null)
-                {
-                    continue;
-                }
-
-                if (!string.Equals(panel.Location, bind.Location, StringComparison.Ordinal))
-                {
-                    DestroyPanelAndReport(panel);
-                    throw new InvalidOperationException(
-                        $"[UIFrame] 闲置 Toast {type.Name} 的 Location 与注册不一致。");
-                }
-
-                ApplyBind(panel, bind);
-                if (list.Count == 0)
-                {
-                    _toastIdle.Remove(type);
-                }
-
-                return panel;
-            }
-
+            var panel = list[list.Count - 1];
+            list.RemoveAt(list.Count - 1);
             if (list.Count == 0)
             {
                 _toastIdle.Remove(type);
             }
 
-            return null;
+            if (!string.Equals(panel.Location, bind.Location, StringComparison.Ordinal))
+            {
+                DestroyPanelAndReport(panel);
+                throw new InvalidOperationException(
+                    $"[UIFrame] 闲置 Toast {type.Name} 的 Location 与注册不一致。");
+            }
+
+            ApplyBind(panel, bind);
+            return panel;
         }
 
         void ReturnToastIdle(UIPanel panel)
@@ -1328,12 +1261,19 @@ namespace UIFrame
             }
 
             var t = panel.transform;
-            if (t.parent != parent)
+            var parentChanged = t.parent != parent;
+            if (parentChanged)
             {
                 t.SetParent(parent, false);
             }
 
-            SetLayerRecursively(t, parent.gameObject.layer);
+            var layer = parent.gameObject.layer;
+            if (!parentChanged && panel.gameObject.layer == layer)
+            {
+                return;
+            }
+
+            SetLayerRecursively(t, layer);
         }
 
         static void SetLayerRecursively(Transform root, int layer)
@@ -1343,21 +1283,6 @@ namespace UIFrame
             {
                 SetLayerRecursively(root.GetChild(i), layer);
             }
-        }
-
-        void TryRemoveDeadCache(Type type)
-        {
-            if (!_cached.TryGetValue(type, out var cached))
-            {
-                return;
-            }
-
-            if (cached != null)
-            {
-                return;
-            }
-
-            _cached.Remove(type);
         }
 
         static void CollectGroup(IEnumerable<UIPanel> source, UIGroup group, List<UIPanel> dest)

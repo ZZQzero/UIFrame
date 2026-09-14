@@ -9,7 +9,6 @@ namespace UIFrame
     public static class UI
     {
         static UIManager _manager;
-        static bool _shuttingDown;
         static TipsSettings _tipsSettings = TipsSettings.Default;
 
         public static bool IsInited => _manager != null && _manager.IsInited;
@@ -82,10 +81,8 @@ namespace UIFrame
         /// <summary>仅从 Base Camera Stack 移除 UI Camera。Canvas 模式与引用不变。</summary>
         public static void DisableURPCameraStack()
         {
-            if (IsInited)
-            {
-                _manager.DisableURPCameraStack();
-            }
+            RequireInit();
+            _manager.DisableURPCameraStack();
         }
 
         /// <summary>
@@ -94,37 +91,10 @@ namespace UIFrame
         /// </summary>
         public static void Shutdown()
         {
-            ShutdownInternal(destroyRoot: true);
-        }
-
-        internal static void NotifyRootDestroyed(UIFrameRoot root)
-        {
-            if (_manager == null || !_manager.OwnsRoot(root))
-            {
-                return;
-            }
-
-            ShutdownInternal(destroyRoot: false);
-        }
-
-        static void ShutdownInternal(bool destroyRoot)
-        {
-            if (_shuttingDown || _manager == null)
-            {
-                return;
-            }
-
-            _shuttingDown = true;
-            try
-            {
-                var manager = _manager;
-                _manager = null;
-                manager.Shutdown(destroyRoot);
-            }
-            finally
-            {
-                _shuttingDown = false;
-            }
+            RequireInit();
+            var manager = _manager;
+            _manager = null;
+            manager.Shutdown();
         }
 
         /// <summary>注册地址与分组。关闭默认进缓存，不释放内存。</summary>
@@ -268,11 +238,7 @@ namespace UIFrame
 
         public static void Back()
         {
-            if (!IsInited)
-            {
-                return;
-            }
-
+            RequireInit();
             _manager.Back();
         }
 
@@ -290,11 +256,7 @@ namespace UIFrame
                 throw new ArgumentNullException(nameof(panelType));
             }
 
-            if (!IsInited)
-            {
-                return;
-            }
-
+            RequireInit();
             _manager.Close(panelType, destroy);
         }
 
@@ -305,11 +267,7 @@ namespace UIFrame
                 throw new ArgumentNullException(nameof(panel));
             }
 
-            if (!IsInited)
-            {
-                return;
-            }
-
+            RequireInit();
             _manager.CloseInstance(panel, destroy);
         }
 
@@ -330,22 +288,14 @@ namespace UIFrame
         /// </summary>
         public static void CloseGroup(UIGroup group, bool destroy = false)
         {
-            if (!IsInited)
-            {
-                return;
-            }
-
+            RequireInit();
             _manager.CloseGroup(group, destroy);
         }
 
         /// <summary>销毁所有已关闭进缓存的面板（含 Tips 闲置 Toast），释放内存。不影响当前打开的界面。</summary>
         public static void ClearCache()
         {
-            if (!IsInited)
-            {
-                return;
-            }
-
+            RequireInit();
             _manager.ClearCache();
         }
 
@@ -383,11 +333,6 @@ namespace UIFrame
 
         static void CreateManager(ResourcePackage package)
         {
-            if (_shuttingDown)
-            {
-                throw new InvalidOperationException("[UIFrame] 正在 Shutdown，无法继续操作。");
-            }
-
             if (_manager != null)
             {
                 throw new InvalidOperationException("[UIFrame] 已经 Init，请勿重复初始化。");
@@ -417,11 +362,6 @@ namespace UIFrame
 
         static void RequireInit()
         {
-            if (_shuttingDown)
-            {
-                throw new InvalidOperationException("[UIFrame] 正在 Shutdown，无法继续操作。");
-            }
-
             if (!IsInited)
             {
                 throw new InvalidOperationException("[UIFrame] 请先调用 UI.Init()。");

@@ -113,10 +113,7 @@ namespace UIFrame
 
         public void EndInFlight()
         {
-            if (_inFlight > 0)
-            {
-                _inFlight--;
-            }
+            _inFlight--;
         }
 
         /// <summary>

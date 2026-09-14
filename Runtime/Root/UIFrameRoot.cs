@@ -344,8 +344,6 @@ namespace UIFrame
                 Destroy(_whiteSprite);
                 _whiteSprite = null;
             }
-
-            UI.NotifyRootDestroyed(this);
         }
 
         sealed class SafeAreaCanvasListener : MonoBehaviour
