@@ -91,7 +91,7 @@ if (!pool.TrySpawn("PlayerItem", contentRoot, out PlayerItem item))
 的 Prefab Handle 同步实例化；location 尚未加载或仍在加载时返回 `false`，不会
 偷偷触发同步 YooAsset 加载。该接口适合必须立即返回 Cell 的循环列表
 `GetObject`。`false` 仅表示分桶尚未准备。缺组件、参数错误、线程错误、还错对象
-或分桶已因外部 Destroy 作废都会抛。
+或下次取用碰到被外部 Destroy 的假 null 都会抛。
 
 `IPoolable` 回调规则：
 
@@ -99,7 +99,9 @@ if (!pool.TrySpawn("PlayerItem", contentRoot, out PlayerItem item))
 2. 归还时按相反顺序调用 `OnDespawned`，隐藏对象并移动到池根节点。
 3. 回调组件列表仅在实例首次创建时通过
    `GetComponentsInChildren<IPoolable>(true)` 扫描并缓存，稳态取还不会重复查询。
-4. 某个 `OnDespawned` 抛错时记录 Error，其余组件仍继续清理，回收流程不会因此中断。
+4. 某个 `OnDespawned` 抛错时立刻停，其余回调不跑；实例不会还回闲置区，异常交给调用方。
+   `OnSpawned` 抛错同样不回滚，半成品留在场景里便于排查。
+5. 缺组件时抛错，已取出的实例不还回池。
 
 ## 显式回收与分组
 
@@ -124,8 +126,9 @@ pool.TryRemoveGroup(PoolGroup.UI, force: true);
 
 `Despawn` 与 `DespawnImmediate` 都是同步回收。还错对象、重复还、在 `IPoolable`
 回调里还，都会抛。`DespawnDeferred` 延迟到 LastPostLateUpdate；等待期间再
-`DespawnDeferred` 或 `DespawnGroup(..., deferred: true)` 会抛，但可以用
-`DespawnImmediate` 立刻还。`OnDespawned` 异常会记录 Error，但不会中断回收或逐帧重试。
+`DespawnDeferred` 同一对象会抛，但可以用 `DespawnImmediate` 立刻还。
+`DespawnGroup(..., deferred: true)` 对已经在排队的实例会跳过。延迟回收时
+`OnDespawned` 失败、排队对象被外部 `Destroy`、或分桶已被拆掉，都直接抛，不再吞掉后继续收。
 循环列表不得使用延迟回收。
 
 ## 加载、取消与释放
@@ -136,16 +139,16 @@ pool.TryRemoveGroup(PoolGroup.UI, force: true);
   或释放服务。
 - 每个分桶持有一个 `AssetHandle`，直到分桶真正移除。
 - `TryRemovePool` 在仍有活跃实例、正在加载或正在跨帧预热时返回 `false`。
-  回调里调用会抛。分桶因外部 Destroy 作废后也会抛，不要靠 Remove 再 Prepare 修复。
+  回调里调用会抛。
 - `TryRemoveGroup` 按组释放闲置实例和句柄；组内正在加载或仍有活跃实例时拒绝
   普通移除。预热进行中时即使传入 `force: true` 也会拒绝移除。
 - `Trim(location, count)` 将闲置实例收缩到指定数量，但不释放 Prefab 句柄。
-  闲置实例被外部 `Destroy` 时和 Spawn / Prewarm 一样会抛，分桶作废。
+  闲置实例被外部 `Destroy` 时和 Spawn / Prewarm 一样当场抛。
 - `TryDispose()` 在存在活跃实例、加载任务或预热任务时返回 `false`。回调里调用会抛。
 - `Dispose()` 会终止活跃实例并释放每个已建立分桶的 Prefab Handle。
 - 池化实例不得由业务代码直接 `Destroy`，应统一调用 `Despawn`。外部 `Destroy`
-  会让该分桶作废，后续 Spawn / Prepare / Trim / Remove 都会抛；只能 `Dispose`
-  整个服务。未激活的预热实例可能没有 `OnDestroy`，下次取用发现失效引用时同样作废。
+  会在 Editor/Development 打 Error，并从活跃集合摘掉；下次 `Get` 碰到假 null
+  当场抛。未激活的预热实例可能没有 `OnDestroy`，同样在下次取用时抛。
 
 `GameObjectPoolService` 的公开操作必须从创建它的 Unity 主线程调用。自定义
 `IPrefabProvider` 可以在后台线程完成加载；服务会在创建分桶或操作 Unity 对象前

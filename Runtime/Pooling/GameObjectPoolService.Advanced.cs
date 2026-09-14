@@ -1,6 +1,5 @@
 using System;
 using System.Collections.Generic;
-using System.Runtime.ExceptionServices;
 using Cysharp.Threading.Tasks;
 using UnityEngine;
 
@@ -40,55 +39,20 @@ namespace Game.Pooling
             EnsureUsable();
             EnsureNoLifecycleMutation();
             int count = 0;
-            var groupedBuckets = new List<PoolBucket>();
 
             foreach (PoolBucket bucket in buckets.Values)
             {
-                if (bucket.Options.Group == group && bucket.Active.Count > 0)
+                if (bucket.Options.Group != group || bucket.Active.Count == 0)
                 {
-                    groupedBuckets.Add(bucket);
+                    continue;
                 }
-            }
 
-            if (deferred)
-            {
-                for (int bucketIndex = 0; bucketIndex < groupedBuckets.Count; bucketIndex++)
-                {
-                    PoolBucket bucket = groupedBuckets[bucketIndex];
-                    foreach (PooledInstanceMarker marker in bucket.Active)
-                    {
-                        if (marker == null)
-                        {
-                            bucket.FailExternalDestroy();
-                            throw new InvalidOperationException(
-                                $"A pooled instance of '{bucket.Location}' was destroyed externally.");
-                        }
-
-                        if (marker.State == PooledInstanceState.PendingDespawn)
-                        {
-                            throw new InvalidOperationException(
-                                $"'{marker.Location}' is already waiting for deferred despawn.");
-                        }
-
-                        if (marker.State != PooledInstanceState.Active)
-                        {
-                            throw new InvalidOperationException(
-                                $"Cannot despawn '{bucket.Location}' in state {marker.State}.");
-                        }
-                    }
-                }
-            }
-
-            for (int bucketIndex = 0; bucketIndex < groupedBuckets.Count; bucketIndex++)
-            {
-                PoolBucket bucket = groupedBuckets[bucketIndex];
                 var active = new List<PooledInstanceMarker>(bucket.Active);
                 for (int i = 0; i < active.Count; i++)
                 {
                     PooledInstanceMarker marker = active[i];
                     if (marker == null)
                     {
-                        bucket.FailExternalDestroy();
                         throw new InvalidOperationException(
                             $"A pooled instance of '{bucket.Location}' was destroyed externally.");
                     }
@@ -127,23 +91,12 @@ namespace Game.Pooling
 
             bucket.EnsureAvailable();
             int before = bucket.Pool.CountInactive;
-            if (before == 0)
-            {
-                return 0;
-            }
-
             var inactive = new List<PooledInstanceMarker>(before);
             for (int i = 0; i < before; i++)
             {
                 PooledInstanceMarker marker = bucket.Pool.Get();
                 if (marker == null)
                 {
-                    bucket.FailExternalDestroy();
-                    for (int j = 0; j < inactive.Count; j++)
-                    {
-                        bucket.Pool.Release(inactive[j]);
-                    }
-
                     throw new InvalidOperationException(
                         $"An inactive pooled instance of '{location}' was destroyed externally.");
                 }
@@ -171,14 +124,6 @@ namespace Game.Pooling
             EnsureUsable();
             EnsureNoLifecycleMutation();
 
-            foreach (PoolBucket bucket in buckets.Values)
-            {
-                if (bucket.Options.Group == group)
-                {
-                    bucket.EnsureAvailable();
-                }
-            }
-
             foreach (PendingLoad pending in pendingLoads.Values)
             {
                 if (pending.Options.Group == group)
@@ -187,38 +132,29 @@ namespace Game.Pooling
                 }
             }
 
-            foreach (PoolBucket bucket in buckets.Values)
-            {
-                if (bucket.Options.Group == group && bucket.IsPrewarming)
-                {
-                    return false;
-                }
-            }
-
-            if (!force)
-            {
-                foreach (PoolBucket bucket in buckets.Values)
-                {
-                    if (bucket.Options.Group == group && bucket.Active.Count > 0)
-                    {
-                        return false;
-                    }
-                }
-            }
-
             var locations = new List<string>();
             foreach (KeyValuePair<string, PoolBucket> pair in buckets)
             {
-                if (pair.Value.Options.Group == group)
+                PoolBucket bucket = pair.Value;
+                if (bucket.Options.Group != group)
                 {
-                    locations.Add(pair.Key);
+                    continue;
                 }
+
+                if (bucket.IsPrewarming ||
+                    (!force && bucket.Active.Count > 0))
+                {
+                    return false;
+                }
+
+                locations.Add(pair.Key);
             }
 
             for (int i = 0; i < locations.Count; i++)
             {
                 string location = locations[i];
                 PoolBucket bucket = buckets[location];
+                bucket.EnsureAvailable();
                 buckets.Remove(location);
                 bucket.Dispose(force);
             }
@@ -228,6 +164,11 @@ namespace Game.Pooling
 
         private void QueueDespawn(PooledInstanceMarker marker)
         {
+            if (marker.State == PooledInstanceState.PendingDespawn)
+            {
+                return;
+            }
+
             marker.State = PooledInstanceState.PendingDespawn;
             pendingDespawns.Add(marker);
             if (processingPendingDespawns)
@@ -255,43 +196,35 @@ namespace Game.Pooling
 
                     pendingDespawns.RemoveRange(0, count);
 
-                    Exception firstError = null;
                     for (int i = 0; i < pendingDespawnBatch.Count; i++)
                     {
                         PooledInstanceMarker marker = pendingDespawnBatch[i];
-                        if (marker == null ||
-                            marker.State != PooledInstanceState.PendingDespawn ||
-                            marker.Owner != this ||
-                            !buckets.TryGetValue(marker.Location, out PoolBucket bucket))
+                        if (marker == null)
+                        {
+                            throw new InvalidOperationException(
+                                "A pooled instance waiting for deferred despawn was destroyed externally.");
+                        }
+
+                        if (marker.State != PooledInstanceState.PendingDespawn)
                         {
                             continue;
                         }
 
-                        try
+                        if (!buckets.TryGetValue(marker.Location, out PoolBucket bucket))
                         {
-                            DespawnNow(marker, bucket);
+                            throw new InvalidOperationException(
+                                $"Pool '{marker.Location}' was removed.");
                         }
-                        catch (Exception exception)
-                        {
-                            firstError ??= exception;
-                        }
+
+                        DespawnNow(marker, bucket);
                     }
 
                     pendingDespawnBatch.Clear();
-                    if (firstError != null)
-                    {
-                        ExceptionDispatchInfo.Capture(firstError).Throw();
-                    }
                 }
             }
             finally
             {
                 processingPendingDespawns = false;
-                if (!disposed && pendingDespawns.Count > 0)
-                {
-                    processingPendingDespawns = true;
-                    ProcessPendingDespawnsAsync().Forget();
-                }
             }
         }
     }
