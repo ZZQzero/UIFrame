@@ -183,7 +183,7 @@ namespace Game.Audio
                 SceneHandle);
         }
 
-        public AudioPlayOptions InScene(Scene scene)
+        public AudioPlayOptions InScene(UnityEngine.SceneManagement.Scene scene)
         {
             RequireInitialized();
             if (!scene.IsValid() || !scene.isLoaded)
@@ -250,7 +250,7 @@ namespace Game.Audio
     {
         internal static int RequireActiveHandle()
         {
-            Scene scene = SceneManager.GetActiveScene();
+            UnityEngine.SceneManagement.Scene scene = SceneManager.GetActiveScene();
             if (!scene.IsValid() || !scene.isLoaded)
             {
                 throw new AudioStateException(
@@ -269,7 +269,7 @@ namespace Game.Audio
 
             for (int i = 0; i < SceneManager.sceneCount; i++)
             {
-                Scene loadedScene = SceneManager.GetSceneAt(i);
+                UnityEngine.SceneManagement.Scene loadedScene = SceneManager.GetSceneAt(i);
                 if (loadedScene.handle == sceneHandle &&
                     loadedScene.isLoaded)
                 {

@@ -311,7 +311,7 @@ namespace Game.Audio
             }
         }
 
-        private void OnSceneUnloaded(Scene scene)
+        private void OnSceneUnloaded(UnityEngine.SceneManagement.Scene scene)
         {
             if (initialized)
             {
