@@ -1,6 +1,8 @@
 using System;
 using System.Collections.Generic;
 using UnityEngine;
+using UnityEngine.EventSystems;
+using UnityEngine.InputSystem.UI;
 using UnityEngine.Rendering.Universal;
 using UnityEngine.UI;
 
@@ -118,7 +120,16 @@ namespace UIFrame
             BuildCanvas();
             BuildLayers();
             BuildMask();
+            BuildEventSystem();
             BindOrientation();
+        }
+
+        void BuildEventSystem()
+        {
+            var go = new GameObject("EventSystem");
+            go.transform.SetParent(transform, false);
+            go.AddComponent<EventSystem>();
+            go.AddComponent<InputSystemUIInputModule>();
         }
 
         void BuildCanvas()

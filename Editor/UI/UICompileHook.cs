@@ -1,3 +1,4 @@
+using System.IO;
 using UnityEditor;
 using UnityEditor.SceneManagement;
 using UnityEngine;
@@ -34,7 +35,13 @@ namespace UIFrame.Editor
                 var state = store.All[i];
                 if (state.PendingAttach)
                 {
-                    if (TryAttach(state))
+                    if (string.IsNullOrEmpty(state.ScriptPath)
+                        || !File.Exists(UIScriptWriter.ToFullPath(state.ScriptPath)))
+                    {
+                        state.PendingAttach = false;
+                        dirty = true;
+                    }
+                    else if (TryAttach(state))
                     {
                         state.PendingAttach = false;
                         dirty = true;
@@ -43,7 +50,13 @@ namespace UIFrame.Editor
 
                 if (state.PendingAssign && !state.PendingAttach)
                 {
-                    if (TryAssign(state))
+                    if (string.IsNullOrEmpty(state.GenPath)
+                        || !File.Exists(UIScriptWriter.ToFullPath(state.GenPath)))
+                    {
+                        state.PendingAssign = false;
+                        dirty = true;
+                    }
+                    else if (TryAssign(state))
                     {
                         state.PendingAssign = false;
                         dirty = true;
@@ -88,8 +101,14 @@ namespace UIFrame.Editor
                 return TryAttachToObject(state, type);
             }
 
-            if (TryAddToPrefabStage(prefabPath, type, state.HostPath))
+            var stage = PrefabStageUtility.GetCurrentPrefabStage();
+            if (stage != null && PathsEqual(stage.assetPath, prefabPath))
             {
+                if (!TryAddToPrefabStage(prefabPath, type, state.HostPath))
+                {
+                    return false;
+                }
+
                 Debug.LogWarning($"[UIFrame] 已挂载 {type.Name} 到 Prefab Stage，请保存 Prefab 以写入资产。");
                 return true;
             }
@@ -108,12 +127,12 @@ namespace UIFrame.Editor
                     return false;
                 }
 
-                if (target.GetComponent(type) == null)
-                {
-                    target.AddComponent(type);
-                }
-
+                var attached = TryAddHostComponent(target, type);
                 PrefabUtility.SaveAsPrefabAsset(root, prefabPath);
+                if (!attached)
+                {
+                    return false;
+                }
             }
             finally
             {
@@ -149,9 +168,9 @@ namespace UIFrame.Editor
                 return false;
             }
 
-            if (go.GetComponent(type) == null)
+            if (!TryAddHostComponent(go, type))
             {
-                go.AddComponent(type);
+                return false;
             }
 
             EditorUtility.SetDirty(go);
@@ -222,13 +241,25 @@ namespace UIFrame.Editor
                 return false;
             }
 
-            if (target.GetComponent(type) == null)
+            var attached = TryAddHostComponent(target, type);
+            EditorSceneManager.MarkSceneDirty(stage.scene);
+            return attached;
+        }
+
+        static bool TryAddHostComponent(GameObject target, System.Type type)
+        {
+            if (target == null || type == null)
             {
-                target.AddComponent(type);
+                return false;
             }
 
-            EditorSceneManager.MarkSceneDirty(stage.scene);
-            return true;
+            GameObjectUtility.RemoveMonoBehavioursWithMissingScript(target);
+            if (target.GetComponent(type) != null)
+            {
+                return true;
+            }
+
+            return target.AddComponent(type) != null;
         }
 
         static bool PathsEqual(string a, string b)

@@ -33,6 +33,14 @@ namespace UIFrame.Editor
             EditorGUILayout.BeginHorizontal();
             using (new EditorGUI.DisabledScope(state == null || state.PendingAttach))
             {
+                if (GUILayout.Button("刷新绑定"))
+                {
+                    if (!UIBindActions.TryRefreshBinds(host, out var error))
+                    {
+                        EditorUtility.DisplayDialog("UIFrame", error, "确定");
+                    }
+                }
+
                 if (GUILayout.Button("写入脚本"))
                 {
                     if (!UIBindActions.TryWriteGen(host, out var error))
@@ -55,7 +63,9 @@ namespace UIFrame.Editor
         {
             if (state == null || state.Binds == null || state.Binds.Count == 0)
             {
-                EditorGUILayout.HelpBox("在子节点组件上点「添加到…」或右键添加。Panel 下的 Item 脚本可以加到外层 Panel。不会立刻编译。", MessageType.None);
+                EditorGUILayout.HelpBox(
+                    "在子节点组件上点「添加到…」或右键添加。已有引用可点「刷新绑定」。不会立刻编译。",
+                    MessageType.None);
                 return;
             }
 

@@ -259,6 +259,90 @@ namespace UIFrame.Editor
             return true;
         }
 
+        public static bool TryRefreshBinds(MonoBehaviour host, out string error)
+        {
+            error = null;
+            if (host == null)
+            {
+                error = "根上没有生成脚本。";
+                return false;
+            }
+
+            var state = GetOrCreateState(host);
+            if (state == null)
+            {
+                error = "当前对象不是 Prefab，无法刷新绑定。";
+                return false;
+            }
+
+            if (state.PendingAttach)
+            {
+                error = "脚本还在挂载，请等编译完成。";
+                return false;
+            }
+
+            EnsureStateFromHost(state, host);
+            if (string.IsNullOrEmpty(state.GenPath)
+                || !File.Exists(UIScriptWriter.ToFullPath(state.GenPath)))
+            {
+                error = "找不到 .Gen.cs。";
+                return false;
+            }
+
+            if (state.Binds == null)
+            {
+                state.Binds = new List<UIBindEntry>();
+            }
+
+            var genFields = ParseGenFields(state.GenPath);
+            var so = new SerializedObject(host);
+            var added = 0;
+            var updated = 0;
+            foreach (var pair in genFields)
+            {
+                var prop = so.FindProperty(pair.Key);
+                if (prop == null
+                    || prop.propertyType != SerializedPropertyType.ObjectReference
+                    || prop.objectReferenceValue == null)
+                {
+                    continue;
+                }
+
+                var path = PathFromReference(host.transform, prop.objectReferenceValue);
+                if (path == null)
+                {
+                    continue;
+                }
+
+                var localId = UICodeGenUtil.GetLocalFileId(prop.objectReferenceValue);
+                var existing = FindBindByField(state, pair.Key);
+                if (existing == null)
+                {
+                    state.Binds.Add(new UIBindEntry
+                    {
+                        FieldName = pair.Key,
+                        TypeName = pair.Value,
+                        IsGameObject = pair.Value == "UnityEngine.GameObject",
+                        HierarchyPath = path,
+                        LocalFileId = localId,
+                    });
+                    added++;
+                    continue;
+                }
+
+                existing.TypeName = pair.Value;
+                existing.IsGameObject = pair.Value == "UnityEngine.GameObject";
+                existing.HierarchyPath = path;
+                existing.LocalFileId = localId;
+                updated++;
+            }
+
+            state.BindsInitialized = true;
+            UIBindStore.instance.Persist();
+            Debug.Log($"[UIFrame] 已刷新绑定：新增 {added}，更新 {updated}。");
+            return true;
+        }
+
         public static UIPrefabBindState GetState(MonoBehaviour host)
         {
             if (host == null)
@@ -343,6 +427,74 @@ namespace UIFrame.Editor
 
             state.PendingAttach = false;
             UIBindStore.instance.Persist();
+        }
+
+        public static bool ClearPendingForDeletedScripts(string[] deletedAssets)
+        {
+            if (deletedAssets == null || deletedAssets.Length == 0)
+            {
+                return false;
+            }
+
+            var store = UIBindStore.instance;
+            var dirty = false;
+            for (var i = 0; i < store.All.Count; i++)
+            {
+                var state = store.All[i];
+                var scriptDeleted = ContainsAssetPath(deletedAssets, state.ScriptPath);
+                var genDeleted = ContainsAssetPath(deletedAssets, state.GenPath);
+                if (!scriptDeleted && !genDeleted)
+                {
+                    continue;
+                }
+
+                if (scriptDeleted && state.PendingAttach)
+                {
+                    state.PendingAttach = false;
+                    dirty = true;
+                }
+
+                if ((scriptDeleted || genDeleted) && state.PendingAssign)
+                {
+                    state.PendingAssign = false;
+                    dirty = true;
+                }
+            }
+
+            if (dirty)
+            {
+                store.Persist();
+            }
+
+            return dirty;
+        }
+
+        static bool ContainsAssetPath(string[] assets, string path)
+        {
+            if (string.IsNullOrEmpty(path))
+            {
+                return false;
+            }
+
+            var normalized = path.Replace('\\', '/');
+            for (var i = 0; i < assets.Length; i++)
+            {
+                var asset = assets[i];
+                if (string.IsNullOrEmpty(asset))
+                {
+                    continue;
+                }
+
+                if (string.Equals(
+                    asset.Replace('\\', '/'),
+                    normalized,
+                    StringComparison.OrdinalIgnoreCase))
+                {
+                    return true;
+                }
+            }
+
+            return false;
         }
 
         public static void CancelPendingAssign(UIPrefabBindState state)
