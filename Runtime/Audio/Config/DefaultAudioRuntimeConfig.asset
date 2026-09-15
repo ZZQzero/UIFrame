@@ -1,0 +1,117 @@
+%YAML 1.1
+%TAG !u! tag:unity3d.com,2011:
+--- !u!114 &11400000
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 0}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: a0dd015dba8031f42b58ed6b4e2d7e72, type: 3}
+  m_Name: DefaultAudioRuntimeConfig
+  m_EditorClassIdentifier: Audio.Runtime::Game.Audio.AudioRuntimeConfig
+  maxVoices: 32
+  cacheRetentionSeconds: 30
+  mixer: {fileID: 24100000, guid: 4359be01c18d04c4580c53715602ead9, type: 2}
+  bgmGroupPath: Master/BGM
+  sfxGroupPath: Master/SFX
+  uiGroupPath: Master/UI
+  voiceGroupPath: Master/Voice
+  masterVolumeParameter: MasterVolume
+  bgmVolumeParameter: BgmVolume
+  sfxVolumeParameter: SfxVolume
+  uiVolumeParameter: UiVolume
+  voiceVolumeParameter: VoiceVolume
+  entries:
+  - id: bgm.ludo
+    location: LudoBgMusic
+    bus: 0
+    maxInstances: 2
+    cooldownSeconds: 0
+    overflowPolicy: 1
+    priority: 0
+    volume: 0.6
+    pitch: 1
+    loop: 1
+    spatialBlend: 0
+    minDistance: 1
+    maxDistance: 50
+    rolloffMode: 0
+    loadMode: 2
+  - id: sfx.dice
+    location: DiceSound
+    bus: 1
+    maxInstances: 4
+    cooldownSeconds: 0.05
+    overflowPolicy: 1
+    priority: 64
+    volume: 1
+    pitch: 1
+    loop: 0
+    spatialBlend: 0
+    minDistance: 1
+    maxDistance: 50
+    rolloffMode: 0
+    loadMode: 0
+  - id: sfx.dice.alt
+    location: Dice1Sound
+    bus: 1
+    maxInstances: 4
+    cooldownSeconds: 0.05
+    overflowPolicy: 1
+    priority: 64
+    volume: 1
+    pitch: 1
+    loop: 0
+    spatialBlend: 0
+    minDistance: 1
+    maxDistance: 50
+    rolloffMode: 0
+    loadMode: 0
+  - id: sfx.eat
+    location: EatDice
+    bus: 1
+    maxInstances: 4
+    cooldownSeconds: 0.05
+    overflowPolicy: 1
+    priority: 48
+    volume: 1
+    pitch: 1
+    loop: 0
+    spatialBlend: 0
+    minDistance: 1
+    maxDistance: 50
+    rolloffMode: 0
+    loadMode: 0
+  - id: sfx.move.1
+    location: MoveDice1Sound
+    bus: 1
+    maxInstances: 6
+    cooldownSeconds: 0.03
+    overflowPolicy: 1
+    priority: 96
+    volume: 1
+    pitch: 1
+    loop: 0
+    spatialBlend: 0
+    minDistance: 1
+    maxDistance: 50
+    rolloffMode: 0
+    loadMode: 0
+  - id: sfx.move.2
+    location: MoveDice2Sound
+    bus: 1
+    maxInstances: 6
+    cooldownSeconds: 0.03
+    overflowPolicy: 1
+    priority: 96
+    volume: 1
+    pitch: 1
+    loop: 0
+    spatialBlend: 0
+    minDistance: 1
+    maxDistance: 50
+    rolloffMode: 0
+    loadMode: 0
