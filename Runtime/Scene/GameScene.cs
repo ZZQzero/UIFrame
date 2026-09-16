@@ -13,7 +13,7 @@ namespace Game.Scene
 {
     public static class GameScene
     {
-        static readonly Dictionary<string, ISceneHandle> Loaded = new(StringComparer.Ordinal);
+        internal static readonly Dictionary<string, ISceneHandle> Loaded = new(StringComparer.Ordinal);
         static readonly Action<float> RelayProgress = OnProgress;
 
         static ISceneLoader loader;
@@ -111,6 +111,11 @@ namespace Game.Scene
         public static UniTask SwitchAsync(string location, Action<float> onProgress = null)
         {
             RequireIncoming(location);
+            if (activeId != null && !Loaded.ContainsKey(activeId))
+            {
+                throw new InvalidOperationException($"当前活动场景未登记: {activeId}");
+            }
+
             return Run(onProgress, () => SwitchCoreAsync(location));
         }
 

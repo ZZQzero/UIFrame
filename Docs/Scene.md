@@ -34,7 +34,7 @@ await GameScene.ShutdownAsync();
 
 | 场景 | API | 加载 | 激活 | 其它已加载场 |
 |------|-----|------|------|----------------|
-| 切主场景 | `SwitchAsync` | Additive | 成功后才登记为 Active | 只卸上一份 Active；其它 Additive 留下 |
+| 切主场景 | `SwitchAsync` | Additive | 成功后才登记为 Active | 只卸上一份**已登记**的 Active；其它 Additive 留下 |
 | 加一块（副本、Chunk） | `LoadAsync(..., Additive)` | Additive | 不激活、不改 `ActiveId` | 留下 |
 | 整场替换 | `LoadAsync(..., Single)` | Single | 成功后才登记 | 先卸表里其它场 |
 | 回 Build Settings 内置场（如 Launch） | `LoadBuiltinAsync` | Single | 不登记 handle，`ActiveId` 为该场名 | 卸表里已登记场（引擎侧已被 Single 卸掉则只 Release） |
@@ -54,7 +54,7 @@ await GameScene.LoadBuiltinAsync("Launch");
 ```
 
 Launch 不进 YooAsset：`SceneManager.LoadSceneAsync(..., Single)`。成功后卸掉表里已登记的 handle，不登记内置场。
-`ActiveId` 是该场名，`IsLoaded` 为 false。
+`ActiveId` 是该场名，`IsLoaded` 为 false。不要对壳 `SwitchAsync` / `UnloadAsync`：`Switch` 会抛；从壳进内容场用 `LoadAsync(..., Single)`。
 
 进度：
 
@@ -77,6 +77,7 @@ float p = GameScene.Progress; // 与回调同一值；操作结束归 0
 | `Switch` / `LoadSingle` 激活失败 | 新场**不登记** | 未登记的 handle 会 `Unload` 丢掉 |
 | 已登记场 `Activate` 失败 | **不从字典摘** | 仍占着那一场 |
 | `Switch` 卸旧失败 | 新已是 Active，旧仍在表里 | 旧场还在 |
+| `Switch` 时 Active 未登记（内置壳） | 不加载、表和 Active 不动 | — |
 
 `LoadSingle` 会在激活前卸掉表里其它场（新地址可以还不在表里）。激活失败时旧场可能
 已经卸完，`ActiveId` 为 null，新场未登记。清掉错误后可以再 `Load` 同一地址。
@@ -92,7 +93,8 @@ float p = GameScene.Progress; // 与回调同一值；操作结束归 0
 - 空 / 空白地址抛 `ArgumentException`。
 - 进行中禁止再 `Switch` / `Load` / `LoadBuiltin` / `Preload` / `Activate` / `Unload`（`IsBusy`）。
 - 已加载（含预加载）的地址不能再 `Switch` / `Load` / `Preload`。预加载要用 `ActivateAsync`。
-- 未加载不能 `Activate` / `Unload`。
+- `ActiveId` 未登记（`LoadBuiltin` 之后）不能 `SwitchAsync`；从壳进内容场用 `LoadAsync(..., Single)`。
+- 未加载不能 `Activate` / `Unload`（内置壳未登记，不能 `UnloadAsync`）。
 - 比较地址用序数（区分大小写）。
 
 ---

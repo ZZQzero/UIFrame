@@ -13,6 +13,7 @@ All notable changes to this package will be documented in this file.
 
 ### Changed
 
+- `SwitchAsync` throws when `ActiveId` is set but not in the loaded table (builtin shell). Leave the shell with `LoadAsync(..., Single)`.
 - `GameScene` preload: `PreloadAsync` stays; handle 只有一次 `ActivateAsync`（预加载先放行再激活），不再拆 `ActivateScene` / `ActivatePreloadedAsync`。
 - `ActivateAsync` of a preloaded Single scene now activates first, then drops other handles from the table.
 - Fail-fast: `UI.Push` / 加载失败 / 未 Register / Camera Stack 失败会抛，不再返回 null。
