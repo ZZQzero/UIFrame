@@ -31,36 +31,21 @@ namespace Game.Scene
 
             try
             {
-                if (allowSceneActivation)
-                {
-                    while (!handle.IsDone)
-                    {
-                        report?.Invoke(handle.Progress);
-                        await UniTask.Yield();
-                    }
-
-                    report?.Invoke(handle.Progress);
-                    if (handle.Status != EOperationStatus.Succeeded)
-                    {
-                        throw new InvalidOperationException(handle.Error);
-                    }
-
-                    return new YooAssetSceneHandle(handle, mode, false);
-                }
-
-                while (!handle.IsDone && handle.Progress < SuspendReadyProgress)
+                while (!handle.IsDone && (allowSceneActivation || handle.Progress < SuspendReadyProgress))
                 {
                     report?.Invoke(handle.Progress);
                     await UniTask.Yield();
                 }
 
                 report?.Invoke(handle.Progress);
-                if (handle.Status == EOperationStatus.Failed)
+                if (allowSceneActivation
+                    ? handle.Status != EOperationStatus.Succeeded
+                    : handle.Status == EOperationStatus.Failed)
                 {
                     throw new InvalidOperationException(handle.Error);
                 }
 
-                return new YooAssetSceneHandle(handle, mode, true);
+                return new YooAssetSceneHandle(handle, mode, !allowSceneActivation);
             }
             catch
             {
@@ -88,12 +73,26 @@ namespace Game.Scene
 
             public bool IsPreloaded { get; private set; }
 
-            public void ActivateScene()
+            public async UniTask ActivateAsync()
             {
-                UnityEngine.SceneManagement.Scene scene = handle.SceneObject;
-                if (scene.IsValid() && scene.isLoaded && scene == SceneManager.GetActiveScene())
+                if (IsPreloaded)
                 {
-                    return;
+                    if (!handle.AllowSceneActivation())
+                    {
+                        throw new InvalidOperationException(handle.Error);
+                    }
+
+                    while (!handle.IsDone)
+                    {
+                        await UniTask.Yield();
+                    }
+
+                    if (handle.Status != EOperationStatus.Succeeded)
+                    {
+                        throw new InvalidOperationException(handle.Error);
+                    }
+
+                    IsPreloaded = false;
                 }
 
                 if (handle.ActivateScene())
@@ -101,46 +100,19 @@ namespace Game.Scene
                     return;
                 }
 
-                scene = handle.SceneObject;
+                UnityEngine.SceneManagement.Scene scene = handle.SceneObject;
                 if (scene.IsValid() && scene.isLoaded && scene == SceneManager.GetActiveScene())
                 {
                     return;
                 }
 
-                string error = handle.Error;
-                if (string.IsNullOrEmpty(error))
-                {
-                    error = scene.IsValid()
-                        ? $"无法激活场景: {scene.name}"
-                        : "无法激活场景。";
-                }
-
-                throw new InvalidOperationException(error);
-            }
-
-            public async UniTask ActivatePreloadedAsync()
-            {
-                if (!handle.AllowSceneActivation())
-                {
-                    throw new InvalidOperationException(handle.Error);
-                }
-
-                while (!handle.IsDone)
-                {
-                    await UniTask.Yield();
-                }
-
-                if (handle.Status != EOperationStatus.Succeeded)
-                {
-                    throw new InvalidOperationException(handle.Error);
-                }
-
-                IsPreloaded = false;
+                throw new InvalidOperationException(
+                    string.IsNullOrEmpty(handle.Error) ? "无法激活场景。" : handle.Error);
             }
 
             public async UniTask UnloadAsync()
             {
-                if (!YooAssets.IsInitialized || !handle.IsValid)
+                if (!handle.IsValid)
                 {
                     return;
                 }
@@ -152,29 +124,12 @@ namespace Game.Scene
                     return;
                 }
 
-                try
+                UnloadSceneOperation operation = handle.UnloadSceneAsync();
+                await operation;
+                if (operation.Status != EOperationStatus.Succeeded)
                 {
-                    UnloadSceneOperation operation = handle.UnloadSceneAsync();
-                    await operation;
-                    if (!YooAssets.IsInitialized)
-                    {
-                        return;
-                    }
-
-                    if (operation.Status != EOperationStatus.Succeeded)
-                    {
-                        handle.Release();
-                        throw new InvalidOperationException(operation.Error);
-                    }
-                }
-                catch (Exception)
-                {
-                    if (!YooAssets.IsInitialized)
-                    {
-                        return;
-                    }
-
-                    throw;
+                    handle.Release();
+                    throw new InvalidOperationException(operation.Error);
                 }
             }
         }

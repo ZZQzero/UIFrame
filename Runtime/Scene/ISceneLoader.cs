@@ -19,9 +19,7 @@ namespace Game.Scene
 
         bool IsPreloaded { get; }
 
-        void ActivateScene();
-
-        UniTask ActivatePreloadedAsync();
+        UniTask ActivateAsync();
 
         UniTask UnloadAsync();
     }

@@ -37,8 +37,9 @@ await GameScene.ShutdownAsync();
 | 切主场景 | `SwitchAsync` | Additive | 成功后才登记为 Active | 只卸上一份 Active；其它 Additive 留下 |
 | 加一块（副本、Chunk） | `LoadAsync(..., Additive)` | Additive | 不激活、不改 `ActiveId` | 留下 |
 | 整场替换 | `LoadAsync(..., Single)` | Single | 成功后才登记 | 先卸表里其它场 |
-| 预先加载、稍后亮 | `PreloadAsync` | 指定 mode，`allowSceneActivation = false` | 不激活 | — |
-| 亮已加载 / 预加载 | `ActivateAsync` | 必须已在表里 | 成功后才改 `ActiveId` | Single 会先卸其它 |
+| 回 Build Settings 内置场（如 Launch） | `LoadBuiltinAsync` | Single | 不登记 handle，`ActiveId` 为该场名 | 卸表里已登记场（引擎侧已被 Single 卸掉则只 Release） |
+| 预先加载、稍后亮 | `PreloadAsync` | `allowSceneActivation = false` | 不激活 | 留下 |
+| 亮已加载 / 预加载 | `ActivateAsync` | 必须已在表里 | handle 一次 Activate（预加载会先放行） | Single 激活后再从表里摘掉其它 |
 | 卸一块 | `UnloadAsync` | — | 若是 Active 则 `ActiveId = null` | — |
 
 ```csharp
@@ -47,8 +48,13 @@ await GameScene.LoadAsync("Chunk", LoadSceneMode.Additive);
 await GameScene.SwitchAsync("Battle");   // Chunk 还在，只卸 Home
 
 await GameScene.PreloadAsync("Boss", LoadSceneMode.Single);
-await GameScene.ActivateAsync("Boss");   // Single：卸掉其它后再激活
+await GameScene.ActivateAsync("Boss");   // Single：先亮，再从表里摘掉其它
+
+await GameScene.LoadBuiltinAsync("Launch");
 ```
+
+Launch 不进 YooAsset：`SceneManager.LoadSceneAsync(..., Single)`。成功后卸掉表里已登记的 handle，不登记内置场。
+`ActiveId` 是该场名，`IsLoaded` 为 false。
 
 进度：
 
@@ -84,7 +90,7 @@ float p = GameScene.Progress; // 与回调同一值；操作结束归 0
 ## 4. 约束
 
 - 空 / 空白地址抛 `ArgumentException`。
-- 进行中禁止再 `Switch` / `Load` / `Preload` / `Activate` / `Unload`（`IsBusy`）。
+- 进行中禁止再 `Switch` / `Load` / `LoadBuiltin` / `Preload` / `Activate` / `Unload`（`IsBusy`）。
 - 已加载（含预加载）的地址不能再 `Switch` / `Load` / `Preload`。预加载要用 `ActivateAsync`。
 - 未加载不能 `Activate` / `Unload`。
 - 比较地址用序数（区分大小写）。
@@ -103,4 +109,4 @@ UI.CloseGroup(UIGroup.Scene, destroy: true);
 | 切 / 加 / 卸 Unity 场景 | `GameScene` |
 | 关掉本场景组面板 | `UI.CloseGroup(UIGroup.Scene)` |
 | 场景 BGM | `GameAudio`，不要在 Scene 里播 |
-| 场景加载进度条 | `SwitchAsync` / `LoadAsync` 的进度回调 |
+| 场景加载进度条 | `SwitchAsync` / `LoadAsync` / `LoadBuiltinAsync` 的进度回调 |

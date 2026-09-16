@@ -111,7 +111,7 @@ namespace Game.Scene
         public static UniTask SwitchAsync(string location, Action<float> onProgress = null)
         {
             RequireIncoming(location);
-            return Watch(SwitchCoreAsync(location, onProgress));
+            return Run(onProgress, () => SwitchCoreAsync(location));
         }
 
         public static UniTask LoadAsync(
@@ -122,10 +122,16 @@ namespace Game.Scene
             RequireIncoming(location);
             if (mode == LoadSceneMode.Single)
             {
-                return Watch(LoadSingleCoreAsync(location, onProgress));
+                return Run(onProgress, () => LoadSingleCoreAsync(location));
             }
 
-            return Watch(LoadIncomingCoreAsync(location, LoadSceneMode.Additive, true, onProgress));
+            return Run(onProgress, () => AddLoadedAsync(location, mode, true));
+        }
+
+        public static UniTask LoadBuiltinAsync(string location, Action<float> onProgress = null)
+        {
+            RequireIdle(location);
+            return Run(onProgress, () => LoadBuiltinCoreAsync(location));
         }
 
         public static UniTask PreloadAsync(
@@ -134,149 +140,120 @@ namespace Game.Scene
             Action<float> onProgress = null)
         {
             RequireIncoming(location);
-            return Watch(LoadIncomingCoreAsync(location, mode, false, onProgress));
+            return Run(onProgress, () => AddLoadedAsync(location, mode, false));
         }
 
         public static UniTask ActivateAsync(string location)
         {
             ISceneHandle handle = RequirePresent(location);
-            return Watch(ActivateCoreAsync(location, handle));
+            return Run(null, () => ActivateCoreAsync(location, handle));
         }
 
         public static UniTask UnloadAsync(string location)
         {
             RequirePresent(location);
-            return Watch(UnloadCoreAsync(location));
+            return Run(null, () => UnloadLoadedAsync(location));
         }
 
-        static UniTask Watch(UniTask task)
+        static UniTask Run(Action<float> onProgress, Func<UniTask> work)
         {
-            inflight = task.Preserve();
+            busy = true;
+            progressCallback = onProgress;
+            inflight = ExecuteAsync(work).Preserve();
             return inflight;
         }
 
-        static async UniTask SwitchCoreAsync(string location, Action<float> onProgress)
+        static async UniTask ExecuteAsync(Func<UniTask> work)
         {
-            busy = true;
-            progressCallback = onProgress;
             try
             {
-                string previous = activeId;
-                ISceneHandle handle = await loader.LoadAsync(
-                    location,
-                    LoadSceneMode.Additive,
-                    true,
-                    RelayProgress);
-                try
-                {
-                    handle.ActivateScene();
-                    Loaded.Add(location, handle);
-                    activeId = location;
-                }
-                catch
-                {
-                    await AbandonUnregisteredAsync(handle);
-                    throw;
-                }
-
-                if (previous != null)
-                {
-                    await UnloadLoadedAsync(previous);
-                }
+                await work();
             }
             finally
             {
-                EndOperation();
+                progressCallback = null;
+                busy = false;
+                progress = 0f;
             }
         }
 
-        static async UniTask LoadIncomingCoreAsync(
+        static async UniTask SwitchCoreAsync(string location)
+        {
+            string previous = activeId;
+            ISceneHandle handle = await loader.LoadAsync(
+                location,
+                LoadSceneMode.Additive,
+                true,
+                RelayProgress);
+            await BindActiveAsync(location, handle);
+            if (previous != null)
+            {
+                await UnloadLoadedAsync(previous);
+            }
+        }
+
+        static async UniTask AddLoadedAsync(
             string location,
             LoadSceneMode mode,
-            bool allowSceneActivation,
-            Action<float> onProgress)
+            bool allowSceneActivation)
         {
-            busy = true;
-            progressCallback = onProgress;
-            try
-            {
-                ISceneHandle handle = await loader.LoadAsync(
-                    location,
-                    mode,
-                    allowSceneActivation,
-                    RelayProgress);
-                Loaded.Add(location, handle);
-            }
-            finally
-            {
-                EndOperation();
-            }
+            Loaded.Add(
+                location,
+                await loader.LoadAsync(location, mode, allowSceneActivation, RelayProgress));
         }
 
-        static async UniTask LoadSingleCoreAsync(string location, Action<float> onProgress)
+        static async UniTask LoadSingleCoreAsync(string location)
         {
-            busy = true;
-            progressCallback = onProgress;
-            try
+            ISceneHandle handle = await loader.LoadAsync(
+                location,
+                LoadSceneMode.Single,
+                true,
+                RelayProgress);
+            await DiscardOthersExceptAsync(location);
+            await BindActiveAsync(location, handle);
+        }
+
+        static async UniTask LoadBuiltinCoreAsync(string location)
+        {
+            AsyncOperation operation = SceneManager.LoadSceneAsync(location, LoadSceneMode.Single);
+            if (operation == null)
             {
-                ISceneHandle handle = await loader.LoadAsync(
-                    location,
-                    LoadSceneMode.Single,
-                    true,
-                    RelayProgress);
-                try
-                {
-                    await DiscardOthersExceptAsync(location);
-                    handle.ActivateScene();
-                    Loaded.Add(location, handle);
-                    activeId = location;
-                }
-                catch
-                {
-                    await AbandonUnregisteredAsync(handle);
-                    throw;
-                }
+                throw new InvalidOperationException($"无法加载内置场景: {location}");
             }
-            finally
+
+            while (!operation.isDone)
             {
-                EndOperation();
+                RelayProgress(operation.progress);
+                await UniTask.Yield();
             }
+
+            RelayProgress(operation.progress);
+            await DiscardOthersExceptAsync(null);
+            activeId = location;
         }
 
         static async UniTask ActivateCoreAsync(string location, ISceneHandle handle)
         {
-            busy = true;
-            try
+            await handle.ActivateAsync();
+            activeId = location;
+            if (handle.Mode == LoadSceneMode.Single)
             {
-                if (handle.IsPreloaded)
-                {
-                    await handle.ActivatePreloadedAsync();
-                }
-
-                if (handle.Mode == LoadSceneMode.Single)
-                {
-                    await DiscardOthersExceptAsync(location);
-                }
-
-                handle.ActivateScene();
-                activeId = location;
-            }
-            finally
-            {
-                EndOperation();
+                await DiscardOthersExceptAsync(location);
             }
         }
 
-        static async UniTask UnloadCoreAsync(string location)
+        static async UniTask BindActiveAsync(string location, ISceneHandle handle)
         {
-            busy = true;
             try
             {
-                await UnloadLoadedAsync(location);
+                await handle.ActivateAsync();
+                Loaded.Add(location, handle);
+                activeId = location;
             }
-            finally
+            catch
             {
-                EndOperation();
+                await AbandonUnregisteredAsync(handle);
+                throw;
             }
         }
 
@@ -285,7 +262,7 @@ namespace Game.Scene
             ISceneHandle handle = Loaded[location];
             await handle.UnloadAsync();
             Loaded.Remove(location);
-            if (string.Equals(activeId, location, StringComparison.Ordinal))
+            if (activeId == location)
             {
                 activeId = null;
             }
@@ -293,33 +270,19 @@ namespace Game.Scene
 
         static async UniTask DiscardOthersExceptAsync(string keep)
         {
-            int count = Loaded.Count;
-            if (count == 0)
-            {
-                return;
-            }
-
-            var remove = new string[count];
-            var handles = new ISceneHandle[count];
+            var remove = new string[Loaded.Count];
             int index = 0;
-            foreach (KeyValuePair<string, ISceneHandle> pair in Loaded)
+            foreach (string location in Loaded.Keys)
             {
-                if (!string.Equals(pair.Key, keep, StringComparison.Ordinal))
+                if (location != keep)
                 {
-                    remove[index] = pair.Key;
-                    handles[index] = pair.Value;
-                    index++;
+                    remove[index++] = location;
                 }
             }
 
             for (int i = 0; i < index; i++)
             {
-                await handles[i].UnloadAsync();
-                Loaded.Remove(remove[i]);
-                if (string.Equals(activeId, remove[i], StringComparison.Ordinal))
-                {
-                    activeId = null;
-                }
+                await UnloadLoadedAsync(remove[i]);
             }
         }
 
@@ -341,13 +304,6 @@ namespace Game.Scene
             progressCallback?.Invoke(value);
         }
 
-        static void EndOperation()
-        {
-            progressCallback = null;
-            busy = false;
-            progress = 0f;
-        }
-
         static void EnsureInited()
         {
             if (loader == null)
@@ -365,14 +321,18 @@ namespace Game.Scene
             }
         }
 
-        static void RequireIncoming(string location)
+        static void RequireIdle(string location)
         {
             RequireQuery(location);
             if (busy)
             {
                 throw new InvalidOperationException("场景操作进行中。");
             }
+        }
 
+        static void RequireIncoming(string location)
+        {
+            RequireIdle(location);
             if (Loaded.ContainsKey(location))
             {
                 throw new InvalidOperationException($"场景已加载: {location}");
@@ -381,12 +341,7 @@ namespace Game.Scene
 
         static ISceneHandle RequirePresent(string location)
         {
-            RequireQuery(location);
-            if (busy)
-            {
-                throw new InvalidOperationException("场景操作进行中。");
-            }
-
+            RequireIdle(location);
             if (!Loaded.TryGetValue(location, out ISceneHandle handle))
             {
                 throw new InvalidOperationException($"场景未加载: {location}");

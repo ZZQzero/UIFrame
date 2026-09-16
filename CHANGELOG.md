@@ -6,13 +6,15 @@ All notable changes to this package will be documented in this file.
 
 ### Added
 
-- Added `GamePool` static facade (`Init` / `Shutdown` / `Service`) as the optional default `GameObjectPoolService`. Named `GamePool` to avoid clashing with `UILoopScrollBase.Pool`. LoopScroll still takes an injected service via `SetPool`.
+- Added `GameScene.LoadBuiltinAsync` to reload a Build Settings scene with `SceneManager` (Single). After load, unloads registered handles (Release if Unity already tore the scene down); does not register a builtin handle.
 - Added `UI.Tips` for single-instance Tips-layer panels (no queue / no auto-close).
 - Added `UI.Guide` for Guide-layer panels outside the Window / Popup stacks.
 - Added `UIPanel.OpenCancellationToken`: cancelled when the current open ends (close or re-open), so cached panels cancel in-flight work without waiting for destroy.
 
 ### Changed
 
+- `GameScene` preload: `PreloadAsync` stays; handle 只有一次 `ActivateAsync`（预加载先放行再激活），不再拆 `ActivateScene` / `ActivatePreloadedAsync`。
+- `ActivateAsync` of a preloaded Single scene now activates first, then drops other handles from the table.
 - Fail-fast: `UI.Push` / 加载失败 / 未 Register / Camera Stack 失败会抛，不再返回 null。
 - Fail-fast: `Despawn` 还错对象会抛。外部 `Destroy` 打 Error 并从集合摘掉该实例，分桶仍可用，不可靠 Destroy 当还池。
 - `OnDespawned` 抛错时：同步 `Despawn` 立刻停、不还栈、异常给调用方；`DespawnDeferred` 打日志、该条不还、其余继续。Shutdown / Dispose 仍完成收尾。
