@@ -8,6 +8,11 @@ namespace UIFrame.Editor
     {
         static readonly HashSet<int> SyncedHosts = new HashSet<int>();
 
+        internal static void ClearSyncedHosts()
+        {
+            SyncedHosts.Clear();
+        }
+
         public static void Draw(MonoBehaviour host, bool showOpenScript)
         {
             var state = UIBindActions.GetOrCreateState(host);
@@ -64,7 +69,7 @@ namespace UIFrame.Editor
             if (state == null || state.Binds == null || state.Binds.Count == 0)
             {
                 EditorGUILayout.HelpBox(
-                    "在子节点组件上点「添加到…」或右键添加。已有引用可点「刷新绑定」。不会立刻编译。",
+                    "在子节点组件上点「添加到…」或右键添加。刷新绑定按 .Gen.cs 对齐已写入字段。",
                     MessageType.None);
                 return;
             }

@@ -1,3 +1,4 @@
+using System.Collections.Generic;
 using System.IO;
 using UnityEditor;
 using UnityEditor.SceneManagement;
@@ -18,6 +19,7 @@ namespace UIFrame.Editor
         [UnityEditor.Callbacks.DidReloadScripts]
         static void OnScriptsReloaded()
         {
+            UIBindInspectorGui.ClearSyncedHosts();
             EditorApplication.delayCall += ProcessJobs;
         }
 
@@ -61,10 +63,20 @@ namespace UIFrame.Editor
                         state.PendingAssign = false;
                         dirty = true;
                     }
-                    else if (queueAssignRetry && !_assignRetryQueued)
+                    else if (queueAssignRetry)
                     {
-                        _assignRetryQueued = true;
-                        EditorApplication.delayCall += RetryAssignOnce;
+                        if (!_assignRetryQueued)
+                        {
+                            _assignRetryQueued = true;
+                            EditorApplication.delayCall += RetryAssignOnce;
+                        }
+                    }
+                    else
+                    {
+                        state.PendingAssign = false;
+                        dirty = true;
+                        Debug.LogError(
+                            $"[UIFrame] 回填引用失败: {state.ClassName}。已取消等待，可修正节点后再次写入脚本。");
                     }
                 }
             }
@@ -128,11 +140,12 @@ namespace UIFrame.Editor
                 }
 
                 var attached = TryAddHostComponent(target, type);
-                PrefabUtility.SaveAsPrefabAsset(root, prefabPath);
                 if (!attached)
                 {
                     return false;
                 }
+
+                PrefabUtility.SaveAsPrefabAsset(root, prefabPath);
             }
             finally
             {
@@ -300,6 +313,8 @@ namespace UIFrame.Editor
             }
 
             var so = new SerializedObject(host);
+            var props = new List<SerializedProperty>();
+            var values = new List<UnityEngine.Object>();
             var missing = false;
             var unresolved = false;
             for (var i = 0; i < state.Binds.Count; i++)
@@ -312,7 +327,7 @@ namespace UIFrame.Editor
                     continue;
                 }
 
-                if (bind.HierarchyPath == null && bind.LocalFileId == 0 && string.IsNullOrEmpty(bind.TypeName))
+                if (bind.HierarchyPath == null && bind.LocalFileId == 0)
                 {
                     continue;
                 }
@@ -327,7 +342,8 @@ namespace UIFrame.Editor
 
                 if (bind.IsGameObject)
                 {
-                    prop.objectReferenceValue = node.gameObject;
+                    props.Add(prop);
+                    values.Add(node.gameObject);
                     continue;
                 }
 
@@ -339,7 +355,18 @@ namespace UIFrame.Editor
                     continue;
                 }
 
-                prop.objectReferenceValue = found;
+                props.Add(prop);
+                values.Add(found);
+            }
+
+            if (missing || unresolved)
+            {
+                return false;
+            }
+
+            for (var i = 0; i < props.Count; i++)
+            {
+                props[i].objectReferenceValue = values[i];
             }
 
             so.ApplyModifiedPropertiesWithoutUndo();
@@ -349,7 +376,7 @@ namespace UIFrame.Editor
                 PrefabUtility.RecordPrefabInstancePropertyModifications(host);
             }
 
-            return !missing && !unresolved;
+            return true;
         }
 
         static Component FindHost(GameObject root, UIPrefabBindState state)
@@ -370,7 +397,8 @@ namespace UIFrame.Editor
                 }
             }
 
-            return UICodeGenUtil.FindBindHostOn(target);
+            Debug.LogWarning($"[UIFrame] 找不到绑定宿主: {state.ClassName}");
+            return null;
         }
 
         static Component FindComponent(Transform node, string typeName)

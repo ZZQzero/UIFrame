@@ -6,13 +6,17 @@ All notable changes to this package will be documented in this file.
 
 ### Added
 
-- Added `GameScene.LoadBuiltinAsync` to reload a Build Settings scene with `SceneManager` (Single). After load, unloads registered handles (Release if Unity already tore the scene down); does not register a builtin handle.
+- `GameScene.LoadBuiltinAsync` 成功后卸表里已登记 handle（场已被 Unity 卸掉则只 Release），不登记内置场。
 - Added `UI.Tips` for single-instance Tips-layer panels (no queue / no auto-close).
 - Added `UI.Guide` for Guide-layer panels outside the Window / Popup stacks.
 - Added `UIPanel.OpenCancellationToken`: cancelled when the current open ends (close or re-open), so cached panels cancel in-flight work without waiting for destroy.
 
 ### Changed
 
+- UI 绑定回填只按 LocalFileId / 层级路径，找不到不猜节点；失败不半写入，重试仍失败则取消等待。
+- UI 回填宿主按类型名精确匹配，找不到不改去猜同节点上的其他脚本。
+- 空绑定列表默认不会覆盖仍有字段的 `.Gen.cs`；用 `×` 清空后再写入可以。
+- UI 绑定刷新按 `.Gen.cs` 对齐已写入字段；未「写入脚本」的添加会保留。引用空了仍显示未定位。
 - `SwitchAsync` throws when `ActiveId` is set but not in the loaded table (builtin shell). Leave the shell with `LoadAsync(..., Single)`.
 - `GameScene` preload: `PreloadAsync` stays; handle 只有一次 `ActivateAsync`（预加载先放行再激活），不再拆 `ActivateScene` / `ActivatePreloadedAsync`。
 - `ActivateAsync` of a preloaded Single scene now activates first, then drops other handles from the table.

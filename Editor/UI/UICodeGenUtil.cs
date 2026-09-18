@@ -492,22 +492,11 @@ namespace UIFrame.Editor
                 current = FindChild(current, parts[i], encoded);
                 if (current == null)
                 {
-                    break;
+                    return null;
                 }
             }
 
-            if (current != null)
-            {
-                return current;
-            }
-
-            var unityFind = root.Find(StripPathIndices(path));
-            if (unityFind != null)
-            {
-                return unityFind;
-            }
-
-            return FindDeepByName(root, LeafName(path));
+            return current;
         }
 
         public static Transform FindBindNode(Transform host, UIBindEntry bind)
@@ -526,26 +515,8 @@ namespace UIFrame.Editor
                 }
             }
 
-            if (bind.HierarchyPath != null)
-            {
-                var byPath = FindByPath(host, bind.HierarchyPath);
-                if (byPath != null)
-                {
-                    return byPath;
-                }
-            }
-
-            if (!bind.IsGameObject)
-            {
-                var byType = FindByComponentType(host, bind.TypeName, LeafName(bind.HierarchyPath));
-                if (byType != null)
-                {
-                    return byType;
-                }
-            }
-
             return bind.HierarchyPath != null
-                ? FindDeepByName(host, LeafName(bind.HierarchyPath))
+                ? FindByPath(host, bind.HierarchyPath)
                 : null;
         }
 
@@ -582,101 +553,6 @@ namespace UIFrame.Editor
             }
 
             return null;
-        }
-
-        static Transform FindByComponentType(Transform host, string typeName, string objectName)
-        {
-            var type = FindType(typeName);
-            if (type == null || !typeof(Component).IsAssignableFrom(type))
-            {
-                return null;
-            }
-
-            var comps = host.GetComponentsInChildren(type, true);
-            Transform fallback = null;
-            var fallbackCount = 0;
-            for (var i = 0; i < comps.Length; i++)
-            {
-                var c = comps[i] as Component;
-                if (c == null || c.transform == host)
-                {
-                    continue;
-                }
-
-                if (!string.IsNullOrEmpty(objectName) && c.gameObject.name == objectName)
-                {
-                    return c.transform;
-                }
-
-                fallback = c.transform;
-                fallbackCount++;
-            }
-
-            return fallbackCount == 1 ? fallback : null;
-        }
-
-        static Transform FindDeepByName(Transform host, string name)
-        {
-            if (host == null || string.IsNullOrEmpty(name))
-            {
-                return null;
-            }
-
-            var transforms = host.GetComponentsInChildren<Transform>(true);
-            Transform match = null;
-            var count = 0;
-            for (var i = 0; i < transforms.Length; i++)
-            {
-                var t = transforms[i];
-                if (t == null || t == host || t.name != name)
-                {
-                    continue;
-                }
-
-                match = t;
-                count++;
-            }
-
-            return count == 1 ? match : null;
-        }
-
-        static string LeafName(string path)
-        {
-            if (string.IsNullOrEmpty(path))
-            {
-                return path;
-            }
-
-            var encoded = path.StartsWith(EncodedPathPrefix, System.StringComparison.Ordinal);
-            var rawPath = encoded ? path.Substring(EncodedPathPrefix.Length) : path;
-            var slash = rawPath.LastIndexOf('/');
-            var leaf = slash >= 0 ? rawPath.Substring(slash + 1) : rawPath;
-            ParsePathSegment(leaf, encoded, out var name, out _);
-            return name;
-        }
-
-        static string StripPathIndices(string path)
-        {
-            if (string.IsNullOrEmpty(path))
-            {
-                return path;
-            }
-
-            var encoded = path.StartsWith(EncodedPathPrefix, System.StringComparison.Ordinal);
-            var rawPath = encoded ? path.Substring(EncodedPathPrefix.Length) : path;
-            if (rawPath.IndexOf('#') < 0 && (!encoded || rawPath.IndexOf('%') < 0))
-            {
-                return rawPath;
-            }
-
-            var parts = rawPath.Split('/');
-            for (var i = 0; i < parts.Length; i++)
-            {
-                ParsePathSegment(parts[i], encoded, out var name, out _);
-                parts[i] = name;
-            }
-
-            return string.Join("/", parts);
         }
 
         public static System.Type FindType(string typeName)

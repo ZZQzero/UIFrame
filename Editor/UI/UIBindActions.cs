@@ -91,6 +91,16 @@ namespace UIFrame.Editor
 
             if (!File.Exists(UIScriptWriter.ToFullPath(genPath)))
             {
+                if (state.Binds == null)
+                {
+                    state.Binds = new List<UIBindEntry>();
+                }
+                else
+                {
+                    state.Binds.Clear();
+                }
+
+                state.BindsClearedByUser = false;
                 UIScriptWriter.WriteGenScript(state);
             }
 
@@ -170,7 +180,7 @@ namespace UIFrame.Editor
                 return false;
             }
 
-            EnsureStateFromHost(state, host);
+            FillHostState(state, host);
 
             var path = UICodeGenUtil.HierarchyPath(host.transform, component.transform);
             if (path == null)
@@ -198,8 +208,9 @@ namespace UIFrame.Editor
                 HierarchyPath = path,
                 IsGameObject = isGameObject,
                 LocalFileId = UICodeGenUtil.GetLocalFileId(isGameObject ? (UnityEngine.Object)component.gameObject : component),
+                PendingWrite = true,
             });
-            state.BindsInitialized = true;
+            state.BindsClearedByUser = false;
             UIBindStore.instance.Persist();
             Debug.Log($"[UIFrame] 已记录绑定 {host.GetType().Name}.{field}（待写入脚本）");
             return true;
@@ -213,6 +224,11 @@ namespace UIFrame.Editor
             }
 
             state.Binds.RemoveAt(index);
+            if (state.Binds.Count == 0)
+            {
+                state.BindsClearedByUser = true;
+            }
+
             UIBindStore.instance.Persist();
         }
 
@@ -243,14 +259,24 @@ namespace UIFrame.Editor
                 return false;
             }
 
-            EnsureStateFromHost(state, host);
+            FillHostState(state, host);
             if (string.IsNullOrEmpty(state.GenPath))
             {
                 error = "找不到 .Gen.cs 路径。";
                 return false;
             }
 
+            var genFields = ParseGenFields(state.GenPath);
+            var bindCount = state.Binds == null ? 0 : state.Binds.Count;
+            if (bindCount == 0 && genFields.Count > 0 && !state.BindsClearedByUser)
+            {
+                error = "绑定列表为空，但 .Gen.cs 仍有字段。请先点「刷新绑定」。";
+                return false;
+            }
+
             UIScriptWriter.WriteGenScript(state);
+            MarkBindsWritten(state);
+            state.BindsClearedByUser = false;
             state.PendingAssign = true;
             UIBindStore.instance.Persist();
             AssetDatabase.ImportAsset(state.GenPath, ImportAssetOptions.ForceUpdate);
@@ -281,7 +307,7 @@ namespace UIFrame.Editor
                 return false;
             }
 
-            EnsureStateFromHost(state, host);
+            FillHostState(state, host);
             if (string.IsNullOrEmpty(state.GenPath)
                 || !File.Exists(UIScriptWriter.ToFullPath(state.GenPath)))
             {
@@ -289,57 +315,9 @@ namespace UIFrame.Editor
                 return false;
             }
 
-            if (state.Binds == null)
-            {
-                state.Binds = new List<UIBindEntry>();
-            }
-
-            var genFields = ParseGenFields(state.GenPath);
-            var so = new SerializedObject(host);
-            var added = 0;
-            var updated = 0;
-            foreach (var pair in genFields)
-            {
-                var prop = so.FindProperty(pair.Key);
-                if (prop == null
-                    || prop.propertyType != SerializedPropertyType.ObjectReference
-                    || prop.objectReferenceValue == null)
-                {
-                    continue;
-                }
-
-                var path = PathFromReference(host.transform, prop.objectReferenceValue);
-                if (path == null)
-                {
-                    continue;
-                }
-
-                var localId = UICodeGenUtil.GetLocalFileId(prop.objectReferenceValue);
-                var existing = FindBindByField(state, pair.Key);
-                if (existing == null)
-                {
-                    state.Binds.Add(new UIBindEntry
-                    {
-                        FieldName = pair.Key,
-                        TypeName = pair.Value,
-                        IsGameObject = pair.Value == "UnityEngine.GameObject",
-                        HierarchyPath = path,
-                        LocalFileId = localId,
-                    });
-                    added++;
-                    continue;
-                }
-
-                existing.TypeName = pair.Value;
-                existing.IsGameObject = pair.Value == "UnityEngine.GameObject";
-                existing.HierarchyPath = path;
-                existing.LocalFileId = localId;
-                updated++;
-            }
-
-            state.BindsInitialized = true;
+            ReconcileBinds(state, host, addFromGen: true);
             UIBindStore.instance.Persist();
-            Debug.Log($"[UIFrame] 已刷新绑定：新增 {added}，更新 {updated}。");
+            Debug.Log("[UIFrame] 已刷新绑定。");
             return true;
         }
 
@@ -377,9 +355,24 @@ namespace UIFrame.Editor
 
         public static void EnsureStateFromHost(UIPrefabBindState state, MonoBehaviour host)
         {
+            FillHostState(state, host);
+            if (state != null && host != null)
+            {
+                ReconcileBinds(state, host, addFromGen: false);
+                UIBindStore.instance.Persist();
+            }
+        }
+
+        static void FillHostState(UIPrefabBindState state, MonoBehaviour host)
+        {
             if (state == null || host == null)
             {
                 return;
+            }
+
+            if (state.Binds == null)
+            {
+                state.Binds = new List<UIBindEntry>();
             }
 
             var type = host.GetType();
@@ -409,8 +402,6 @@ namespace UIFrame.Editor
                 var dir = Path.GetDirectoryName(scriptPath)?.Replace('\\', '/') ?? "Assets";
                 state.GenPath = dir + "/" + type.Name + ".Gen.cs";
             }
-
-            SyncBindsFromHost(state, host);
         }
 
         public static void EnsureStateFromPanel(UIPrefabBindState state, UIPanel panel)
@@ -522,7 +513,7 @@ namespace UIFrame.Editor
             }
         }
 
-        static void SyncBindsFromHost(UIPrefabBindState state, MonoBehaviour host)
+        static void ReconcileBinds(UIPrefabBindState state, MonoBehaviour host, bool addFromGen)
         {
             if (state.Binds == null)
             {
@@ -530,13 +521,21 @@ namespace UIFrame.Editor
             }
 
             var genFields = ParseGenFields(state.GenPath);
-            var so = new SerializedObject(host);
-
-            if (!state.BindsInitialized)
+            for (var i = state.Binds.Count - 1; i >= 0; i--)
             {
-                foreach (var pair in genFields)
+                var bind = state.Binds[i];
+                if (!bind.PendingWrite && !genFields.ContainsKey(bind.FieldName))
                 {
-                    if (FindBindByField(state, pair.Key) != null)
+                    state.Binds.RemoveAt(i);
+                }
+            }
+
+            foreach (var pair in genFields)
+            {
+                var existing = FindBindByField(state, pair.Key);
+                if (existing == null)
+                {
+                    if (!addFromGen)
                     {
                         continue;
                     }
@@ -546,14 +545,16 @@ namespace UIFrame.Editor
                         FieldName = pair.Key,
                         TypeName = pair.Value,
                         IsGameObject = pair.Value == "UnityEngine.GameObject",
-                        HierarchyPath = null,
                     });
+                    state.BindsClearedByUser = false;
+                    continue;
                 }
 
-                state.BindsInitialized = true;
-                UIBindStore.instance.Persist();
+                existing.TypeName = pair.Value;
+                existing.IsGameObject = pair.Value == "UnityEngine.GameObject";
             }
 
+            var so = new SerializedObject(host);
             for (var i = 0; i < state.Binds.Count; i++)
             {
                 var bind = state.Binds[i];
@@ -576,6 +577,19 @@ namespace UIFrame.Editor
                 {
                     bind.LocalFileId = localId;
                 }
+            }
+        }
+
+        static void MarkBindsWritten(UIPrefabBindState state)
+        {
+            if (state.Binds == null)
+            {
+                return;
+            }
+
+            for (var i = 0; i < state.Binds.Count; i++)
+            {
+                state.Binds[i].PendingWrite = false;
             }
         }
 

@@ -13,6 +13,7 @@ namespace UIFrame.Editor
         public string HierarchyPath;
         public bool IsGameObject;
         public long LocalFileId;
+        public bool PendingWrite;
     }
 
     [Serializable]
@@ -28,7 +29,7 @@ namespace UIFrame.Editor
         public bool PendingAttach;
         public bool PendingAssign;
         public bool IsItem;
-        public bool BindsInitialized;
+        public bool BindsClearedByUser;
         public List<UIBindEntry> Binds = new List<UIBindEntry>();
     }
 
