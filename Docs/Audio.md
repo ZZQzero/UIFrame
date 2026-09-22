@@ -3,8 +3,8 @@
 进程内音频入口是 `GameAudio`。业务只通过它播放、停、调音量；不要直接创建
 `AudioSource`，也不要销毁 `[GameAudio]` 节点。
 
-YooAsset location 按文件名寻址。当前资源在 `Assets/Art/Audio`，配置在
-`Assets/UIFrame1/Runtime/Audio/Config/DefaultAudioRuntimeConfig.asset`。业务 ID 写在
+YooAsset location 按文件名寻址。项目配置在
+`Assets/Config/AudioConfig/AudioRuntimeConfig.asset`，Mixer 在同目录。业务 ID 写在
 `GameAudioIds`。
 
 ---
@@ -77,6 +77,7 @@ GamePool.Shutdown();
 |------|-----|--------|
 | 音效、UI 音 | `TryPlayAsync` | 返回 `AudioPlayResult`，看 `Rejection` |
 | BGM | `TryPlayBgmAsync` | 同上；BGM 不能走 `TryPlayAsync` |
+| 未配表的 YooAsset 地址 | `TryPlayLocationAsync` / `TryPlayBgmLocationAsync` | 同上；按需加载 |
 | 停某一声 | `TryStop` | 过期或无效句柄返回 false |
 | 停当前 BGM | `StopBgm` | 没有在播则返回 0 |
 | 停一整条总线 | `StopBus` | — |
@@ -104,6 +105,18 @@ if (!result.IsPlaying)
 // 需要中途停时才保留句柄
 GameAudio.TryStop(result.Handle, fadeOutSeconds: 0.1f);
 ```
+
+已有 YooAsset 地址但尚未登记到目录时，可以直接播放：
+
+```csharp
+await GameAudio.TryPlayLocationAsync("ui-click", AudioBus.Ui, cancellationToken);
+await GameAudio.TryPlayBgmLocationAsync("LudoBgMusic", cancellationToken: cancellationToken);
+```
+
+同一地址和总线若已有唯一的配置条目，会沿用该条目的音量、实例限制及加载模式；
+若未配置，则使用按需加载、同地址最多 4 实例（不超过总声道数）、满额替换最旧实例。
+未配置的 BGM 默认循环并使用两条专用声道。该入口仍由 GameAudio 持有 YooAsset 句柄，
+不需要调用方另行加载 AudioClip。同一地址和总线配置了多个 ID 时，必须用 AudioId。
 
 3D、音量、音高：
 
@@ -220,16 +233,16 @@ float bgm = GameAudio.GetBusVolume(AudioBus.Bgm);
 
 同一 `location` 不能配两种 `loadMode`。
 
-当前默认目录：
+当前项目的 Ludo 目录（场景级加载，场景卸载后释放）：
 
 | ID | 资源 | 总线 | 加载 |
 |----|------|------|------|
-| `bgm.ludo` | LudoBgMusic | Bgm | Resident |
-| `sfx.dice` | DiceSound | Sfx | OnDemand |
-| `sfx.dice.alt` | Dice1Sound | Sfx | OnDemand |
-| `sfx.eat` | EatDice | Sfx | OnDemand |
-| `sfx.move.1` | MoveDice1Sound | Sfx | OnDemand |
-| `sfx.move.2` | MoveDice2Sound | Sfx | OnDemand |
+| `bgm.ludo` | LudoBgMusic | Bgm | Scene |
+| `sfx.dice` | DiceSound | Sfx | Scene |
+| `sfx.dice.alt` | Dice1Sound | Sfx | Scene |
+| `sfx.eat` | EatDice | Sfx | Scene |
+| `sfx.move.1` | MoveDice1Sound | Sfx | Scene |
+| `sfx.move.2` | MoveDice2Sound | Sfx | Scene |
 
 ---
 

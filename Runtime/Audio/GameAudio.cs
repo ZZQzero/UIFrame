@@ -145,6 +145,38 @@ namespace Game.Audio
             return TryPlayInternalAsync(
                 nameof(TryPlayAsync),
                 id,
+                null,
+                options,
+                requiredBus: null,
+                fadeInSeconds: 0f,
+                fadeOutPreviousBgmSeconds: 0f,
+                cancellationToken);
+        }
+
+        public static UniTask<AudioPlayResult> TryPlayLocationAsync(
+            string location,
+            AudioBus bus = AudioBus.Sfx,
+            CancellationToken cancellationToken = default) =>
+            TryPlayLocationAsync(
+                location, bus, AudioPlayOptions.Default, cancellationToken);
+
+        public static UniTask<AudioPlayResult> TryPlayLocationAsync(
+            string location,
+            AudioBus bus,
+            AudioPlayOptions options,
+            CancellationToken cancellationToken = default)
+        {
+            if (bus == AudioBus.Bgm)
+            {
+                throw new ArgumentException(
+                    "BGM 地址必须通过 TryPlayBgmLocationAsync 播放。",
+                    nameof(bus));
+            }
+
+            return TryPlayInternalAsync(
+                nameof(TryPlayLocationAsync),
+                default,
+                ResolveLocationEntry(location, bus),
                 options,
                 requiredBus: null,
                 fadeInSeconds: 0f,
@@ -173,12 +205,38 @@ namespace Game.Audio
             return TryPlayInternalAsync(
                 nameof(TryPlayBgmAsync),
                 id,
+                null,
                 options,
                 AudioBus.Bgm,
                 crossFadeSeconds,
                 crossFadeSeconds,
                 cancellationToken);
         }
+
+        public static UniTask<AudioPlayResult> TryPlayBgmLocationAsync(
+            string location,
+            float crossFadeSeconds = 0.5f,
+            CancellationToken cancellationToken = default) =>
+            TryPlayBgmLocationAsync(
+                location,
+                AudioPlayOptions.Default,
+                crossFadeSeconds,
+                cancellationToken);
+
+        public static UniTask<AudioPlayResult> TryPlayBgmLocationAsync(
+            string location,
+            AudioPlayOptions options,
+            float crossFadeSeconds = 0.5f,
+            CancellationToken cancellationToken = default) =>
+            TryPlayInternalAsync(
+                nameof(TryPlayBgmLocationAsync),
+                default,
+                ResolveLocationEntry(location, AudioBus.Bgm),
+                options,
+                AudioBus.Bgm,
+                crossFadeSeconds,
+                crossFadeSeconds,
+                cancellationToken);
 
         public static bool TryStop(
             SoundHandle handle,
@@ -295,6 +353,7 @@ namespace Game.Audio
         private static async UniTask<AudioPlayResult> TryPlayInternalAsync(
             string api,
             AudioId id,
+            AudioEntry locationEntry,
             AudioPlayOptions options,
             AudioBus? requiredBus,
             float fadeInSeconds,
@@ -303,7 +362,7 @@ namespace Game.Audio
         {
             RequireMainThread(api);
             AudioRuntimeDriver currentDriver = RequireDriver(api);
-            if (!id.IsValid)
+            if (locationEntry == null && !id.IsValid)
             {
                 throw new ArgumentException(
                     "播放接口不接受未初始化的 AudioId。",
@@ -327,7 +386,8 @@ namespace Game.Audio
                     "淡入淡出时长必须是大于等于 0 的有限值。");
             }
 
-            if (!config.Catalog.TryGetValue(id, out AudioEntry entry))
+            AudioEntry entry = locationEntry;
+            if (entry == null && !config.Catalog.TryGetValue(id, out entry))
             {
                 throw new KeyNotFoundException(
                     $"AudioRuntimeConfig 未配置 AudioId：{id.Value}。");
@@ -338,14 +398,14 @@ namespace Game.Audio
                 if (entry.Bus != requiredBus.Value)
                 {
                     throw new ArgumentException(
-                        $"AudioId '{id.Value}' 属于 {entry.Bus}，不能通过 BGM 接口播放。",
+                        $"音频 '{entry.Id.Value}' 属于 {entry.Bus}，不能通过 BGM 接口播放。",
                         nameof(id));
                 }
             }
             else if (entry.Bus == AudioBus.Bgm)
             {
                 throw new ArgumentException(
-                    $"BGM '{id.Value}' 必须通过 TryPlayBgmAsync 播放。",
+                    $"BGM '{entry.Id.Value}' 必须通过 BGM 接口播放。",
                     nameof(id));
             }
 
@@ -425,6 +485,67 @@ namespace Game.Audio
                 linkedCancellation?.Dispose();
                 EndOperation();
             }
+        }
+
+        private static AudioEntry ResolveLocationEntry(
+            string location,
+            AudioBus bus)
+        {
+            RequireMainThread(nameof(ResolveLocationEntry));
+            ResolvedAudioConfig current = RequireConfig(
+                nameof(ResolveLocationEntry));
+            if (string.IsNullOrWhiteSpace(location))
+            {
+                throw new ArgumentException(
+                    "音频 YooAsset location 不能为空。", nameof(location));
+            }
+
+            if (!Enum.IsDefined(typeof(AudioBus), bus))
+            {
+                throw new ArgumentOutOfRangeException(nameof(bus));
+            }
+
+            AudioEntry match = null;
+            AudioLoadMode loadMode = AudioLoadMode.OnDemand;
+            foreach (AudioEntry candidate in current.Catalog.Values)
+            {
+                if (!string.Equals(candidate.Location, location, StringComparison.Ordinal))
+                {
+                    continue;
+                }
+
+                loadMode = candidate.LoadMode;
+                if (candidate.Bus != bus)
+                {
+                    continue;
+                }
+
+                if (match != null)
+                {
+                    throw new InvalidOperationException(
+                        $"location '{location}' 在 {bus} 总线配置了多个条目，请使用 AudioId。");
+                }
+
+                match = candidate;
+            }
+
+            if (match != null)
+            {
+                return match;
+            }
+
+            var entry = new AudioEntry(
+                $"location:{bus}:{location}",
+                location,
+                bus,
+                maxInstances: bus == AudioBus.Bgm
+                    ? AudioRuntimeLimits.BgmVoiceCount
+                    : Math.Min(4, current.MaxVoices),
+                overflowPolicy: AudioOverflowPolicy.StopOldest,
+                loop: bus == AudioBus.Bgm,
+                loadMode: loadMode);
+            entry.Validate();
+            return entry;
         }
 
         private static void BeginOperation()
