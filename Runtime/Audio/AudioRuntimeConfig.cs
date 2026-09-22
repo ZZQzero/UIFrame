@@ -185,7 +185,8 @@ namespace Game.Audio
         [SerializeField] private string uiVolumeParameter = "UiVolume";
         [SerializeField] private string voiceVolumeParameter = "VoiceVolume";
 
-        [Header("Catalog")]
+        [Header("AudioId Catalog / Location Overrides")]
+        [Tooltip("AudioId 播放必须注册；YooAsset 地址播放可不配置，只有需要自定义冷却、并发、加载模式等策略时才添加。")]
         [SerializeField] private List<AudioEntry> entries = new();
 
         internal ResolvedAudioConfig Resolve()
@@ -207,12 +208,6 @@ namespace Game.Audio
             {
                 throw new InvalidOperationException(
                     "AudioRuntimeConfig 必须显式配置 AudioMixer。");
-            }
-
-            if (entries.Count == 0)
-            {
-                throw new InvalidOperationException(
-                    "AudioRuntimeConfig.entries 不能为空。");
             }
 
             var catalog = new Dictionary<AudioId, AudioEntry>(entries.Count);
