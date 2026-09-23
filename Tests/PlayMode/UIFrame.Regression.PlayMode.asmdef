@@ -2,6 +2,7 @@
   "name": "UIFrame.Regression.PlayMode",
   "references": [
     "UIFrame.Runtime",
+    "Unity.TextMeshPro",
     "UniTask",
     "Unity.InputSystem",
     "YooAsset"

@@ -36,6 +36,47 @@ namespace Game.L10n
             RefreshLayouts();
         }
 
+        /// <summary>
+        /// 初始化后追加新表，保留当前语言。空 key 或重复 key 会拒绝整批数据。
+        /// 合并成功后刷新已注册文本与布局，不触发 LanguageChanged。
+        /// </summary>
+        public static void AddTable(Dictionary<string, LanguageTexts> rows)
+        {
+            EnsureInited();
+            if (rows == null)
+            {
+                throw new ArgumentNullException(nameof(rows));
+            }
+
+            if (rows.Count == 0)
+            {
+                return;
+            }
+
+            // 使用当前表的比较规则构建新快照；校验失败不修改当前表或调用方的字典。
+            var merged = new Dictionary<string, LanguageTexts>(table, table.Comparer);
+            foreach (var entry in rows)
+            {
+                if (string.IsNullOrEmpty(entry.Key))
+                {
+                    throw new ArgumentException("[L10n] 添加多语言表失败：Key 不能为空。", nameof(rows));
+                }
+
+                if (!merged.TryAdd(entry.Key, entry.Value))
+                {
+                    throw new ArgumentException(
+                        $"[L10n] 添加多语言表失败：重复 Key={entry.Key}，本批数据未合并。", nameof(rows));
+                }
+            }
+
+            table = merged;
+#if UNITY_EDITOR || DEVELOPMENT_BUILD
+            WarnedKeys.Clear();
+#endif
+            RefreshTexts();
+            RefreshLayouts();
+        }
+
         public static void Shutdown()
         {
             table = null;

@@ -181,6 +181,20 @@ public sealed class PlayerListPanel : UILoopScrollBase<UINone>
 
 Cell 由 `LoopScrollPoolSource` 同步 `TrySpawn` / `DespawnImmediate`。不要把 `UIPanel` 放进这个池。多 Prefab 列表实现 `GetCellLocation(int index)`，并 `PrepareCellsAsync` 传入所有 location。无 Sprite 的 Image 时，尺寸会回退到 RectTransform；有正数 LayoutElement 仍优先。
 
+## 多语言表追加
+
+```csharp
+LanguageManager.Init(baseTable);
+LanguageManager.AddTable(sceneTable);
+LanguageManager.AddTable(activityTable);
+```
+
+`AddTable(Dictionary<string, LanguageTexts> rows)` 需要先 Init。成功后保留已有 key，刷新已注册的 `LocalizedText` 与语言布局；当前语言和语言存档不变，不触发 `LanguageChanged`。自行通过 `Get` / `SetText` 显示的文本，由业务在 AddTable 返回后主动更新。
+
+空表不做修改；null、空 key 或重复 key 明确抛错。重复判断沿用初始表的 key 比较规则，也检查新增批次内部按该规则发生的冲突，即使翻译内容相同也不会跳过。整批校验通过才替换内部表，调用方传入的字典不会被修改；成功追加后内部使用合并快照，后续修改原字典不会同步到该快照。再次 Init 仍然是整体替换。
+
+文本或布局刷新本身抛错时，异常向调用方传播；此时数据已合并，不自动回滚已刷新的界面，也不能把重新 AddTable 同一批次当作刷新重试。
+
 ## 目录
 
 - `Docs`：USAGE / Scene / Timer / Audio / Input / Event / Fsm / RedDot / Pool
