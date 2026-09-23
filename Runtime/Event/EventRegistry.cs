@@ -14,6 +14,7 @@ namespace Game
 
         static IEventBucket[] buckets = new IEventBucket[16];
         static int bucketCount;
+        static int nextDrainIndex;
 
         internal static IEventBucket GetBucket(int typeId)
         {
@@ -72,10 +73,19 @@ namespace Game
             }
 
             Snapshot(out IEventBucket[] items, out int count);
+            if (count == 0)
+            {
+                return 0;
+            }
+
+            int start = nextDrainIndex % count;
             int remaining = maxCount;
             for (int i = 0; i < count && remaining > 0; i++)
             {
-                IEventBucket bucket = items[i];
+                int index = (start + i) % count;
+                // 回调抛错时也把下一次机会留给后续类型。
+                nextDrainIndex = (index + 1) % count;
+                IEventBucket bucket = items[index];
                 int perType = remaining < MaxDrainPerType ? remaining : MaxDrainPerType;
                 remaining -= bucket.DrainPosted(perType);
             }

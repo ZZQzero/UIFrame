@@ -16,6 +16,7 @@ namespace Game.Audio
         private VoiceSlot[] voices;
         private double nextCacheCollectionAt;
         private bool initialized;
+        private object session;
 
         internal void Initialize(
             ResolvedAudioConfig resolvedConfig,
@@ -32,6 +33,7 @@ namespace Game.Audio
             cache = clipCache ??
                 throw new ArgumentNullException(nameof(clipCache));
 
+            session = new object();
             voices = new VoiceSlot[
                 config.MaxVoices + AudioRuntimeLimits.BgmVoiceCount];
             for (int i = 0; i < voices.Length; i++)
@@ -126,7 +128,7 @@ namespace Game.Audio
             StartVoice(slot, entry, lease, in options, fadeInSeconds, now);
             lastStartedAt[entry.Id] = now;
             return AudioPlayResult.Played(
-                new SoundHandle(slot.Index, slot.Generation));
+                new SoundHandle(session, slot.Index, slot.Generation));
         }
 
         internal bool TryStop(SoundHandle handle, float fadeOutSeconds)
@@ -172,7 +174,7 @@ namespace Game.Audio
                 VoiceSlot slot = voices[i];
                 if (!slot.Active ||
                     slot.Entry.Bus != bus ||
-                    (slot.Index == excluded.Slot &&
+                    (ReferenceEquals(session, excluded.Session) && slot.Index == excluded.Slot &&
                      slot.Generation == excluded.Generation))
                 {
                     continue;
@@ -185,6 +187,10 @@ namespace Game.Audio
         internal int StopBus(AudioBus bus, float fadeOutSeconds)
         {
             RequireRunning();
+            if (bus < AudioBus.Bgm || bus > AudioBus.Voice)
+            {
+                throw new ArgumentOutOfRangeException(nameof(bus), bus, "不支持的音频总线。");
+            }
             ValidateFadeSeconds(fadeOutSeconds, nameof(fadeOutSeconds));
             int stopped = 0;
             for (int i = 0; i < voices.Length; i++)
@@ -515,7 +521,7 @@ namespace Game.Audio
             out VoiceSlot slot)
         {
             slot = null;
-            if (!handle.IsValid ||
+            if (!handle.IsValid || !ReferenceEquals(handle.Session, session) ||
                 handle.Slot >= voices.Length)
             {
                 return false;

@@ -38,7 +38,7 @@ namespace UIFrame
                 if (handle.Status != EOperationStatus.Succeeded)
                 {
                     throw new InvalidOperationException(
-                        $"[UIFrame] 加载失败: {location}, Status={handle.Status}");
+                        $"[UIFrame] 加载失败: Package={_package.PackageName}, Panel={panelType.FullName}, Location={location}, Status={handle.Status}, Error={handle.Error}");
                 }
 
                 if (req is { Cancelled: true })

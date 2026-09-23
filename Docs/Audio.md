@@ -266,7 +266,7 @@ Additive 场景请显式 `InScene`，不要依赖 Active Scene。
 
 ## 8. 句柄与查询
 
-`SoundHandle` 是声道代次。声音自然结束、被抢占或 `TryStop` 之后，旧句柄失效。
+`SoundHandle` 包含运行会话标识与声道代次，Shutdown→Init 后旧会话句柄不能操作新声音。声音自然结束、被抢占或 `TryStop` 之后，旧句柄失效。
 比较句柄用 `Equals` / `IsValid`，不要用 `==`。
 
 ```csharp

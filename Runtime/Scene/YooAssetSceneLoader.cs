@@ -112,6 +112,12 @@ namespace Game.Scene
 
             public async UniTask UnloadAsync()
             {
+                if (IsPreloaded)
+                {
+                    throw new InvalidOperationException(
+                        "不能卸载尚未激活的预加载场景；当前加载器不支持安全撤销。请显式 ActivateAsync 后再卸载。");
+                }
+
                 if (!handle.IsValid)
                 {
                     return;

@@ -4,6 +4,20 @@ All notable changes to this package will be documented in this file.
 
 ## [Unreleased]
 
+### Correctness and failure contracts
+
+- 普通面板销毁不再吞回调异常；关闭失败实例保留供排查，禁止缓存复用；CTS 和结果通道可靠终结，保留首异常。
+- 关闭成功后才移除导航栈，失败面板的显式销毁共用正常收尾；Back／分组关闭不跳过失败实例，Toast 失败不提前释放名额，回调内 Shutdown 不遗漏当前面板的销毁。
+- 销毁回调失败保留诊断状态，重复销毁不返回假成功；新增失败后连续操作、重入和首异常保留的 Unity 回归用例。
+- ClearCache 和 Toast 缓存清理首次失败时保留尚未处理对象；失败打开清理同步摘除缓存引用。
+- 修复 Timer 回调触发扩容后的节点引用失效、事件队列类型饥饿，以及 Input System 同帧禁用后的按键泄漏。
+- 事件回调在开发和正式构建均传播异常、中止本次派发；方向空 Pop 和非法语言／方向／总线显式报错。
+- Format 不再返回错误模板；显式矛盾字号、不支持的 Grid 和非法 Cell 有效尺寸会报错。
+- 未激活预加载场景拒绝卸载及后续加载，保留句柄；音频句柄隔离不同运行会话。
+- Editor 不自动删除 Missing Script；绑定宿主匹配命名空间，未定位字段导致整体回填失败。
+- Excel 生成器异步等待并读取 stdout/stderr，保留失败退出码；补充 Input System 与 Audio 内置模块依赖。
+- 添加失败契约回归测试。Timer、红点和延迟回收错误日志补充定位上下文。
+
 ### Added
 
 - `GameScene.LoadBuiltinAsync` 成功后卸表里已登记 handle（场已被 Unity 卸掉则只 Release），不登记内置场。

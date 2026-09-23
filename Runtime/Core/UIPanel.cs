@@ -1,4 +1,5 @@
 using System;
+using System.Runtime.ExceptionServices;
 using System.Threading;
 using UnityEngine;
 using YooAsset;
@@ -96,15 +97,7 @@ namespace UIFrame
 
         internal void DispatchClose()
         {
-            CancelOpenScope();
-            try
-            {
-                OnClose();
-            }
-            finally
-            {
-                CompleteOpen();
-            }
+            DispatchEnd(destroy: false);
         }
 
         internal void DispatchDestroy()
@@ -115,14 +108,39 @@ namespace UIFrame
             }
 
             DestroyDispatched = true;
-            CancelOpenScope();
+            DispatchEnd(destroy: true);
+        }
+
+        void DispatchEnd(bool destroy)
+        {
+            Exception failure = null;
             try
             {
-                OnDestroyPanel();
+                CancelOpenScope();
+                if (destroy)
+                    OnDestroyPanel();
+                else
+                    OnClose();
             }
-            finally
+            catch (Exception exception)
             {
+                failure = exception;
+            }
+
+            try
+            {
+                // 结果通道必须终结，即使取消回调或业务回调失败。
                 CompleteOpen();
+            }
+            catch (Exception exception) when (failure != null)
+            {
+                Debug.LogException(new InvalidOperationException(
+                    $"[UIFrame] {PanelType.FullName} 收尾失败；调用方仍收到首次异常。Location={Location}", exception));
+            }
+
+            if (failure != null)
+            {
+                ExceptionDispatchInfo.Capture(failure).Throw();
             }
         }
 
@@ -152,9 +170,16 @@ namespace UIFrame
                 return;
             }
 
-            _openCts.Cancel();
-            _openCts.Dispose();
+            var cts = _openCts;
             _openCts = null;
+            try
+            {
+                cts.Cancel();
+            }
+            finally
+            {
+                cts.Dispose();
+            }
         }
 
         /// <summary>关闭自己。默认隐藏进缓存，不 Destroy、不释放 Handle。</summary>

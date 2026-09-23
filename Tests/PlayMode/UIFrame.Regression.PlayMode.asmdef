@@ -1,0 +1,14 @@
+{
+  "name": "UIFrame.Regression.PlayMode",
+  "references": [
+    "UIFrame.Runtime",
+    "UniTask",
+    "Unity.InputSystem",
+    "YooAsset"
+  ],
+  "optionalUnityReferences": [
+    "TestAssemblies"
+  ],
+  "includePlatforms": [],
+  "autoReferenced": false
+}

@@ -8,6 +8,7 @@ namespace UIFrame
     {
         static readonly Stack<GameScreenOrientation> Stack = new Stack<GameScreenOrientation>();
         static bool _initialized;
+        static bool _applied;
 
         /// <summary>当前生效的方向。</summary>
         public static GameScreenOrientation Current { get; private set; } = GameScreenOrientation.Portrait;
@@ -44,6 +45,7 @@ namespace UIFrame
             SyncCanvasLayout = true;
             Current = GameScreenOrientation.Portrait;
             _initialized = false;
+            _applied = false;
         }
 
         public static void SetPortrait() => Set(GameScreenOrientation.Portrait);
@@ -53,6 +55,7 @@ namespace UIFrame
         /// <summary>直接设置为指定方向（不入栈）。</summary>
         public static void Set(GameScreenOrientation orientation)
         {
+            ValidateOrientation(orientation);
             if (MarkInitialized())
             {
                 ApplyInternal(orientation, force: true);
@@ -65,23 +68,28 @@ namespace UIFrame
         /// <summary>压入新方向。离开时调用 <see cref="Pop"/> 恢复。</summary>
         public static void Push(GameScreenOrientation orientation)
         {
+            ValidateOrientation(orientation);
             var initializedNow = MarkInitialized();
             Stack.Push(Current);
             ApplyInternal(orientation, force: initializedNow);
         }
 
-        /// <summary>弹出并恢复上一方向。栈空时回退到竖屏。</summary>
+        /// <summary>弹出并恢复上一方向。栈空时抛错；重置请调用 ResetTo。</summary>
         public static void Pop()
         {
+            if (Stack.Count == 0)
+            {
+                throw new InvalidOperationException("[ScreenOrientation] 方向栈为空，Push/Pop 必须成对调用。");
+            }
+
             var initializedNow = MarkInitialized();
-            var hasPrevious = Stack.Count > 0;
-            var next = hasPrevious ? Stack.Pop() : GameScreenOrientation.Portrait;
-            ApplyInternal(next, force: initializedNow || !hasPrevious);
+            ApplyInternal(Stack.Pop(), force: initializedNow);
         }
 
         /// <summary>清空方向栈并设为指定方向。</summary>
         public static void ResetTo(GameScreenOrientation orientation)
         {
+            ValidateOrientation(orientation);
             Stack.Clear();
             MarkInitialized();
             ApplyInternal(orientation, force: true);
@@ -96,6 +104,7 @@ namespace UIFrame
 
         public static bool IsLandscape(GameScreenOrientation orientation)
         {
+            ValidateOrientation(orientation);
             return orientation == GameScreenOrientation.Landscape
                    || orientation == GameScreenOrientation.AutoLandscape;
         }
@@ -139,13 +148,14 @@ namespace UIFrame
 
         static void ApplyInternal(GameScreenOrientation orientation, bool force)
         {
-            if (!force && Current == orientation)
+            if (!force && _applied && Current == orientation)
             {
                 return;
             }
 
             Current = orientation;
             ApplyToUnity(orientation);
+            _applied = true;
             if (SyncCanvasLayout)
             {
                 CanvasLayoutChanged?.Invoke(Current);
@@ -189,9 +199,18 @@ namespace UIFrame
                     break;
 
                 default:
-                    Screen.autorotateToPortrait = true;
-                    Screen.orientation = ScreenOrientation.Portrait;
-                    break;
+                    throw new ArgumentOutOfRangeException(nameof(orientation), orientation, "不支持的屏幕方向。");
+            }
+        }
+
+        static void ValidateOrientation(GameScreenOrientation orientation)
+        {
+            if (orientation != GameScreenOrientation.Portrait
+                && orientation != GameScreenOrientation.Landscape
+                && orientation != GameScreenOrientation.AutoPortrait
+                && orientation != GameScreenOrientation.AutoLandscape)
+            {
+                throw new ArgumentOutOfRangeException(nameof(orientation), orientation, "不支持的屏幕方向。");
             }
         }
     }

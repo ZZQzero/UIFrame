@@ -69,26 +69,29 @@ namespace Game.Audio
 
     public readonly struct SoundHandle : IEquatable<SoundHandle>
     {
+        private readonly object session;
         private readonly int slot;
         private readonly uint generation;
 
-        internal SoundHandle(int slot, uint generation)
+        internal SoundHandle(object session, int slot, uint generation)
         {
+            this.session = session;
             this.slot = slot;
             this.generation = generation;
         }
 
+        internal object Session => session;
         internal int Slot => slot;
         internal uint Generation => generation;
-        public bool IsValid => slot >= 0 && generation != 0;
+        public bool IsValid => session != null && slot >= 0 && generation != 0;
 
         public bool Equals(SoundHandle other) =>
-            slot == other.slot && generation == other.generation;
+            ReferenceEquals(session, other.session) && slot == other.slot && generation == other.generation;
 
         public override bool Equals(object obj) =>
             obj is SoundHandle other && Equals(other);
 
-        public override int GetHashCode() => HashCode.Combine(slot, generation);
+        public override int GetHashCode() => HashCode.Combine(session, slot, generation);
     }
 
     public readonly struct AudioPlayOptions

@@ -4,6 +4,8 @@ using UnityEditor;
 using UnityEditor.SceneManagement;
 using UnityEngine;
 
+[assembly: System.Runtime.CompilerServices.InternalsVisibleTo("UIFrame.Regression.Editor")]
+
 namespace UIFrame.Editor
 {
     [InitializeOnLoad]
@@ -266,7 +268,6 @@ namespace UIFrame.Editor
                 return false;
             }
 
-            GameObjectUtility.RemoveMonoBehavioursWithMissingScript(target);
             if (target.GetComponent(type) != null)
             {
                 return true;
@@ -324,11 +325,14 @@ namespace UIFrame.Editor
                 if (prop == null)
                 {
                     missing = true;
+                    Debug.LogError($"[UIFrame] 回填失败: Prefab={AssetDatabase.GUIDToAssetPath(state.PrefabGuid)}, Host={host.GetType().FullName}, Field={bind.FieldName}: 找不到序列化字段。", host);
                     continue;
                 }
 
                 if (bind.HierarchyPath == null && bind.LocalFileId == 0)
                 {
+                    unresolved = true;
+                    Debug.LogError($"[UIFrame] 回填失败: Prefab={AssetDatabase.GUIDToAssetPath(state.PrefabGuid)}, Host={host.GetType().FullName}, Field={bind.FieldName}: 缺少节点路径和 LocalFileId，请显式重新绑定。", host);
                     continue;
                 }
 
@@ -388,10 +392,13 @@ namespace UIFrame.Editor
                 return null;
             }
 
+            var fullName = string.IsNullOrEmpty(state.NamespaceName)
+                ? state.ClassName
+                : state.NamespaceName + "." + state.ClassName;
             var behaviours = target.GetComponents<MonoBehaviour>();
             for (var i = 0; i < behaviours.Length; i++)
             {
-                if (behaviours[i] != null && behaviours[i].GetType().Name == state.ClassName)
+                if (behaviours[i] != null && behaviours[i].GetType().FullName == fullName)
                 {
                     return behaviours[i];
                 }

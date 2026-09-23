@@ -212,3 +212,5 @@ Handle 同步扩容，因此快速滑动不会返回空；可见数量变化大�
 与首次实例化仍有成本，应通过预热分摊；不要为了提高命中率设置过大的
 `maxSize`。它只限制闲置缓存，不限制同时活跃实例；长期不用的 location 应主动
 `Trim` 或移除。
+
+选项对象的 CollectionCheck 保留调用方意图；托管池构造时才与全局 CollectionChecks 组合。因此复用 Default 或显式选项创建新池时会读取当时的全局开关，既有池不受后续开关变化影响。GameObjectPoolOptions.CollectionCheck 目前不控制 GameObject 所有权／状态检查，这些检查始终执行。

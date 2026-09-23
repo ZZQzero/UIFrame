@@ -92,6 +92,7 @@ float p = GameScene.Progress; // 与回调同一值；操作结束归 0
 
 - 空 / 空白地址抛 `ArgumentException`。
 - 进行中禁止再 `Switch` / `Load` / `LoadBuiltin` / `Preload` / `Activate` / `Unload`（`IsBusy`）。
+- 存在尚未激活的预加载场景时，拒绝新的 Load / Switch / LoadBuiltin / Preload 及所有 Unload。Unity 挂起加载可能阻塞异步队列；先显式 ActivateAsync，不自动激活再卸载，不释放唯一可激活句柄。
 - 已加载（含预加载）的地址不能再 `Switch` / `Load` / `Preload`。预加载要用 `ActivateAsync`。
 - `ActiveId` 未登记（`LoadBuiltin` 之后）不能 `SwitchAsync`；从壳进内容场用 `LoadAsync(..., Single)`。
 - 未加载不能 `Activate` / `Unload`（内置壳未登记，不能 `UnloadAsync`）。

@@ -128,20 +128,24 @@ namespace UnityEngine.UI
                 {
                     return m_ContentConstraintCount;
                 }
-                m_ContentConstraintCountInit = true;
                 m_ContentConstraintCount = 1;
                 if (m_Content != null)
                 {
                     GridLayoutGroup layout2 = m_Content.GetComponent<GridLayoutGroup>();
                     if (layout2 != null)
                     {
-                        if (layout2.constraint == GridLayoutGroup.Constraint.Flexible)
+                        var expected = direction == LoopScrollRectDirection.Vertical
+                            ? GridLayoutGroup.Constraint.FixedColumnCount
+                            : GridLayoutGroup.Constraint.FixedRowCount;
+                        if (layout2.constraint != expected || layout2.constraintCount <= 0)
                         {
-                            Debug.LogWarning("[LoopScrollRect] Flexible not supported yet");
+                            throw new System.InvalidOperationException(
+                                $"[LoopScrollRect] 无效 Grid: List={name}, Constraint={layout2.constraint}, Count={layout2.constraintCount}, Expected={expected}。");
                         }
                         m_ContentConstraintCount = layout2.constraintCount;
                     }
                 }
+                m_ContentConstraintCountInit = true;
                 return m_ContentConstraintCount;
             }
         }
@@ -1046,6 +1050,9 @@ namespace UnityEngine.UI
             if (!Application.isPlaying)
                 return;
 
+            m_ContentConstraintCountInit = false;
+            _ = contentConstraintCount;
+
             itemTypeEnd = reverseDirection ? endItem : totalCount - endItem;
             itemTypeStart = itemTypeEnd;
             itemTypeSize = 0;
@@ -1125,6 +1132,9 @@ namespace UnityEngine.UI
         {
             if (!Application.isPlaying)
                 return;
+
+            m_ContentConstraintCountInit = false;
+            _ = contentConstraintCount;
 
             itemTypeStart = reverseDirection ? totalCount - startItem : startItem;
             if (totalCount >= 0 && itemTypeStart % contentConstraintCount != 0)

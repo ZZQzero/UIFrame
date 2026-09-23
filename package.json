@@ -18,6 +18,8 @@
     "com.cysharp.unitask": "2.5.10",
     "com.tuyoogame.yooasset": "3.0.5",
     "com.unity.ugui": "2.0.0",
-    "com.unity.render-pipelines.universal": "17.3.0"
+    "com.unity.render-pipelines.universal": "17.3.0",
+    "com.unity.inputsystem": "1.19.0",
+    "com.unity.modules.audio": "1.0.0"
   }
 }

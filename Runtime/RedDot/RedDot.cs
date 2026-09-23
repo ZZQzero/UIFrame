@@ -133,7 +133,7 @@ namespace UIFrame
                     $"红点路径 \"{path}\" 已重复绑定同一回调。");
             }
 
-            InvokeSafely(callback, GetUnchecked(path));
+            InvokeSafely(path, callback, GetUnchecked(path));
         }
 
         /// <summary>
@@ -210,7 +210,7 @@ namespace UIFrame
                     }
 
                     DispatchEntries.Add(
-                        new DispatchEntry(GetUnchecked(path), bucket.Callbacks));
+                        new DispatchEntry(path, GetUnchecked(path), bucket.Callbacks));
                 }
 
                 for (int entryIndex = 0;
@@ -221,7 +221,7 @@ namespace UIFrame
                     Action<int>[] callbacks = entry.Callbacks;
                     for (int i = 0; i < callbacks.Length; i++)
                     {
-                        InvokeSafely(callbacks[i], entry.Value);
+                        InvokeSafely(entry.Path, callbacks[i], entry.Value);
                     }
                 }
             }
@@ -423,7 +423,7 @@ namespace UIFrame
             }
         }
 
-        private static void InvokeSafely(Action<int> callback, int value)
+        private static void InvokeSafely(string path, Action<int> callback, int value)
         {
             try
             {
@@ -431,7 +431,8 @@ namespace UIFrame
             }
             catch (Exception exception)
             {
-                UnityEngine.Debug.LogException(exception);
+                UnityEngine.Debug.LogException(new InvalidOperationException(
+                    $"[RedDot] 通知失败: Path={path}, Value={value}, Callback={callback.Method}。", exception));
             }
         }
 
@@ -534,11 +535,13 @@ namespace UIFrame
 
         private readonly struct DispatchEntry
         {
+            public readonly string Path;
             public readonly int Value;
             public readonly Action<int>[] Callbacks;
 
-            public DispatchEntry(int value, Action<int>[] callbacks)
+            public DispatchEntry(string path, int value, Action<int>[] callbacks)
             {
+                Path = path;
                 Value = value;
                 Callbacks = callbacks;
             }

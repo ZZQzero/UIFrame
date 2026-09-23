@@ -1090,7 +1090,8 @@ namespace Game.Timer
             long startTimestamp,
             long maxExecutionMicroseconds)
         {
-            ref TimerNode node = ref nodes[slot];
+            // 回调可以扩容 nodes；本次调度只读取不可变配置快照。
+            TimerNode node = nodes[slot];
             TimerHandle handle =
                 new TimerHandle(schedulerId, slot, node.Generation);
             int executed = 0;
@@ -1285,7 +1286,7 @@ namespace Game.Timer
             bool canPauseExecuting)
         {
             using ProfilerMarker.AutoScope _ = CallbackProfilerMarker.Auto();
-            ref TimerNode node = ref nodes[slot];
+            TimerNode node = nodes[slot];
             bool measureCallback = node.Clock != TimerClock.Simulation;
             long callbackStartTimestamp =
                 measureCallback ? Stopwatch.GetTimestamp() : 0;
@@ -1295,7 +1296,7 @@ namespace Game.Timer
                 scheduledTimeMs,
                 actualTimeMs,
                 coalescedFireCount);
-            node.CanPauseExecuting = canPauseExecuting;
+            nodes[slot].CanPauseExecuting = canPauseExecuting;
 
             try
             {
@@ -1303,16 +1304,19 @@ namespace Game.Timer
             }
             catch (Exception exception)
             {
-                UnityEngine.Debug.LogException(exception);
+                UnityEngine.Debug.LogException(new InvalidOperationException(
+                    $"[GameTimer] 回调失败: SchedulerId={schedulerId}, Slot={slot}, Generation={handle.Generation}, " +
+                    $"Clock={node.Clock}, OwnerSlot={node.OwnerSlot}, DueTimeMs={scheduledTimeMs}, " +
+                    $"Callback={node.Callback.Method}, Policy={node.ExceptionPolicy}。", exception));
                 if (node.ExceptionPolicy == TimerExceptionPolicy.CancelTimer)
                 {
-                    node.Status = TimerNodeStatus.Cancelled;
+                    nodes[slot].Status = TimerNodeStatus.Cancelled;
                     DetachOwner(slot);
                 }
             }
             finally
             {
-                node.CanPauseExecuting = false;
+                nodes[slot].CanPauseExecuting = false;
                 if (measureCallback)
                 {
                     long elapsed =

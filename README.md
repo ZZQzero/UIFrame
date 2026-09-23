@@ -9,6 +9,7 @@
 - YooAsset 3.0.5 或更高版本
 - UGUI 2.0.0 或更高版本
 - Universal RP 17.3.0 或更高版本
+- Input System 1.19.0 或更高版本，Unity Audio 内置模块（均已声明包依赖）
 
 ## 安装
 
@@ -77,7 +78,7 @@ UI.Shutdown();
 GamePool.Shutdown();
 ```
 
-Hud / Push / Popup / Tips / Guide 按面板 **Type** 去重。同一类型正在加载时再次 Open，不会发起第二次加载，而是合并进这次请求：后一次的 `Args` 和 `Mode` 覆盖前一次，并把已取消扳回未取消。两次 `await` 拿到同一块面板，参数以最后一次为准。已经打开的同类型会走已有实例（`ApplyArgs`），不会再加载。**Toast** 是多实例通道，不走这条合并规则。
+Hud / Push / Popup / Tips / Guide 按面板 **Type** 去重。同一类型正在加载时再次 Open，不会发起第二次加载，而是合并进这次请求：后一次的 `Args` 和 `Mode` 覆盖前一次；已取消请求保持取消，须等待旧请求结束后再重试。两次 `await` 拿到同一块面板，参数以最后一次为准。已经打开的同类型会走已有实例（`ApplyArgs`），不会再加载。**Toast** 是多实例通道，不走这条合并规则。
 
 主线程检查和托管池重复归还检查由 `UIFrameSafety` 控制。默认 Editor / Development 打开，Release 关闭。QA 要在正式包里抓线程错误时，在 `Init`、建池、调用红点之前设 `UIFrameSafety.ThreadChecks = true`。`CollectionChecks` 只作用于之后新建的托管池。
 
@@ -198,3 +199,21 @@ Cell 由 `LoopScrollPoolSource` 同步 `TrySpawn` / `DespawnImmediate`。不要�
 ## License
 
 [MIT](LICENSE)
+
+## 错误与生命周期契约
+
+- 普通 Close / Destroy / ClearCache 的业务回调失败会传播给调用方。失败后不自动重试，也不继续依赖成功关闭的 Resume 或队列推进。
+- OnClose 或打开生命周期取消失败时，面板不进入正常缓存，实例与首次异常仍由管理器保留；同类型重新 Open 会明确报错。定位原因后可显式 Destroy 释放，销毁不会重跑失败的 OnClose。
+- Window / Popup 只有关闭成功后才移出导航栈。关闭中或失败的实例会阻止相关 Back、遮罩点击及新的导航操作；独立 Hud 不受影响。显式 Destroy 成功后统一更新遮罩并恢复上一窗口。
+- CloseGroup 在处理成员前检查同组关闭中／失败状态，普通关闭不会遗漏失败成员；窗口按栈底到栈顶的顺序关闭，避免恢复本组内接下来还要关闭的窗口。显式销毁按同一关闭流程收尾。关闭中或失败的 Toast 继续占用展示名额，销毁成功后才释放。
+- 关闭／显式销毁中的 OnDestroyPanel 若失败，必要对象／句柄清理仍执行，但失败登记不会消失；重复 Destroy 不会伪装成成功或重跑销毁回调，应排查错误后 Shutdown。Shutdown 从关闭回调内触发时，当前关闭负责在回调退出后完成自身销毁，原异常仍向外传播。
+- ClearCache 首次失败即停止；尚未处理的对象仍在缓存中。最终 Shutdown 单独记录错误并收尾。
+- 取消回调失败仍会 Dispose 当前 CTS，并终结结果等待。必要收尾再失败时记录次级异常，调用方仍收到首异常及其堆栈。
+- 方向参数必须是已定义枚举；空栈 Pop 抛错，主动重置请使用 ResetTo。Initialize 后首次显式 Set 即使方向相同也会应用设备配置。
+- LanguageManager.Format 的格式错误会抛出带 key、语言、模板及参数数量的异常；非法语言值不会写入状态或 PlayerPrefs。缺翻译的既有内容降级策略保留，在 Editor / Development 中告警。
+- UIFrame 拥有自己的 EventSystem；Init 前发现现有 EventSystem（包括禁用对象）会拒绝初始化，不自动接管或删除。
+- UIFrameSafety 的 ThreadChecks 只覆盖显式接入该检查的模块，不会为 UI 或 GameScene 自动切线程；这些 API 仍要求主线程调用。
+
+## 回归测试
+
+包内 `Tests/PlayMode` 和 `Tests/Editor` 覆盖失败传播、缓存保留、结果终结、真实输入、预加载互斥、精确绑定和生成器错误输出。宿主 manifest 的 `testables` 加入 `com.zzq.uiframe` 后可用 Unity Test Runner 运行。测试不会自动修复配置或忽略失败断言。

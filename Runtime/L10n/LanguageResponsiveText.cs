@@ -36,6 +36,7 @@ namespace Game.L10n
 
         public void Set(GameLanguage language, LanguageAutoSize settings)
         {
+            ValidateSettings(settings);
             WriteSlot(language, settings);
             if (isActiveAndEnabled)
             {
@@ -86,6 +87,7 @@ namespace Game.L10n
             }
 
             var slot = ReadSlot(LanguageManager.Current);
+            ValidateSettings(slot);
             if (slot.autoSize)
             {
                 EnsureCaptured();
@@ -110,6 +112,7 @@ namespace Game.L10n
 
         LanguageAutoSize ReadSlot(GameLanguage language)
         {
+            LanguageManager.ValidateLanguage(language);
             switch (language)
             {
                 case GameLanguage.EnUS:
@@ -123,6 +126,7 @@ namespace Game.L10n
 
         void WriteSlot(GameLanguage language, LanguageAutoSize slot)
         {
+            LanguageManager.ValidateLanguage(language);
             switch (language)
             {
                 case GameLanguage.EnUS:
@@ -151,14 +155,29 @@ namespace Game.L10n
             captured = true;
         }
 
+        static void ValidateSettings(LanguageAutoSize slot)
+        {
+            if (!float.IsFinite(slot.min) || !float.IsFinite(slot.max) || !float.IsFinite(slot.fontSize)
+                || slot.min < 0f || slot.max < 0f || slot.fontSize < 0f
+                || (slot.autoSize && slot.min > 0f && slot.max > 0f && slot.min > slot.max))
+            {
+                throw new ArgumentException(
+                    $"[L10n] 无效字号配置: Min={slot.min}, Max={slot.max}, FontSize={slot.fontSize}。");
+            }
+        }
+
         void ApplyAutoSize(LanguageAutoSize slot)
         {
             float max = slot.max > 0f ? slot.max : DesignFontSizeMax();
             float min = slot.min > 0f ? slot.min : Mathf.Max(12f, max * 0.5f);
-            if (min > max)
+            if (slot.min > 0f && min > max)
             {
-                min = max;
+                throw new System.ArgumentException(
+                    $"[L10n] 字号下限大于上限: Object={name}, Language={LanguageManager.Current}, Min={min}, Max={max}。");
             }
+
+            // 未配置下限时，默认值不能超过显式的小字号上限。
+            min = Mathf.Min(min, max);
 
             if (text.fontSizeMax != max)
             {

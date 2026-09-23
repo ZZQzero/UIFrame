@@ -25,6 +25,11 @@ namespace UnityEngine.UI
                 size += LoopScrollSizeUtils.GetPreferredHeight(item);
             }
             size *= m_Content.localScale.y;
+            if (!float.IsFinite(size) || size <= 0f)
+            {
+                throw new System.InvalidOperationException(
+                    $"[LoopScrollRect] Cell 有效尺寸必须为正有限值: List={name}, Cell={item.name}, Index={item.GetSiblingIndex()}, Size={size}。");
+            }
             return size;
         }
 
@@ -51,7 +56,7 @@ namespace UnityEngine.UI
                 GridLayoutGroup layout = m_Content.GetComponent<GridLayoutGroup>();
                 if (layout != null && layout.constraint != GridLayoutGroup.Constraint.FixedColumnCount)
                 {
-                    Debug.LogError("[LoopScrollRect] unsupported GridLayoutGroup constraint");
+                    throw new System.InvalidOperationException($"[LoopScrollRect] 不支持的 GridLayoutGroup constraint: List={name}, Constraint={layout.constraint}。");
                 }
             }
         }

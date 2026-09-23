@@ -14,7 +14,7 @@ namespace Game.L10n
         static readonly List<LocalizedText> ActiveTexts = new();
         static readonly List<LanguageResponsiveText> ActiveLayouts = new();
         static readonly ConditionalWeakTable<TMP_Text, AlignmentState> savedAlignment = new();
-#if UNITY_EDITOR
+#if UNITY_EDITOR || DEVELOPMENT_BUILD
         static readonly HashSet<string> WarnedKeys = new();
 #endif
 
@@ -28,7 +28,7 @@ namespace Game.L10n
         {
             table = rows ?? throw new ArgumentNullException(nameof(rows));
             Current = ReadSavedLanguage();
-#if UNITY_EDITOR
+#if UNITY_EDITOR || DEVELOPMENT_BUILD
             WarnedKeys.Clear();
 #endif
             RefreshTexts();
@@ -44,14 +44,23 @@ namespace Game.L10n
             ActiveLayouts.Clear();
             LanguageChanged = null;
             savedAlignment.Clear();
-#if UNITY_EDITOR
+#if UNITY_EDITOR || DEVELOPMENT_BUILD
             WarnedKeys.Clear();
 #endif
+        }
+
+        internal static void ValidateLanguage(GameLanguage language)
+        {
+            if (language != GameLanguage.ZhCN && language != GameLanguage.EnUS && language != GameLanguage.ArSA)
+            {
+                throw new ArgumentOutOfRangeException(nameof(language), language, "不支持的语言。");
+            }
         }
 
         public static void SetLanguage(GameLanguage language)
         {
             EnsureInited();
+            ValidateLanguage(language);
             if (Current == language)
             {
                 return;
@@ -84,18 +93,20 @@ namespace Game.L10n
         public static string Format(string key, params object[] args)
         {
             var template = Get(key);
-            if (args == null || args.Length == 0)
+            if (args == null)
             {
-                return template;
+                throw new ArgumentNullException(nameof(args));
             }
 
             try
             {
                 return string.Format(template, args);
             }
-            catch (FormatException)
+            catch (FormatException exception)
             {
-                return template;
+                throw new FormatException(
+                    $"[L10n] 格式错误: Key={key}, Language={Current}, Template={template}, ArgumentCount={args.Length}。",
+                    exception);
             }
         }
 
@@ -343,7 +354,7 @@ namespace Game.L10n
 
         static void WarnMissing(string key, string reason)
         {
-#if UNITY_EDITOR
+#if UNITY_EDITOR || DEVELOPMENT_BUILD
             if (!WarnedKeys.Add(key + "/" + Current + "/" + reason))
             {
                 return;

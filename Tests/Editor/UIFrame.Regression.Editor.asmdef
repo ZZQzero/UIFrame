@@ -1,0 +1,16 @@
+{
+  "name": "UIFrame.Regression.Editor",
+  "references": [
+    "UIFrame.Runtime",
+    "UniTask",
+    "Unity.InputSystem",
+    "UIFrame.Editor"
+  ],
+  "optionalUnityReferences": [
+    "TestAssemblies"
+  ],
+  "includePlatforms": [
+    "Editor"
+  ],
+  "autoReferenced": false
+}

@@ -136,6 +136,7 @@ namespace Game.Scene
         public static UniTask LoadBuiltinAsync(string location, Action<float> onProgress = null)
         {
             RequireIdle(location);
+            RequireNoSuspendedScene();
             return Run(onProgress, () => LoadBuiltinCoreAsync(location));
         }
 
@@ -157,6 +158,7 @@ namespace Game.Scene
         public static UniTask UnloadAsync(string location)
         {
             RequirePresent(location);
+            RequireNoSuspendedScene();
             return Run(null, () => UnloadLoadedAsync(location));
         }
 
@@ -335,9 +337,22 @@ namespace Game.Scene
             }
         }
 
+        static void RequireNoSuspendedScene()
+        {
+            foreach (var entry in Loaded)
+            {
+                if (entry.Value.IsPreloaded)
+                {
+                    throw new InvalidOperationException(
+                        $"场景 {entry.Key} 尚未激活，会阻塞后续加载／卸载；请先显式 ActivateAsync。");
+                }
+            }
+        }
+
         static void RequireIncoming(string location)
         {
             RequireIdle(location);
+            RequireNoSuspendedScene();
             if (Loaded.ContainsKey(location))
             {
                 throw new InvalidOperationException($"场景已加载: {location}");

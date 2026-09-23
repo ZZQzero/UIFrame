@@ -41,10 +41,10 @@ namespace Game.Input
                 : look.ReadValue<Vector2>() * lookSensitivity;
 
         public bool JumpPressed =>
-            jump != null && jump.WasPressedThisFrame();
+            jump != null && jump.enabled && jump.WasPressedThisFrame();
 
         public bool AttackPressed =>
-            attack != null && attack.WasPressedThisFrame();
+            attack != null && attack.enabled && attack.WasPressedThisFrame();
 
         public bool SprintHeld =>
             sprint != null && sprint.IsPressed();
@@ -76,6 +76,6 @@ namespace Game.Input
             navigate == null ? default : navigate.ReadValue<Vector2>();
 
         public bool CancelPressed =>
-            cancel != null && cancel.WasPressedThisFrame();
+            cancel != null && cancel.enabled && cancel.WasPressedThisFrame();
     }
 }

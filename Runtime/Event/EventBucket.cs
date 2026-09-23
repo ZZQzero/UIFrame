@@ -303,22 +303,8 @@ namespace Game
 
         static void Invoke(Action<T> handler, T evt)
         {
-#if UNITY_EDITOR || DEVELOPMENT_BUILD
-            try
-            {
-                handler(evt);
-            }
-            catch (EventSystemException)
-            {
-                throw;
-            }
-            catch (Exception exception)
-            {
-                Debug.LogException(exception);
-            }
-#else
+            // 同步发布在所有构建中使用同一失败语义；finally 负责清理派发状态。
             handler(evt);
-#endif
         }
     }
 }

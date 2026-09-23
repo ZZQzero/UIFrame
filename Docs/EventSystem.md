@@ -86,10 +86,9 @@ EventSystem.Post(new BagChanged(itemId, count));
 - 回调里**禁止**再 `Publish` **同一类型**，会抛 `EventSystemException`。要再发就 `Post`。
 - 回调里 `Publish` **其它类型**可以（不同桶）。不要借此绕成深递归。
 - 回调里**禁止** `Clear<T>` / `ClearAll`，会抛 `EventSystemException`。
-- Editor / Development：普通 handler 异常会打日志并继续后面的监听；**`EventSystemException` 会中断本次派发**（用错就暴露）。
-- Release：不包 per-handler `try`。handler 必须自保；抛错会打断后续监听，但总线会复位内部状态。
+- Editor / Development / Release 使用相同语义：handler 异常原样传播并中断本次派发，总线在 finally 中复位内部状态。不要在业务调用方无条件吞掉异常；确需隔离的独立监听应显式制定自己的错误策略。
 - `ThreadChecks` 默认 Editor/Dev 开、Release 关。关掉后后台 `Publish` **不会报错，但是数据竞争**。正式包也必须主线程 `Publish`。
-- `Post` 每帧最多 Drain **1024** 条，单类型最多 **256**。超出的下一帧继续。前几种事件占满额度时，后面的类型会延后。
+- `Post` 每帧最多 Drain **1024** 条，单类型最多 **256**。超出的下一帧继续。每次从上次停止的下一类型开始轮转，避免前几种事件持续占满额度而饿死后续类型；某桶抛错后，下次也从其后一桶继续。
 - 正式游戏不要依赖 `DrainPosted`；那是测试或需要立刻刷完队列时用的。平时靠 Dispatcher 的 `LateUpdate`。
 
 ---

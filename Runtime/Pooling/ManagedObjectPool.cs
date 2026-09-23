@@ -37,7 +37,7 @@ namespace Game.Pooling
                 OnRent,
                 OnReturn,
                 OnDestroy,
-                value.CollectionCheck,
+                value.CollectionCheck && UIFrame.UIFrameSafety.CollectionChecks,
                 value.InitialCapacity,
                 value.MaxSize);
         }

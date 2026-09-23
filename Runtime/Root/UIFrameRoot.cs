@@ -37,6 +37,7 @@ namespace UIFrame
         Sprite _whiteSprite;
 
         Camera _uiCamera;
+        Camera _ownedCamera;
         Camera _baseCamera;
         int _uiLayer = -1;
         int _safeAreaBurst;
@@ -47,6 +48,13 @@ namespace UIFrame
 
         public static UIFrameRoot Create()
         {
+            var existing = FindObjectsByType<EventSystem>(FindObjectsInactive.Include, FindObjectsSortMode.None);
+            if (existing.Length != 0)
+            {
+                throw new InvalidOperationException(
+                    $"[UIFrame] 初始化失败：场景已有 EventSystem ({existing[0].name})。UIFrame 管理自己的 EventSystem，请显式解决所有权冲突。");
+            }
+
             var go = new GameObject("UIFrameRoot");
             DontDestroyOnLoad(go);
             var root = go.AddComponent<UIFrameRoot>();
@@ -270,6 +278,11 @@ namespace UIFrame
                 _uiCamera = CreateUICamera(uiLayer);
             }
 
+            if (_uiCamera == _ownedCamera)
+            {
+                _uiCamera.cullingMask = 1 << uiLayer;
+                _uiCamera.gameObject.layer = uiLayer;
+            }
             _uiLayer = uiLayer;
             SetLayerRecursively(_canvasRoot, uiLayer);
         }
@@ -289,6 +302,7 @@ namespace UIFrame
             data.renderType = CameraRenderType.Overlay;
             data.renderPostProcessing = false;
             data.renderShadows = false;
+            _ownedCamera = camera;
             return camera;
         }
 

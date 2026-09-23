@@ -14,7 +14,11 @@ namespace UnityEngine.UI
             {
                 result = item.rect.height;
             }
-            Debug.Assert(result > 0f);
+            if (!float.IsFinite(result) || result <= 0f)
+            {
+                throw new System.InvalidOperationException(
+                    $"[LoopScrollRect] Cell 布局尺寸必须为正有限值: Cell={item.name}, Size={result}。");
+            }
             return result;
         }
         
@@ -27,7 +31,11 @@ namespace UnityEngine.UI
             {
                 result = item.rect.width;
             }
-            Debug.Assert(result > 0f);
+            if (!float.IsFinite(result) || result <= 0f)
+            {
+                throw new System.InvalidOperationException(
+                    $"[LoopScrollRect] Cell 布局尺寸必须为正有限值: Cell={item.name}, Size={result}。");
+            }
             return result;
         }
     }

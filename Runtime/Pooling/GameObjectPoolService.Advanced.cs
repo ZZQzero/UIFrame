@@ -201,7 +201,9 @@ namespace Game.Pooling
                         }
                         catch (Exception exception)
                         {
-                            Debug.LogException(exception);
+                            Debug.LogException(new InvalidOperationException(
+                                $"[GamePool] 延迟回收失败: Location={marker.Location}, Instance={marker.name} ({marker.GetInstanceID()}), " +
+                                $"Group={bucket.Options.Group}, State={marker.State}。实例不会自动重试或归还闲置池。", exception), marker);
                         }
                     }
 
