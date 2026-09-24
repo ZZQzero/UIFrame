@@ -24,11 +24,21 @@ namespace UIFrame
         internal AssetHandle AssetHandle { get; set; }
         internal bool DestroyDispatched { get; private set; }
 
-        CancellationTokenSource _openCts;
+        UIFrameScope _openScope;
+        UIFrameScope _lifetimeScope;
 
         /// <summary>当前这次打开的生命周期令牌。关闭、重新打开或销毁时取消。</summary>
         protected CancellationToken OpenCancellationToken =>
-            _openCts?.Token ?? destroyCancellationToken;
+            _openScope?.Token ?? destroyCancellationToken;
+
+        /// <summary>当前打开周期的作用域，关闭或重新打开时释放。</summary>
+        protected UIFrameScope OpenScope =>
+            _openScope ?? throw new InvalidOperationException(
+                $"[UIFrame] {PanelType.FullName} 当前没有打开作用域。");
+
+        /// <summary>面板实例的作用域，销毁时释放。</summary>
+        protected UIFrameScope LifetimeScope =>
+            _lifetimeScope ??= new UIFrameScope(destroyCancellationToken);
 
         /// <summary>关闭后是否进缓存（隐藏、保留实例与 YooAsset Handle）。默认 true。</summary>
         internal bool CacheOnClose { get; set; } = true;
@@ -62,8 +72,7 @@ namespace UIFrame
         internal void DispatchOpen()
         {
             CancelOpenScope();
-            _openCts = CancellationTokenSource.CreateLinkedTokenSource(
-                destroyCancellationToken);
+            _openScope = new UIFrameScope(destroyCancellationToken);
             PrepareOpen();
             DispatchOpenCore();
         }
@@ -108,7 +117,22 @@ namespace UIFrame
             }
 
             DestroyDispatched = true;
-            DispatchEnd(destroy: true);
+            try
+            {
+                DispatchEnd(destroy: true);
+            }
+            finally
+            {
+                try
+                {
+                    _lifetimeScope?.Dispose();
+                }
+                catch (Exception exception)
+                {
+                    Debug.LogException(exception);
+                }
+                _lifetimeScope = null;
+            }
         }
 
         void DispatchEnd(bool destroy)
@@ -146,7 +170,24 @@ namespace UIFrame
 
         void OnDestroy()
         {
-            CancelOpenScope();
+            try
+            {
+                CancelOpenScope();
+            }
+            catch (Exception exception)
+            {
+                Debug.LogException(exception);
+            }
+
+            try
+            {
+                _lifetimeScope?.Dispose();
+            }
+            catch (Exception exception)
+            {
+                Debug.LogException(exception);
+            }
+            _lifetimeScope = null;
             if (!DestroyDispatched)
             {
                 Debug.LogError(
@@ -165,21 +206,14 @@ namespace UIFrame
 
         void CancelOpenScope()
         {
-            if (_openCts == null)
+            if (_openScope == null)
             {
                 return;
             }
 
-            var cts = _openCts;
-            _openCts = null;
-            try
-            {
-                cts.Cancel();
-            }
-            finally
-            {
-                cts.Dispose();
-            }
+            var scope = _openScope;
+            _openScope = null;
+            scope.Dispose();
         }
 
         /// <summary>关闭自己。默认隐藏进缓存，不 Destroy、不释放 Handle。</summary>

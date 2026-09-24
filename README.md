@@ -197,7 +197,7 @@ LanguageManager.AddTable(activityTable);
 
 ## 目录
 
-- `Docs`：USAGE / Scene / Timer / Audio / Input / Event / Fsm / RedDot / Pool
+- `Docs`：USAGE / Scene / Timer / Audio / Input / Event / Fsm / RedDot / Pool / Scope
 - `Runtime/Core`：面板 API、生命周期、栈与缓存、Tips / Toast / Guide、循环列表基类
 - `Runtime/Scene`：`GameScene` 场景加载与激活
 - `Runtime/Timer`：`GameTimer` 调度

@@ -20,6 +20,7 @@ All notable changes to this package will be documented in this file.
 
 ### Added
 
+- Added `UIPanel.OpenScope` and `UIPanel.LifetimeScope` for unified cleanup of cancellation tokens, event subscriptions, timers, and custom resources.
 - `LanguageManager.AddTable` 支持初始化后追加多语言表；保留已有内容与当前语言，重复／空 key 拒绝整批，成功后刷新已注册文本与布局。
 - `GameScene.LoadBuiltinAsync` 成功后卸表里已登记 handle（场已被 Unity 卸掉则只 Release），不登记内置场。
 - Added `UI.Tips` for single-instance Tips-layer panels (no queue / no auto-close).

@@ -126,6 +126,21 @@ async UniTask BindAsync(MyArgs args, CancellationToken ct)
 
 关闭、重新打开、销毁都会取消上一次 Open 作用域；Pause/Resume 不会取消。
 
+`OpenScope` 可统一登记本次打开的事件、计时器和资源，关闭时自动清理；`LifetimeScope` 在面板实例销毁时清理，适合 `OnCreate` 中的长期资源：
+
+```csharp
+protected override void OnOpen(UINone args)
+{
+    OpenScope.Subscribe<DataChanged>(_ => Refresh());
+    LoadAsync(OpenScope.Token).Forget();
+}
+
+protected override void OnCreate()
+{
+    LifetimeScope.Register(viewModel);
+}
+```
+
 ### 注意
 
 - **严禁** `Destroy(panel.gameObject)`。只能 `UI.Close` / `UI.Destroy` / `CloseSelf` / `CloseAndDestroySelf`。
