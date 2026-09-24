@@ -141,6 +141,17 @@ protected override void OnCreate()
 }
 ```
 
+图片加载组件挂在 `Image` 上，使用 `OpenScope.Token` 可在面板关闭时取消请求：
+
+```csharp
+protected override void OnOpen(ItemArgs args)
+{
+    Icon.LoadAsync(args.IconLocation, OpenScope).Forget();
+}
+```
+
+`UIImageLoader` 会在新请求开始时取消旧请求，只有当前请求仍对应这个组件时才写入 Sprite；失败使用 Error 图，成功或取消都会释放 YooAsset 句柄。
+
 ### 注意
 
 - **严禁** `Destroy(panel.gameObject)`。只能 `UI.Close` / `UI.Destroy` / `CloseSelf` / `CloseAndDestroySelf`。

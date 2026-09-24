@@ -198,14 +198,18 @@ LanguageManager.AddTable(activityTable);
 ## 目录
 
 - `Docs`：USAGE / Scene / Timer / Audio / Input / Event / Fsm / RedDot / Pool / Scope
-- `Runtime/Core`：面板 API、生命周期、栈与缓存、Tips / Toast / Guide、循环列表基类
+- `Runtime/Core`：面板 API、生命周期、栈与缓存、Tips / Toast / Guide
 - `Runtime/Scene`：`GameScene` 场景加载与激活
 - `Runtime/Timer`：`GameTimer` 调度
 - `Runtime/Audio`：`GameAudio`
+- `Runtime/Event`：事件总线
+- `Runtime/Fsm`：有限状态机
 - `Runtime/Input`：`GameInput`
+- `Runtime/L10n`：多语言与响应式文本
 - `Runtime/Pooling`：托管对象池与 GameObjectPoolService
-- `Runtime/LoopScroll`：循环列表组件
-- `Runtime/Load`：YooAsset 异步加载
+- `Runtime/LoopScroll`：循环列表组件、面板基类与对象池数据源
+- `Runtime/Load`：YooAsset 异步加载与图片加载组件
+- `Runtime/RedDot`：红点树与视图
 - `Runtime/Root`：运行时 Canvas 与 UI 层
 - `Runtime/Screen`：屏幕方向、Canvas 布局同步、SafeArea
 - `Editor`：面板脚本与绑定代码生成工具

@@ -15,6 +15,7 @@ namespace UIFrame
         readonly CancellationTokenSource _cts;
         List<Action> _cleanups;
         TimerOwner _timerOwner;
+        bool _hasEventSubscriptions;
         bool _disposed;
 
         internal UIFrameScope(CancellationToken linkedToken)
@@ -50,12 +51,12 @@ namespace UIFrame
         {
             ThrowIfDisposed();
             EventHandle handle = EventSystem.Subscribe(this, handler);
-            Register(() => EventSystem.Unsubscribe(handle));
+            _hasEventSubscriptions = true;
             return handle;
         }
 
         /// <summary>创建归属于作用域的计时器。</summary>
-        public TimerHandle Schedule(in TimerOptions options, TimerCallback callback)
+        public TimerHandle Schedule(in TimerOptions options, Game.Timer.TimerCallback callback)
         {
             ThrowIfDisposed();
             if (!_timerOwner.IsValid)
@@ -77,6 +78,19 @@ namespace UIFrame
             catch (Exception exception)
             {
                 first = ExceptionDispatchInfo.Capture(exception);
+            }
+
+            if (_hasEventSubscriptions)
+            {
+                try
+                {
+                    EventSystem.UnsubscribeAll(this);
+                }
+                catch (Exception exception)
+                {
+                    first ??= ExceptionDispatchInfo.Capture(exception);
+                }
+                _hasEventSubscriptions = false;
             }
 
             if (_cleanups != null)

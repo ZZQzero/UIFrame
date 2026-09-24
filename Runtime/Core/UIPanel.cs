@@ -26,10 +26,11 @@ namespace UIFrame
 
         UIFrameScope _openScope;
         UIFrameScope _lifetimeScope;
+        static readonly CancellationToken ClosedOpenToken = new CancellationToken(true);
 
         /// <summary>当前这次打开的生命周期令牌。关闭、重新打开或销毁时取消。</summary>
         protected CancellationToken OpenCancellationToken =>
-            _openScope?.Token ?? destroyCancellationToken;
+            _openScope?.Token ?? ClosedOpenToken;
 
         /// <summary>当前打开周期的作用域，关闭或重新打开时释放。</summary>
         protected UIFrameScope OpenScope =>
@@ -117,21 +118,33 @@ namespace UIFrame
             }
 
             DestroyDispatched = true;
+            Exception failure = null;
             try
             {
                 DispatchEnd(destroy: true);
             }
-            finally
+            catch (Exception exception)
             {
-                try
-                {
-                    _lifetimeScope?.Dispose();
-                }
-                catch (Exception exception)
-                {
-                    Debug.LogException(exception);
-                }
-                _lifetimeScope = null;
+                failure = exception;
+            }
+
+            try
+            {
+                _lifetimeScope?.Dispose();
+            }
+            catch (Exception exception) when (failure != null)
+            {
+                Debug.LogException(new InvalidOperationException(
+                    $"[UIFrame] {PanelType.FullName} LifetimeScope 收尾失败；调用方仍收到首次异常。Location={Location}", exception));
+            }
+            catch (Exception exception)
+            {
+                failure = exception;
+            }
+
+            if (failure != null)
+            {
+                ExceptionDispatchInfo.Capture(failure).Throw();
             }
         }
 
@@ -187,7 +200,6 @@ namespace UIFrame
             {
                 Debug.LogException(exception);
             }
-            _lifetimeScope = null;
             if (!DestroyDispatched)
             {
                 Debug.LogError(

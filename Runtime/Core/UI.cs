@@ -1,5 +1,6 @@
 using System;
 using Cysharp.Threading.Tasks;
+using System.Threading;
 using UnityEngine;
 using YooAsset;
 
@@ -66,6 +67,15 @@ namespace UIFrame
         {
             RequireInit();
             _manager.SetPackage(packageName);
+        }
+
+        internal static UniTask<AssetHandle> LoadAsset<T>(
+            string location,
+            CancellationToken cancellationToken)
+            where T : UnityEngine.Object
+        {
+            RequireInit();
+            return _manager.LoadAsset<T>(location, cancellationToken);
         }
 
         /// <summary>将 UI Camera 加入 Base Camera Stack。默认 Base=Camera.main，复用已有 UI Camera。</summary>

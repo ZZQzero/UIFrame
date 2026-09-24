@@ -1,5 +1,6 @@
 using System;
 using System.Collections;
+using System.Threading;
 using NUnit.Framework;
 using UnityEngine;
 using UnityEngine.TestTools;
@@ -15,6 +16,8 @@ namespace UIFrame.Regression
     {
         public int EventCount;
         public int CleanupCount;
+
+        public CancellationToken OpenToken => OpenCancellationToken;
 
         public void SubscribeToScope()
         {
@@ -66,6 +69,18 @@ namespace UIFrame.Regression
             _panel.DispatchClose();
             EventSystem.Publish(new ScopeEvent());
             Assert.That(_panel.EventCount, Is.EqualTo(1));
+        }
+
+        [Test]
+        public void OpenTokenIsCancelledAfterClose()
+        {
+            CancellationToken token = _panel.OpenToken;
+            Assert.That(token.IsCancellationRequested, Is.False);
+
+            _panel.DispatchClose();
+
+            Assert.That(token.IsCancellationRequested, Is.True);
+            Assert.That(_panel.OpenToken.IsCancellationRequested, Is.True);
         }
 
         [UnityTest]

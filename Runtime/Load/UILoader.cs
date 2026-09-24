@@ -1,5 +1,6 @@
 using System;
 using Cysharp.Threading.Tasks;
+using System.Threading;
 using UnityEngine;
 using YooAsset;
 
@@ -94,6 +95,41 @@ namespace UIFrame
             }
 
             handle.Release();
+        }
+
+        public async UniTask<AssetHandle> LoadAsset<T>(
+            string location,
+            CancellationToken cancellationToken)
+            where T : UnityEngine.Object
+        {
+            if (_package == null)
+            {
+                throw new InvalidOperationException(
+                    $"[UIFrame] ResourcePackage 为空，无法加载 {location}。请先 UI.SetPackage。");
+            }
+
+            if (string.IsNullOrWhiteSpace(location))
+                throw new ArgumentException("[UIFrame] 资源地址为空。", nameof(location));
+
+            cancellationToken.ThrowIfCancellationRequested();
+            AssetHandle handle = _package.LoadAssetAsync<T>(location);
+            try
+            {
+                await handle;
+                cancellationToken.ThrowIfCancellationRequested();
+                if (handle.Status != EOperationStatus.Succeeded)
+                {
+                    throw new InvalidOperationException(
+                        $"[UIFrame] 图片加载失败: Package={_package.PackageName}, Location={location}, Status={handle.Status}, Error={handle.Error}");
+                }
+
+                return handle;
+            }
+            catch
+            {
+                Release(handle);
+                throw;
+            }
         }
     }
 }

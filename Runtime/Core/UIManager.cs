@@ -164,6 +164,16 @@ namespace UIFrame
             SetPackage(package);
         }
 
+        internal UniTask<AssetHandle> LoadAsset<T>(
+            string location,
+            CancellationToken cancellationToken)
+            where T : UnityEngine.Object
+        {
+            if (!_inited || _loader == null)
+                throw new InvalidOperationException("[UIFrame] UI 尚未 Init。");
+            return _loader.LoadAsset<T>(location, cancellationToken);
+        }
+
         public Camera ConfigureURPCameraStack(Camera baseCamera, Camera uiCamera, int uiLayer)
         {
             return _root.ConfigureURPCameraStack(baseCamera, uiCamera, uiLayer);

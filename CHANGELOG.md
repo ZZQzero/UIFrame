@@ -20,6 +20,8 @@ All notable changes to this package will be documented in this file.
 
 ### Added
 
+- Added `UIImageLoader` for cancellable YooAsset Sprite loading with placeholder/error sprites and stale-request protection.
+- `UIImageLoader.LoadAsync` now accepts `UIFrameScope` and registers image cleanup with the scope.
 - Added `UIPanel.OpenScope` and `UIPanel.LifetimeScope` for unified cleanup of cancellation tokens, event subscriptions, timers, and custom resources.
 - `LanguageManager.AddTable` 支持初始化后追加多语言表；保留已有内容与当前语言，重复／空 key 拒绝整批，成功后刷新已注册文本与布局。
 - `GameScene.LoadBuiltinAsync` 成功后卸表里已登记 handle（场已被 Unity 卸掉则只 Release），不登记内置场。
@@ -29,6 +31,8 @@ All notable changes to this package will be documented in this file.
 
 ### Changed
 
+- `UIFrameScope` now removes event subscriptions by owner, and closed panels expose an already-cancelled `OpenCancellationToken`.
+- Moved loop-scroll panel bases and their pool source into `Runtime/LoopScroll` to keep runtime systems grouped by responsibility.
 - UI 绑定回填只按 LocalFileId / 层级路径，找不到不猜节点；失败不半写入，重试仍失败则取消等待。
 - UI 回填宿主按类型名精确匹配，找不到不改去猜同节点上的其他脚本。
 - 空绑定列表默认不会覆盖仍有字段的 `.Gen.cs`；用 `×` 清空后再写入可以。
