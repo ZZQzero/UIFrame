@@ -33,6 +33,7 @@ namespace UIFrame
 
         public bool IsInited => _inited;
         public Camera UICamera => _root != null ? _root.UICamera : null;
+        public RectTransform CanvasRoot => _root != null ? _root.CanvasRoot : null;
 
         public void Init()
         {
@@ -434,6 +435,8 @@ namespace UIFrame
             AddVisibleToast(panel);
             panel.DispatchOpen();
             EnsureOpenCanContinue();
+            UI.RaisePanelShown(panel);
+            EnsureOpenCanContinue();
             if (!IsVisibleToast(panel) || TipsChannel.IsSticky(duration))
             {
                 return;
@@ -522,6 +525,8 @@ namespace UIFrame
             panel.transform.SetAsLastSibling();
             panel.gameObject.SetActive(true);
             panel.DispatchOpen();
+            EnsureOpenCanContinue();
+            UI.RaisePanelShown(panel);
             EnsureOpenCanContinue();
             RefreshMask();
         }

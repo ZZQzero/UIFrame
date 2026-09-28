@@ -17,7 +17,7 @@ namespace Game.Scene
         static readonly Action<float> RelayProgress = OnProgress;
 
         static ISceneLoader loader;
-        static UniTask inflight = UniTask.CompletedTask;
+        static AsyncLazy inflight;
         static bool busy;
         static string activeId;
         static float progress;
@@ -79,7 +79,7 @@ namespace Game.Scene
             {
                 try
                 {
-                    await inflight;
+                    await inflight.Task;
                 }
                 catch
                 {
@@ -93,7 +93,7 @@ namespace Game.Scene
             busy = false;
             progress = 0f;
             progressCallback = null;
-            inflight = UniTask.CompletedTask;
+            inflight = null;
         }
 
         public static bool IsLoaded(string location)
@@ -140,6 +140,37 @@ namespace Game.Scene
             return Run(onProgress, () => LoadBuiltinCoreAsync(location));
         }
 
+        public static UniTask ReloadAsync(Action<float> onProgress = null)
+        {
+            EnsureInited();
+            if (busy)
+            {
+                throw new InvalidOperationException("场景操作进行中。");
+            }
+
+            RequireNoSuspendedScene();
+            string location = ResolveReloadLocation();
+            return Run(onProgress, () => ReloadCoreAsync(location));
+        }
+
+        public static async UniTask WaitForIdleAsync()
+        {
+            EnsureInited();
+            if (!busy)
+            {
+                return;
+            }
+
+            try
+            {
+                await inflight.Task;
+            }
+            catch
+            {
+                // ignored：只保证槽位空闲，失败由原等待方处理
+            }
+        }
+
         public static UniTask PreloadAsync(
             string location,
             LoadSceneMode mode,
@@ -166,8 +197,9 @@ namespace Game.Scene
         {
             busy = true;
             progressCallback = onProgress;
-            inflight = ExecuteAsync(work).Preserve();
-            return inflight;
+            // 原调用方、退出等待与 Shutdown 可以同时等待同一次操作。
+            inflight = UniTask.Lazy(() => ExecuteAsync(work));
+            return inflight.Task;
         }
 
         static async UniTask ExecuteAsync(Func<UniTask> work)
@@ -187,6 +219,7 @@ namespace Game.Scene
         static async UniTask SwitchCoreAsync(string location)
         {
             string previous = activeId;
+
             ISceneHandle handle = await loader.LoadAsync(
                 location,
                 LoadSceneMode.Additive,
@@ -237,6 +270,39 @@ namespace Game.Scene
             RelayProgress(operation.progress);
             await DiscardOthersExceptAsync(null);
             activeId = location;
+        }
+
+        static async UniTask ReloadCoreAsync(string location)
+        {
+            if (Loaded.ContainsKey(location))
+            {
+                ISceneHandle handle = await loader.LoadAsync(
+                    location,
+                    LoadSceneMode.Single,
+                    true,
+                    RelayProgress);
+                await DiscardOthersExceptAsync(null);
+                await BindActiveAsync(location, handle);
+                return;
+            }
+
+            await LoadBuiltinCoreAsync(location);
+        }
+
+        static string ResolveReloadLocation()
+        {
+            if (!string.IsNullOrWhiteSpace(activeId))
+            {
+                return activeId;
+            }
+
+            UnityEngine.SceneManagement.Scene scene = SceneManager.GetActiveScene();
+            if (!scene.IsValid() || !scene.isLoaded || string.IsNullOrWhiteSpace(scene.name))
+            {
+                throw new InvalidOperationException("没有可重载的活动场景。");
+            }
+
+            return scene.name;
         }
 
         static async UniTask ActivateCoreAsync(string location, ISceneHandle handle)

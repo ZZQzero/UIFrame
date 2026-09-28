@@ -4,6 +4,12 @@ All notable changes to this package will be documented in this file.
 
 ## [Unreleased]
 
+### Framework extensions
+
+- 新增 UI.CanvasRoot、RootReady、PanelShown；明确根节点所有权、事件触发时机、异常传播和退订契约。RootReady 失败可靠清理，回调中 Shutdown 取消 Init；PanelShown 回调中 Shutdown 取消打开。
+- 新增 GameScene.ReloadAsync / WaitForIdleAsync，场景进行中任务改为 AsyncLazy，支持加载方、多个等待方和 Shutdown 并发等待；保留预加载互斥与 SwitchAsync 的严格登记检查。
+- 增加 UI 扩展与场景操作回归测试，以及 Windows 生成器退出码与双输出流测试；修正图片成功加载后的句柄持有说明。
+
 ### Correctness and failure contracts
 
 - 普通面板销毁不再吞回调异常；关闭失败实例保留供排查，禁止缓存复用；CTS 和结果通道可靠终结，保留首异常。

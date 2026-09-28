@@ -91,12 +91,16 @@ namespace UIFrame.Regression
 
         [Test] public async Task GeneratorReportsExitCodeAndBothOutputStreams()
         {
-#if UNITY_EDITOR_OSX || UNITY_EDITOR_LINUX
+#if UNITY_EDITOR_WIN || UNITY_EDITOR_OSX || UNITY_EDITOR_LINUX
             var root = Path.Combine(Path.GetTempPath(), "UIFrame-Assets-" + Guid.NewGuid().ToString("N"));
             Directory.CreateDirectory(root);
             try
             {
+#if UNITY_EDITOR_WIN
+                File.WriteAllText(Path.Combine(root, "gen.bat"), "@echo off\r\necho stdout-evidence\r\necho stderr-evidence 1>&2\r\nexit /b 7\r\n");
+#else
                 File.WriteAllText(Path.Combine(root, "gen.sh"), "#!/bin/bash\nprintf 'stdout-evidence'\nprintf 'stderr-evidence' >&2\nexit 7\n");
+#endif
                 try
                 {
                     await LubanGenerateExcels.RunGeneratorAsync(root);
@@ -112,7 +116,7 @@ namespace UIFrame.Regression
             finally { Directory.Delete(root, true); }
 #else
             await Task.CompletedTask;
-            Assert.Ignore("此脚本 fixture 只覆盖 macOS/Linux；Windows 使用独立 cmd 路径。");
+            Assert.Ignore("生成器仅支持 Windows、macOS 和 Linux Editor。");
 #endif
         }
     }

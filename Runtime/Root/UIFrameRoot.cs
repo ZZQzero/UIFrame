@@ -45,6 +45,7 @@ namespace UIFrame
         public event Action MaskClicked;
 
         public Camera UICamera => _uiCamera;
+        public RectTransform CanvasRoot => _canvasRoot;
 
         public static UIFrameRoot Create()
         {

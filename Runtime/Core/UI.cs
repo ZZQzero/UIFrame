@@ -14,6 +14,30 @@ namespace UIFrame
 
         public static bool IsInited => _manager != null && _manager.IsInited;
         public static Camera UICamera => IsInited ? _manager.UICamera : null;
+        /// <summary>框架拥有的 Canvas 根节点；未初始化或关闭后为 null。外部不得销毁或更换父级。</summary>
+        public static RectTransform CanvasRoot => IsInited ? _manager.CanvasRoot : null;
+
+        /// <summary>
+        /// 根节点与管理器初始化完成后同步触发，不保证资源包已绑定。
+        /// 回调异常使 Init 失败；回调中 Shutdown 会取消本次 Init。
+        /// 不补发给后订阅者，订阅在 Shutdown 后保留，订阅者负责退订。
+        /// </summary>
+        public static event Action RootReady;
+
+        /// <summary>
+        /// 面板激活并同步执行完 OnOpen 后触发，缓存重开和再次打开也触发，Resume 不触发。
+        /// 不等待异步内容、布局重建或动画完成。回调异常使打开失败。
+        /// 订阅在 Shutdown 后保留，订阅者负责退订。
+        /// </summary>
+        public static event Action<UIPanel> PanelShown;
+
+        internal static void RaisePanelShown(UIPanel panel)
+        {
+            if (panel != null)
+            {
+                PanelShown?.Invoke(panel);
+            }
+        }
 
         /// <summary>创建 Root。若 YooAsset 已初始化且只有一个包，会自动绑定。</summary>
         public static void Init()
@@ -366,10 +390,25 @@ namespace UIFrame
                     _tipsSettings.MaxQueued,
                     _tipsSettings.DefaultDuration);
                 _manager = manager;
+                RootReady?.Invoke();
+                if (!ReferenceEquals(_manager, manager) || !manager.IsInited)
+                {
+                    throw new OperationCanceledException(
+                        "[UIFrame] RootReady 回调期间 UI 已关闭或替换，本次 Init 已取消。");
+                }
             }
             catch
             {
-                manager.Shutdown();
+                if (ReferenceEquals(_manager, manager))
+                    _manager = null;
+                try
+                {
+                    manager.Shutdown();
+                }
+                catch (Exception cleanupException)
+                {
+                    Debug.LogException(cleanupException);
+                }
                 throw;
             }
         }

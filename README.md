@@ -235,3 +235,9 @@ LanguageManager.AddTable(activityTable);
 ## 回归测试
 
 包内 `Tests/PlayMode` 和 `Tests/Editor` 覆盖失败传播、缓存保留、结果终结、真实输入、预加载互斥、精确绑定和生成器错误输出。宿主 manifest 的 `testables` 加入 `com.zzq.uiframe` 后可用 Unity Test Runner 运行。测试不会自动修复配置或忽略失败断言。
+
+## UI 扩展与场景收尾
+
+`UI.CanvasRoot` 提供框架拥有的 Canvas 根节点；`RootReady` 在根与管理器初始化后触发，`PanelShown` 在面板激活并同步执行完 OnOpen 后触发（包含重开，不包含 Resume）。这些事件不等待异步内容、布局或动画完成，静态订阅需由订阅者管理，完整契约见 [Docs/USAGE.md](Docs/USAGE.md)。
+
+`GameScene.ReloadAsync` 重载当前场景，遵守预加载互斥；`WaitForIdleAsync` 等待当前操作收尾，不代表加载成功。加载调用方、多个等待方与 Shutdown 可以同时等待同一次操作，原始错误仍交给加载调用方。内置场进入内容场继续显式使用 `LoadAsync(..., Single)`，详见 [Docs/Scene.md](Docs/Scene.md)。

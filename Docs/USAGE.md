@@ -50,6 +50,14 @@ GamePool.Shutdown();
 
 ## 2. 面板核心（层级、打开、关闭、生命周期）
 
+### 全局扩展入口
+
+- `UI.CanvasRoot`：框架拥有的 Canvas 根节点，未初始化或关闭后返回 null。可用于挂载全局适配组件；外部不能销毁根节点或更换其父级。
+- `UI.RootReady`：每次根节点和管理器初始化完成后同步触发，回调内可访问 `CanvasRoot`。不保证资源包已绑定，也不代表业务启动完成；后订阅不会补发，可在订阅后检查 `UI.IsInited` 并主动绑定。回调中 Shutdown 会使本次 Init 抛出 `OperationCanceledException`。
+- `UI.PanelShown`：面板激活并同步执行完 `OnOpen` 后触发。首次打开、缓存重开和对已打开面板再次调用打开接口都会触发；`OnResume` 恢复显示不触发。不等待异步内容、布局重建或入场动画完成，动态生成的子节点需要另行处理。
+
+两个事件都是同步扩展回调。首个订阅者异常会中止后续派发，并让初始化或打开失败，由框架执行对应清理；`PanelShown` 回调中 Shutdown 会取消打开。静态订阅在 Shutdown 后保留，临时订阅者应在自身生命周期结束时退订。
+
 ### Canvas 层与打开 API
 
 ```text
@@ -141,7 +149,7 @@ protected override void OnCreate()
 }
 ```
 
-图片加载组件挂在 `Image` 上，使用 `OpenScope.Token` 可在面板关闭时取消请求：
+图片加载组件挂在 `Image` 上，传入 `OpenScope` 可在面板关闭时取消请求并清理图片：
 
 ```csharp
 protected override void OnOpen(ItemArgs args)
@@ -150,7 +158,7 @@ protected override void OnOpen(ItemArgs args)
 }
 ```
 
-`UIImageLoader` 会在新请求开始时取消旧请求，只有当前请求仍对应这个组件时才写入 Sprite；失败使用 Error 图，成功或取消都会释放 YooAsset 句柄。
+`UIImageLoader` 会在新请求开始时取消旧请求，只有当前请求仍对应这个组件时才写入 Sprite；失败使用 Error 图。成功后保留当前图片的 YooAsset 句柄，直到替换图片、调用 `Clear()`、绑定的作用域结束或组件销毁时释放；失败或取消的请求会释放自己的句柄。
 
 ### 注意
 
