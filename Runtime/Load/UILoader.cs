@@ -115,7 +115,7 @@ namespace UIFrame
             AssetHandle handle = _package.LoadAssetAsync<T>(location);
             try
             {
-                await handle;
+                await handle.WithCancellation(cancellationToken);
                 cancellationToken.ThrowIfCancellationRequested();
                 if (handle.Status != EOperationStatus.Succeeded)
                 {

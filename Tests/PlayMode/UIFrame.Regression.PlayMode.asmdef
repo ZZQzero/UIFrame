@@ -5,7 +5,8 @@
     "Unity.TextMeshPro",
     "UniTask",
     "Unity.InputSystem",
-    "YooAsset"
+    "YooAsset",
+    "YooAsset.Editor"
   ],
   "optionalUnityReferences": [
     "TestAssemblies"

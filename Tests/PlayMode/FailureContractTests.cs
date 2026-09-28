@@ -133,7 +133,7 @@ namespace UIFrame.Regression
             Assert.AreEqual(1, panel.CompleteCount);
             Assert.AreEqual(UniTaskStatus.Canceled, result.Status);
             Assert.Throws<OperationCanceledException>(() => result.GetAwaiter().GetResult());
-            Assert.IsNull(typeof(UIPanel).GetField("_openCts", BindingFlags.Instance | BindingFlags.NonPublic).GetValue(panel));
+            Assert.IsNull(typeof(UIPanel).GetField("_openScope", BindingFlags.Instance | BindingFlags.NonPublic).GetValue(panel));
         }
 
         [Test] public void ClearCacheKeepsUntouchedInstancesAfterFirstFailure()

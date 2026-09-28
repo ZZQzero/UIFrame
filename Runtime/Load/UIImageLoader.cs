@@ -22,7 +22,9 @@ namespace UIFrame
         CancellationTokenSource _requestCts;
         int _requestVersion;
 
-        public Image Target => _target != null ? _target : GetComponent<Image>();
+        public Image Target => this == null
+            ? null
+            : (_target != null ? _target : GetComponent<Image>());
 
         public Sprite Placeholder
         {
@@ -41,7 +43,15 @@ namespace UIFrame
             _target ??= GetComponent<Image>();
         }
 
-        public async UniTask LoadAsync(string location, CancellationToken cancellationToken = default)
+        public UniTask LoadAsync(string location, CancellationToken cancellationToken = default)
+        {
+            return LoadAsync(location, cancellationToken, null);
+        }
+
+        async UniTask LoadAsync(
+            string location,
+            CancellationToken cancellationToken,
+            UIFrameScope scope)
         {
             if (string.IsNullOrWhiteSpace(location))
                 throw new ArgumentException("[UIFrame] 图片资源地址为空。", nameof(location));
@@ -59,6 +69,7 @@ namespace UIFrame
                 cancellationToken,
                 destroyCancellationToken);
             _requestCts = requestCts;
+            scope?.Register(() => ClearRequest(version));
             AssetHandle handle = null;
             try
             {
@@ -100,17 +111,25 @@ namespace UIFrame
             if (scope == null)
                 throw new ArgumentNullException(nameof(scope));
 
-            scope.Register(Clear);
-            return LoadAsync(location, scope.Token);
+            return LoadAsync(location, scope.Token, scope);
         }
 
         public void Clear()
         {
             CancelRequest();
             ReleaseCurrent();
+            if (this == null)
+                return;
             Image target = Target;
             if (target != null)
                 target.sprite = _placeholder;
+        }
+
+        void ClearRequest(int version)
+        {
+            if (version != _requestVersion)
+                return;
+            Clear();
         }
 
         void CancelRequest()
