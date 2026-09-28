@@ -66,9 +66,20 @@ namespace Game.Pooling
         /// <summary>释放默认池。未 Init 时为空操作。退出顺序必须是先 <c>UI.Shutdown</c>，再调本方法。</summary>
         public static void Shutdown()
         {
-            service?.Dispose();
+            var failure = new UIFrame.CleanupFailure();
+            if (service != null)
+            {
+                try { service.Dispose(); }
+                catch (Exception exception)
+                {
+                    // 拒绝回调重入时尚未开始清理，所有权必须留在原服务。
+                    if (!service.IsDisposed) throw;
+                    failure.Capture(exception);
+                }
+            }
             service = null;
-            DestroyOwnedRoot();
+            failure.Run(DestroyOwnedRoot);
+            failure.Throw();
         }
 
         [RuntimeInitializeOnLoadMethod(RuntimeInitializeLoadType.SubsystemRegistration)]

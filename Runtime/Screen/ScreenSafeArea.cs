@@ -45,6 +45,7 @@ namespace UIFrame
         /// <summary>覆盖 <see cref="Screen.safeArea"/>。传 null 取消覆盖。</summary>
         public static void SetOverride(Rect? safeRect)
         {
+            if (safeRect.HasValue) ValidateOverride(safeRect.Value);
             _overrideSafeRect = safeRect;
             Refresh();
         }
@@ -62,7 +63,8 @@ namespace UIFrame
             }
 
             var safe = _overrideSafeRect ?? Screen.safeArea;
-            safe = ClampToScreen(safe, screenW, screenH);
+            if (_overrideSafeRect.HasValue) ValidateOverride(safe);
+            else safe = ClampToScreen(safe, screenW, screenH);
             if (_ready && safe == _current.SafeRect)
             {
                 return false;
@@ -90,6 +92,15 @@ namespace UIFrame
                 safe.yMin,
                 screenH - safe.yMax,
                 safe);
+        }
+
+        static void ValidateOverride(Rect safe)
+        {
+            if (!float.IsFinite(safe.x) || !float.IsFinite(safe.y)
+                || !float.IsFinite(safe.width) || !float.IsFinite(safe.height)
+                || safe.x < 0 || safe.y < 0 || safe.width < 0 || safe.height < 0
+                || safe.xMax > Screen.width || safe.yMax > Screen.height)
+                throw new ArgumentOutOfRangeException(nameof(safe), "覆盖安全区必须有限、非负且位于屏幕内。");
         }
 
         static Rect ClampToScreen(Rect safe, int screenW, int screenH)

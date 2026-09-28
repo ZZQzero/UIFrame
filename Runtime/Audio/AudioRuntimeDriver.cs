@@ -241,17 +241,13 @@ namespace Game.Audio
         internal void Shutdown()
         {
             RequireRunning();
-            for (int i = 0; i < voices.Length; i++)
-            {
-                if (voices[i].Active)
-                {
-                    ReleaseVoice(voices[i]);
-                }
-            }
-
-            cache.Dispose();
-            SceneManager.sceneUnloaded -= OnSceneUnloaded;
             initialized = false;
+            SceneManager.sceneUnloaded -= OnSceneUnloaded;
+            var failure = new UIFrame.CleanupFailure();
+            foreach (var voice in voices)
+                if (voice.Active) failure.Run(() => ReleaseVoice(voice));
+            failure.Run(cache.Dispose);
+            failure.Throw();
         }
 
         private void Update()
@@ -506,14 +502,22 @@ namespace Game.Audio
 
         private static void ReleaseVoice(VoiceSlot slot)
         {
-            slot.Source.Stop();
-            slot.Source.clip = null;
-            slot.Source.outputAudioMixerGroup = null;
-            slot.Lease.Dispose();
+            var lease = slot.Lease;
             slot.Lease = null;
             slot.Entry = null;
             slot.Active = false;
             ClearFade(slot);
+            var failure = new UIFrame.CleanupFailure();
+            try
+            {
+                slot.Source.Stop();
+                slot.Source.clip = null;
+                slot.Source.outputAudioMixerGroup = null;
+            }
+            catch (Exception exception) { failure.Capture(exception); }
+            try { lease.Dispose(); }
+            catch (Exception exception) { failure.Capture(exception); }
+            failure.Throw();
         }
 
         private bool TryGetActiveVoice(

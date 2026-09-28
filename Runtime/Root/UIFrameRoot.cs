@@ -11,7 +11,6 @@ namespace UIFrame
     /// <summary>UI 根节点。默认 Screen Space Camera + UI Camera，可挂入 URP Camera Stack。</summary>
     sealed class UIFrameRoot : MonoBehaviour
     {
-        const int DefaultUiLayerFallback = 5;
         const int CanvasSortingOrder = 100;
         const float CanvasPlaneDistance = 1f;
 
@@ -325,7 +324,7 @@ namespace UIFrame
 
         void ResolveUiLayer(ref int uiLayer)
         {
-            if (uiLayer < 0)
+            if (uiLayer == -1)
             {
                 uiLayer = _uiLayer >= 0 ? _uiLayer : ResolveDefaultUiLayer();
             }
@@ -342,7 +341,9 @@ namespace UIFrame
         static int ResolveDefaultUiLayer()
         {
             var layer = LayerMask.NameToLayer("UI");
-            return layer >= 0 ? layer : DefaultUiLayerFallback;
+            if (layer < 0)
+                throw new InvalidOperationException("[UIFrame] 缺少 UI Layer 配置。");
+            return layer;
         }
 
         static void SetLayerRecursively(Transform root, int layer)

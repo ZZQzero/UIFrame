@@ -23,13 +23,15 @@ namespace UIFrame.Regression
         internal const string PackageNameKey = "UIFrame.ImageTests.PackageName";
         internal const string PackageRootKey = "UIFrame.ImageTests.PackageRoot";
         const string SettingExistedKey = "UIFrame.ImageTests.SettingExisted";
-        const string AssetPath = "Assets/UIFrameTest/UIImageLoaderTestSprite.png";
 
         internal static string PackageName => EditorPrefs.GetString(PackageNameKey);
 
         void IPrebuildSetup.Setup()
         {
             AssetDatabase.Refresh();
+            string assetPath = UnityEditor.PackageManager.PackageInfo
+                .FindForAssembly(typeof(UIImageLoaderPackageSetup).Assembly).assetPath
+                + "/Tests/PlayMode/Fixtures/UIImageLoaderTestSprite.png";
             EditorPrefs.SetBool(SettingExistedKey, BundleCollectorSettingData.HasSettingAsset());
 
             string packageName = $"UIFrameImageTests_{Guid.NewGuid():N}";
@@ -41,7 +43,7 @@ namespace UIFrame.Regression
             var group = BundleCollectorSettingData.CreateGroup(package, "Images");
             BundleCollectorSettingData.CreateCollector(group, new BundleCollector
             {
-                CollectPath = AssetPath,
+                CollectPath = assetPath,
                 CollectorType = ECollectorType.MainAssetCollector,
                 PackRuleName = nameof(PackSeparately),
                 FilterRuleName = nameof(CollectSprite)

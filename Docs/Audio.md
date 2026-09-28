@@ -66,6 +66,11 @@ GamePool.Shutdown();
 - 必须先 Init，再播放。未 Init、重复 Init、未 ShutdownAsync 再 Init 都会抛。
 - 只能在 Unity 主线程调用公开 API。
 - 退出用 `ShutdownAsync`：它会取消进行中的播放请求，等加载结束后再拆。
+- 加载失败必须结束所有共享等待者并传播原异常；释放同时失败时只将释放错误单独记录。
+- `ShutdownAsync` 尝试释放所有声音、缓存句柄和运行状态，最后传播首个失败，后续错误单独记录。
+  即使退出抛错，静态状态也已清空；再次退出会因未初始化而报错，不会重复释放。
+- 每个句柄在调用释放前先脱离缓存；释放失败不重试。播放请求的清理失败也必须结束操作计数，
+  不得阻塞退出或替换原播放异常。
 - 不要 `Destroy` `[GameAudio]`。生命周期只有 Init → 使用 → ShutdownAsync。
 - `InitAsync` / 播放可传 `CancellationToken`。启动被取消时，Init 会把已创建部分清掉再抛。
 

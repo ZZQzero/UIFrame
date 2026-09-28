@@ -11,88 +11,73 @@ namespace UIFrame.Editor
     [InitializeOnLoad]
     static class UICompileHook
     {
-        static bool _assignRetryQueued;
-
         static UICompileHook()
         {
-            EditorApplication.delayCall += ProcessJobs;
+            QueueJobs();
         }
 
         [UnityEditor.Callbacks.DidReloadScripts]
         static void OnScriptsReloaded()
         {
             UIBindInspectorGui.ClearSyncedHosts();
+            QueueJobs();
+        }
+
+        static void QueueJobs()
+        {
+            EditorApplication.delayCall -= ProcessJobs;
             EditorApplication.delayCall += ProcessJobs;
         }
 
         internal static void ProcessJobs()
         {
-            ProcessJobs(queueAssignRetry: true);
-        }
-
-        static void ProcessJobs(bool queueAssignRetry)
-        {
+            if (EditorApplication.isCompiling || EditorApplication.isUpdating)
+            {
+                QueueJobs();
+                return;
+            }
             var store = UIBindStore.instance;
             var dirty = false;
-            for (var i = 0; i < store.All.Count; i++)
+            try
             {
-                var state = store.All[i];
-                if (state.PendingAttach)
+                foreach (var state in store.All)
                 {
-                    if (string.IsNullOrEmpty(state.ScriptPath)
-                        || !File.Exists(UIScriptWriter.ToFullPath(state.ScriptPath)))
+                    if (state.PendingAttach)
                     {
                         state.PendingAttach = false;
                         dirty = true;
-                    }
-                    else if (TryAttach(state))
-                    {
-                        state.PendingAttach = false;
-                        dirty = true;
-                    }
-                }
-
-                if (state.PendingAssign && !state.PendingAttach)
-                {
-                    if (string.IsNullOrEmpty(state.GenPath)
-                        || !File.Exists(UIScriptWriter.ToFullPath(state.GenPath)))
-                    {
-                        state.PendingAssign = false;
-                        dirty = true;
-                    }
-                    else if (TryAssign(state))
-                    {
-                        state.PendingAssign = false;
-                        dirty = true;
-                    }
-                    else if (queueAssignRetry)
-                    {
-                        if (!_assignRetryQueued)
+                        try
                         {
-                            _assignRetryQueued = true;
-                            EditorApplication.delayCall += RetryAssignOnce;
+                            RequireFile(state.ScriptPath);
+                            if (!TryAttach(state))
+                                throw new System.InvalidOperationException($"挂载失败: {state.ClassName}。");
+                        }
+                        catch
+                        {
+                            state.PendingAssign = false;
+                            throw;
                         }
                     }
-                    else
+                    if (state.PendingAssign)
                     {
                         state.PendingAssign = false;
                         dirty = true;
-                        Debug.LogError(
-                            $"[UIFrame] 回填引用失败: {state.ClassName}。已取消等待，可修正节点后再次写入脚本。");
+                        RequireFile(state.GenPath);
+                        if (!TryAssign(state))
+                            throw new System.InvalidOperationException($"回填引用失败: {state.ClassName}。请修正配置后重新生成。");
                     }
                 }
             }
-
-            if (dirty)
+            finally
             {
-                store.Persist();
+                if (dirty) store.Persist();
             }
         }
 
-        static void RetryAssignOnce()
+        static void RequireFile(string path)
         {
-            _assignRetryQueued = false;
-            ProcessJobs(queueAssignRetry: false);
+            if (string.IsNullOrEmpty(path) || !File.Exists(UIScriptWriter.ToFullPath(path)))
+                throw new FileNotFoundException($"[UIFrame] 生成文件不存在: {path}", path);
         }
 
         static bool TryAttach(UIPrefabBindState state)
@@ -316,32 +301,24 @@ namespace UIFrame.Editor
             var so = new SerializedObject(host);
             var props = new List<SerializedProperty>();
             var values = new List<UnityEngine.Object>();
-            var missing = false;
-            var unresolved = false;
             for (var i = 0; i < state.Binds.Count; i++)
             {
                 var bind = state.Binds[i];
                 var prop = so.FindProperty(bind.FieldName);
                 if (prop == null)
                 {
-                    missing = true;
-                    Debug.LogError($"[UIFrame] 回填失败: Prefab={AssetDatabase.GUIDToAssetPath(state.PrefabGuid)}, Host={host.GetType().FullName}, Field={bind.FieldName}: 找不到序列化字段。", host);
-                    continue;
+                    throw new System.InvalidOperationException($"[UIFrame] 回填失败: Host={host.GetType().FullName}, Field={bind.FieldName}: 找不到序列化字段。");
                 }
 
                 if (bind.HierarchyPath == null && bind.LocalFileId == 0)
                 {
-                    unresolved = true;
-                    Debug.LogError($"[UIFrame] 回填失败: Prefab={AssetDatabase.GUIDToAssetPath(state.PrefabGuid)}, Host={host.GetType().FullName}, Field={bind.FieldName}: 缺少节点路径和 LocalFileId，请显式重新绑定。", host);
-                    continue;
+                    throw new System.InvalidOperationException($"[UIFrame] 回填失败: Host={host.GetType().FullName}, Field={bind.FieldName}: 缺少节点路径和 LocalFileId，请显式重新绑定。");
                 }
 
                 var node = UICodeGenUtil.FindBindNode(host.transform, bind);
                 if (node == null)
                 {
-                    unresolved = true;
-                    Debug.LogWarning($"[UIFrame] 找不到节点: {bind.HierarchyPath ?? bind.FieldName}");
-                    continue;
+                    throw new System.InvalidOperationException($"[UIFrame] 找不到节点: {bind.HierarchyPath ?? bind.FieldName}");
                 }
 
                 if (bind.IsGameObject)
@@ -354,18 +331,11 @@ namespace UIFrame.Editor
                 var found = FindComponent(node, bind.TypeName);
                 if (found == null)
                 {
-                    unresolved = true;
-                    Debug.LogWarning($"[UIFrame] 找不到组件 {bind.TypeName}: {bind.HierarchyPath ?? bind.FieldName}");
-                    continue;
+                    throw new System.InvalidOperationException($"[UIFrame] 找不到组件 {bind.TypeName}: {bind.HierarchyPath ?? bind.FieldName}");
                 }
 
                 props.Add(prop);
                 values.Add(found);
-            }
-
-            if (missing || unresolved)
-            {
-                return false;
             }
 
             for (var i = 0; i < props.Count; i++)

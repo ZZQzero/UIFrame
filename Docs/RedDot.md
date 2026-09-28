@@ -185,7 +185,9 @@ private void OnMailRedDotChanged(int count)
 - `Bind` / `Unbind` 传入空回调会抛出 `ArgumentNullException`；
 - 必须使用同一个委托实例解除监听；
 - 建议在 `OnEnable` 绑定，在 `OnDisable` 解绑；
-- 单个回调抛异常时会记录异常，但不会阻断其他回调。
+- Bind 首次回调失败时撤销本次订阅并原样抛错。
+- Flush 首个回调失败时中止本批派发并原样抛错；未执行的通知不自动重放，数据修改不回滚。
+- 自动 LateUpdate 边界记录异常并停止该 Runner，避免下一帧继续失败工作；修正后由调用方显式处理后续派发。
 
 不要使用两个不同的匿名函数进行绑定和解绑：
 

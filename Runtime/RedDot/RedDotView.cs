@@ -84,21 +84,14 @@ namespace UIFrame
             Unbind();
         }
 
-        private void OnValidate()
-        {
-            if (maxCount < 0)
-            {
-                maxCount = 0;
-            }
-        }
-
         private void Bind()
         {
-            if (isBound || !ValidateConfiguration())
+            if (isBound)
             {
                 return;
             }
 
+            ValidateConfiguration();
             isBound = true;
             try
             {
@@ -122,66 +115,22 @@ namespace UIFrame
             isBound = false;
         }
 
-        private bool ValidateConfiguration()
+        private void ValidateConfiguration()
         {
             if (target == null)
-            {
-                Debug.LogError(
-                    $"[{nameof(RedDotView)}] {name} 未配置红点显示对象。",
-                    this);
-                return false;
-            }
-
-            if (target == gameObject ||
-                transform.IsChildOf(target.transform))
-            {
-                Debug.LogError(
-                    $"[{nameof(RedDotView)}] target 不能是组件挂载对象自身或其祖先，" +
-                    "否则隐藏 target 会导致组件退订且无法重新显示。",
-                    this);
-                return false;
-            }
-
-            if (string.IsNullOrWhiteSpace(path))
-            {
-                HideTarget();
-                Debug.LogError(
-                    $"[{nameof(RedDotView)}] {name} 未配置红点路径。",
-                    this);
-                return false;
-            }
-
-            try
-            {
-                RedDot.Get(path);
-            }
-            catch (ArgumentException exception)
-            {
-                HideTarget();
-                Debug.LogError(
-                    $"[{nameof(RedDotView)}] {name} 的红点路径无效：" +
-                    exception.Message,
-                    this);
-                return false;
-            }
-
-            return true;
-        }
-
-        private void HideTarget()
-        {
-            if (target.activeSelf)
-            {
-                target.SetActive(false);
-            }
+                throw new InvalidOperationException($"[{nameof(RedDotView)}] {name} 未配置红点显示对象。");
+            if (target == gameObject || transform.IsChildOf(target.transform))
+                throw new InvalidOperationException($"[{nameof(RedDotView)}] target 不能是宿主自身或祖先。");
+            if (maxCount < 0)
+                throw new ArgumentOutOfRangeException(nameof(maxCount));
+            RedDot.Get(path);
         }
 
         private void OnCountChanged(int count)
         {
             if (target == null)
             {
-                Unbind();
-                return;
+                throw new InvalidOperationException($"[{nameof(RedDotView)}] 显示对象已被销毁。");
             }
 
             bool visible = count > 0;

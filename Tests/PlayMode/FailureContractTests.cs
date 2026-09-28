@@ -17,9 +17,10 @@ namespace UIFrame.Regression
 {
     public class FailurePanel : UIPanel<UINone, int>
     {
-        public Action OpenAction, CloseAction, DestroyAction, CompleteAction, ResumeAction;
-        public int CloseCount, DestroyCount, CompleteCount, ResumeCount;
+        public Action OpenAction, CloseAction, DestroyAction, CompleteAction, ResumeAction, PauseAction;
+        public int CloseCount, DestroyCount, CompleteCount, ResumeCount, PauseCount;
         public bool ThrowOnCancel;
+        public void Submit(int result, bool destroy = false) => CloseWithResult(result, destroy);
         protected override void OnOpen(UINone args)
         {
             if (ThrowOnCancel)
@@ -29,6 +30,7 @@ namespace UIFrame.Regression
         protected override void OnClose() { CloseCount++; CloseAction?.Invoke(); }
         protected override void OnDestroyPanel() { DestroyCount++; DestroyAction?.Invoke(); }
         protected override void OnResume() { ResumeCount++; ResumeAction?.Invoke(); }
+        protected override void OnPause() { PauseCount++; PauseAction?.Invoke(); }
         protected override void CompleteOpen() { CompleteCount++; base.CompleteOpen(); CompleteAction?.Invoke(); }
     }
     public class OtherPanel : FailurePanel { }
@@ -73,6 +75,40 @@ namespace UIFrame.Regression
             }
             objects.Clear();
             yield return null;
+        }
+
+        [Test] public void ShutdownAttemptsEveryPanelAndPropagatesFirstFailure()
+        {
+            var first = Panel<FailurePanel>();
+            var second = Panel<OtherPanel>();
+            var primary = new InvalidOperationException("shutdown-first");
+            first.CloseAction = () => throw primary;
+            second.CloseAction = () => throw new InvalidOperationException("shutdown-second");
+            LogAssert.Expect(LogType.Exception, new Regex("shutdown-second"));
+            Assert.AreSame(primary, Assert.Throws<InvalidOperationException>(() => manager.Shutdown()));
+            Assert.AreEqual(1, first.DestroyCount);
+            Assert.AreEqual(1, second.DestroyCount);
+            Assert.IsFalse(manager.IsInited);
+            Assert.DoesNotThrow(() => manager.Shutdown());
+        }
+
+        [Test] public void ResultRequestedAfterFailedCloseReceivesOriginalError()
+        {
+            var panel = Panel<FailurePanel>();
+            var primary = new InvalidOperationException("late-result-failure");
+            panel.CloseAction = () => throw primary;
+            Assert.AreSame(primary, Assert.Throws<InvalidOperationException>(() => manager.CloseInstance(panel, false)));
+            var result = panel.WaitResultAsync();
+            Assert.AreSame(primary, Assert.Throws<InvalidOperationException>(() => result.GetAwaiter().GetResult()));
+        }
+
+        [Test] public void OrdinaryOpenDoesNotAllocateAnUnobservedResultTask()
+        {
+            var panel = Panel<FailurePanel>();
+            panel.CloseAction = () => throw new InvalidOperationException("ordinary-close");
+            Assert.Throws<InvalidOperationException>(() => manager.CloseInstance(panel, false));
+            var channel = typeof(UIPanel<UINone, int>).GetField("_result", BindingFlags.Instance | BindingFlags.NonPublic);
+            Assert.IsNull(channel.GetValue(panel), "普通 Open 没有结果消费者，不应制造无人等待的失败任务");
         }
 
         [Test] public void OrdinaryDestroyPropagatesCallbackFailure()
@@ -127,13 +163,25 @@ namespace UIFrame.Regression
             var panel = Panel<FailurePanel>(false);
             panel.ThrowOnCancel = true;
             panel.DispatchOpen();
+            Field<Dictionary<Type, UIPanel>>(manager, "_opened")[typeof(FailurePanel)] = panel;
             var result = panel.WaitResultAsync();
-            Assert.Throws<AggregateException>(panel.DispatchClose);
+            var failure = Assert.Throws<AggregateException>(() => manager.CloseInstance(panel, false));
             Assert.AreEqual(0, panel.CloseCount);
             Assert.AreEqual(1, panel.CompleteCount);
-            Assert.AreEqual(UniTaskStatus.Canceled, result.Status);
-            Assert.Throws<OperationCanceledException>(() => result.GetAwaiter().GetResult());
+            Assert.AreEqual(UniTaskStatus.Faulted, result.Status);
+            Assert.AreSame(failure, Assert.Throws<AggregateException>(() => result.GetAwaiter().GetResult()));
             Assert.IsNull(typeof(UIPanel).GetField("_openScope", BindingFlags.Instance | BindingFlags.NonPublic).GetValue(panel));
+        }
+
+        [Test] public void DestructionStillRunsOwnedCleanupWhenScopeCancellationFails()
+        {
+            var panel = Panel<FailurePanel>(false);
+            panel.ThrowOnCancel = true;
+            panel.DispatchOpen();
+            Assert.Throws<AggregateException>(panel.DispatchDestroy);
+            Assert.AreEqual(1, panel.DestroyCount);
+            Assert.AreEqual(1, panel.CompleteCount);
+            Assert.IsTrue(panel.DestroyDispatched);
         }
 
         [Test] public void ClearCacheKeepsUntouchedInstancesAfterFirstFailure()

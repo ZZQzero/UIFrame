@@ -52,6 +52,14 @@ StaticManagedPool<MyMessage>.Release(message);
 `OnReturn` 表示重置以便复用，`onDestroy` 才表示对象被池永久丢弃。不要把两种
 语义都放进同一个 `Dispose`。
 
+托管池回调内不能重入同一池的取还、Clear 或 Dispose。`onRent` 失败时对象尚未交付，
+由池调用 `onDestroy` 后传播原异常；`onReturn` 失败则仍由调用方持有。
+归还成功后，若闲置容量已满，对象直接移交销毁；销毁失败也不能再次归还。
+`Clear` 只处理闲置对象，每项先移出池再销毁，首个失败中止本批，未处理项继续保留。
+`Dispose` 尝试销毁所有闲置项后传播首个失败，并允许重复调用；之后禁止取还。
+两者均不销毁借出的对象，`CountActive` 保留其数量，借出对象由调用方负责最终释放。
+`TotalDestroyed` 统计已移交销毁的对象数，不保证业务销毁回调成功。
+
 ## YooAsset GameObject
 
 调用方先初始化 `ResourcePackage`，再将它注入池服务：
@@ -214,3 +222,8 @@ Handle 同步扩容，因此快速滑动不会返回空；可见数量变化大�
 `Trim` 或移除。
 
 选项对象的 CollectionCheck 保留调用方意图；托管池构造时才与全局 CollectionChecks 组合。因此复用 Default 或显式选项创建新池时会读取当时的全局开关，既有池不受后续开关变化影响。GameObjectPoolOptions.CollectionCheck 目前不控制 GameObject 所有权／状态检查，这些检查始终执行。
+
+## 失败契约
+
+PrewarmAsync 的 targetCount 是承诺达到的总数量，超过有效 MaxSize 时在加载前抛错，不截断数量。
+Dispose 尝试释放所有拥有的分桶／闲置托管对象，最后抛出首个释放异常，后续错误单独记录；已交给调用方的活跃托管对象仍由调用方负责。

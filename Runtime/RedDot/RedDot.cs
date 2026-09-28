@@ -133,7 +133,15 @@ namespace UIFrame
                     $"红点路径 \"{path}\" 已重复绑定同一回调。");
             }
 
-            InvokeSafely(path, callback, GetUnchecked(path));
+            try
+            {
+                callback(GetUnchecked(path));
+            }
+            catch
+            {
+                Unbind(path, callback);
+                throw;
+            }
         }
 
         /// <summary>
@@ -221,7 +229,7 @@ namespace UIFrame
                     Action<int>[] callbacks = entry.Callbacks;
                     for (int i = 0; i < callbacks.Length; i++)
                     {
-                        InvokeSafely(entry.Path, callbacks[i], entry.Value);
+                        callbacks[i](entry.Value);
                     }
                 }
             }
@@ -423,19 +431,6 @@ namespace UIFrame
             }
         }
 
-        private static void InvokeSafely(string path, Action<int> callback, int value)
-        {
-            try
-            {
-                callback(value);
-            }
-            catch (Exception exception)
-            {
-                UnityEngine.Debug.LogException(new InvalidOperationException(
-                    $"[RedDot] 通知失败: Path={path}, Value={value}, Callback={callback.Method}。", exception));
-            }
-        }
-
         private static void EnsureMainThread()
         {
             if (!UIFrameSafety.ThreadChecks)
@@ -553,7 +548,12 @@ namespace UIFrame
     {
         private void LateUpdate()
         {
-            RedDot.Flush();
+            try { RedDot.Flush(); }
+            catch (Exception exception)
+            {
+                enabled = false;
+                Debug.LogException(exception);
+            }
         }
 
         private void OnDestroy()

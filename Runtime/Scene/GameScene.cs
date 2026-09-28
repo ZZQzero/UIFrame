@@ -75,25 +75,20 @@ namespace Game.Scene
         public static async UniTask ShutdownAsync()
         {
             EnsureInited();
-            if (busy)
+            try
             {
-                try
-                {
-                    await inflight.Task;
-                }
-                catch
-                {
-                    // ignored
-                }
+                if (busy) await inflight.Task;
             }
-
-            Loaded.Clear();
-            loader = null;
-            activeId = null;
-            busy = false;
-            progress = 0f;
-            progressCallback = null;
-            inflight = null;
+            finally
+            {
+                Loaded.Clear();
+                loader = null;
+                activeId = null;
+                busy = false;
+                progress = 0f;
+                progressCallback = null;
+                inflight = null;
+            }
         }
 
         public static bool IsLoaded(string location)
@@ -249,7 +244,6 @@ namespace Game.Scene
                 LoadSceneMode.Single,
                 true,
                 RelayProgress);
-            await DiscardOthersExceptAsync(location);
             await BindActiveAsync(location, handle);
         }
 
@@ -272,21 +266,11 @@ namespace Game.Scene
             activeId = location;
         }
 
-        static async UniTask ReloadCoreAsync(string location)
+        static UniTask ReloadCoreAsync(string location)
         {
-            if (Loaded.ContainsKey(location))
-            {
-                ISceneHandle handle = await loader.LoadAsync(
-                    location,
-                    LoadSceneMode.Single,
-                    true,
-                    RelayProgress);
-                await DiscardOthersExceptAsync(null);
-                await BindActiveAsync(location, handle);
-                return;
-            }
-
-            await LoadBuiltinCoreAsync(location);
+            return Loaded.ContainsKey(location)
+                ? LoadSingleCoreAsync(location)
+                : LoadBuiltinCoreAsync(location);
         }
 
         static string ResolveReloadLocation()
@@ -319,6 +303,11 @@ namespace Game.Scene
         {
             try
             {
+                // 登记前始终由本次操作持有句柄，包括 Single 清理旧场的阶段。
+                if (handle.Mode == LoadSceneMode.Single)
+                {
+                    await DiscardOthersExceptAsync(null);
+                }
                 await handle.ActivateAsync();
                 Loaded.Add(location, handle);
                 activeId = location;

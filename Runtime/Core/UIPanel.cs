@@ -85,10 +85,12 @@ namespace UIFrame
         {
         }
 
-        /// <summary>关闭或销毁后调用。未提交的结果在这里取消。</summary>
+        /// <summary>生命周期回调结束后的清理钩子。结果由管理器在整个关闭操作结束后结算。</summary>
         protected virtual void CompleteOpen()
         {
         }
+
+        internal virtual void SettleClose(Exception failure) { }
 
         internal void DispatchCreate()
         {
@@ -154,19 +156,30 @@ namespace UIFrame
             try
             {
                 CancelOpenScope();
-                if (destroy)
-                    OnDestroyPanel();
-                else
-                    OnClose();
             }
             catch (Exception exception)
             {
                 failure = exception;
             }
 
+            // 销毁是最终清理；关闭是依赖取消成功的业务操作。
+            if (destroy || failure == null)
+            {
+                try
+                {
+                    if (destroy) OnDestroyPanel();
+                    else OnClose();
+                }
+                catch (Exception exception)
+                {
+                    if (failure == null) failure = exception;
+                    else Debug.LogException(exception);
+                }
+            }
+
             try
             {
-                // 结果通道必须终结，即使取消回调或业务回调失败。
+                // 清理钩子仍须执行，即使取消回调或业务回调失败。
                 CompleteOpen();
             }
             catch (Exception exception) when (failure != null)

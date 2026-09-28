@@ -1,6 +1,5 @@
 using System;
 using System.Collections.Generic;
-using System.Runtime.ExceptionServices;
 using System.Threading;
 using Game;
 using Game.Timer;
@@ -70,14 +69,14 @@ namespace UIFrame
                 return;
             _disposed = true;
 
-            ExceptionDispatchInfo first = null;
+            var failure = new CleanupFailure();
             try
             {
                 _cts.Cancel();
             }
             catch (Exception exception)
             {
-                first = ExceptionDispatchInfo.Capture(exception);
+                failure.Capture(exception);
             }
 
             if (_hasEventSubscriptions)
@@ -88,7 +87,7 @@ namespace UIFrame
                 }
                 catch (Exception exception)
                 {
-                    first ??= ExceptionDispatchInfo.Capture(exception);
+                    failure.Capture(exception);
                 }
                 _hasEventSubscriptions = false;
             }
@@ -103,7 +102,7 @@ namespace UIFrame
                     }
                     catch (Exception exception)
                     {
-                        first ??= ExceptionDispatchInfo.Capture(exception);
+                        failure.Capture(exception);
                     }
                 }
                 _cleanups.Clear();
@@ -118,12 +117,12 @@ namespace UIFrame
                 }
                 catch (Exception exception)
                 {
-                    first ??= ExceptionDispatchInfo.Capture(exception);
+                    failure.Capture(exception);
                 }
             }
 
             _cts.Dispose();
-            first?.Throw();
+            failure.Throw();
         }
 
         void ThrowIfDisposed()

@@ -29,12 +29,6 @@ namespace Game.Timer
         Coalesce = 1
     }
 
-    public enum TimerExceptionPolicy : byte
-    {
-        CancelTimer = 0,
-        Continue = 1
-    }
-
     public readonly struct TimerHandle : IEquatable<TimerHandle>
     {
         public int SchedulerId { get; }
@@ -176,7 +170,6 @@ namespace Game.Timer
         public TimerCatchUpPolicy CatchUpPolicy { get; }
         public TimerCatchUpOverflowPolicy CatchUpOverflowPolicy { get; }
         public byte MaxCatchUpPerTick { get; }
-        public TimerExceptionPolicy ExceptionPolicy { get; }
         public TimerOwner Owner { get; }
         public object State { get; }
 
@@ -189,7 +182,6 @@ namespace Game.Timer
             TimerCatchUpPolicy catchUpPolicy,
             TimerCatchUpOverflowPolicy catchUpOverflowPolicy,
             byte maxCatchUpPerTick,
-            TimerExceptionPolicy exceptionPolicy,
             TimerOwner owner,
             object state)
         {
@@ -201,7 +193,6 @@ namespace Game.Timer
             CatchUpPolicy = catchUpPolicy;
             CatchUpOverflowPolicy = catchUpOverflowPolicy;
             MaxCatchUpPerTick = maxCatchUpPerTick;
-            ExceptionPolicy = exceptionPolicy;
             Owner = owner;
             State = state;
         }
@@ -221,7 +212,6 @@ namespace Game.Timer
                 TimerCatchUpPolicy.Coalesce,
                 TimerCatchUpOverflowPolicy.Skip,
                 1,
-                TimerExceptionPolicy.CancelTimer,
                 owner,
                 state);
         }
@@ -243,7 +233,6 @@ namespace Game.Timer
                 TimerCatchUpPolicy.Coalesce,
                 TimerCatchUpOverflowPolicy.Skip,
                 1,
-                TimerExceptionPolicy.CancelTimer,
                 owner,
                 state);
         }
@@ -265,11 +254,6 @@ namespace Game.Timer
                 maxCatchUpPerTick: maxCatchUpPerTick);
         }
 
-        public TimerOptions WithExceptionPolicy(TimerExceptionPolicy value)
-        {
-            return Copy(exceptionPolicy: value);
-        }
-
         public TimerOptions WithOwner(TimerOwner value)
         {
             return Copy(owner: value);
@@ -286,7 +270,6 @@ namespace Game.Timer
                 CatchUpPolicy,
                 CatchUpOverflowPolicy,
                 MaxCatchUpPerTick,
-                ExceptionPolicy,
                 Owner,
                 value);
         }
@@ -296,7 +279,6 @@ namespace Game.Timer
             TimerCatchUpPolicy? catchUpPolicy = null,
             TimerCatchUpOverflowPolicy? catchUpOverflowPolicy = null,
             byte? maxCatchUpPerTick = null,
-            TimerExceptionPolicy? exceptionPolicy = null,
             TimerOwner? owner = null,
             object state = null)
         {
@@ -309,7 +291,6 @@ namespace Game.Timer
                 catchUpPolicy ?? CatchUpPolicy,
                 catchUpOverflowPolicy ?? CatchUpOverflowPolicy,
                 maxCatchUpPerTick ?? MaxCatchUpPerTick,
-                exceptionPolicy ?? ExceptionPolicy,
                 owner ?? Owner,
                 state ?? State);
         }

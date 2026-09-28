@@ -334,7 +334,6 @@ public readonly struct TimerOptions
     public TimerCatchUpPolicy CatchUpPolicy { get; init; }
     public TimerCatchUpOverflowPolicy CatchUpOverflowPolicy { get; init; }
     public byte MaxCatchUpPerTick { get; init; }
-    public TimerExceptionPolicy ExceptionPolicy { get; init; }
     public TimerOwner Owner { get; init; }
     public object State { get; init; }
 }
@@ -515,7 +514,7 @@ Simulation 时间正常按小步推进时不应触发该路径。
   Timer，严格 API 都立即抛错；只有对应 `Try*` 可返回 false；
 - 当前批次使用预分配索引缓冲，不创建临时 List；
 - 不允许 Scheduler 嵌套 Tick，同一实例重入 Tick 应抛出调度异常；
-- 一个回调抛异常不能阻断后续 Timer。
+- 一个回调抛异常必须中止本次 Tick，释放失败计时器；后续 Timer 保留待执行状态。
 
 节点状态建议为：
 
@@ -625,20 +624,17 @@ Scheduler，并为其分配独立预算。这样网络超时不会被大量表�
 
 ## 11. 异常处理
 
-```csharp
-public enum TimerExceptionPolicy : byte
-{
-    CancelTimer = 0,
-    Continue = 1
-}
-```
-
-每个回调独立 `try/catch` 并通过 Unity 日志记录异常。默认 `CancelTimer`，防止无限重复
-Timer 每帧持续抛错。确实需要继续的任务显式选择 Continue。
-
-异常隔离只保护 Scheduler 容器完整性，不表示业务异常可以忽略。Development Build
-应附带 Handle、时钟域、DueTime、Owner 和回调方法名等上下文；Release 避免构建昂贵
-诊断字符串。
+回调失败会释放该计时器及其 Owner 关联，并原样向 Tick 调用方传播异常，终止本次 Tick。
+未执行的计时器保留待执行状态；显式再次 Tick 可处理它们，但不会重跑失败计时器。
+Unity 自动更新边界记录一次异常并停用 Runner，不自动续跑。需要重新启动时由业务显式 Shutdown/Init。
+停用后 IsInited 仍为 true，表示资源尚待显式 Shutdown；它不表示 Runner 仍在运行。
+尚未确定结果的 DelayAsync 立即以原异常结束并释放取消注册；非法禁用或销毁 Runner 使用 TimerStateException。
+已确定的到期或主动取消结果保持不变。若宿主在计时器回调内被禁用，等待的续体仍在回调结束后交付；停机收尾不受每帧交付预算限制。
+Schedule / ScheduleAt / TrySchedule / DelayAsync / CreateOwner / Pause / Resume（含 Try 形式）仍拒绝新工作。
+Cancel / TryCancel / CancelOwner / ReleaseOwner / TryReleaseOwner、查询及 Shutdown 保持可用，原有参数、线程与所有权校验不变。
+其它未执行的普通计时器保持登记但不再自动执行，由其 Owner 或 Shutdown 清理；不会自动重试或恢复。
+删除 TimerExceptionPolicy 与 WithExceptionPolicy；不再提供 Continue 或“记录后正常返回”的策略。
+重复计时器的下一截止时间溢出同样释放该计时器并抛出 TimerClockException。
 
 ## 12. UniTask 集成
 
@@ -656,7 +652,8 @@ UniTask DelayAsync(
 - 正常到期时完成；
 - Token 取消时取消 Timer，并使等待任务进入取消状态；
 - Scheduler Shutdown 时所有未完成等待统一取消；
-- 竞态下只能有到期、外部取消或 Shutdown 其中一个成功完成 Promise；
+- 默认 Runner 故障时，尚未确定结果的等待以原异常失败，不等待外部取消或 Shutdown；
+- 到期、外部取消、Runner 故障或 Shutdown 通过原子状态决定一次结果，已确定结果不被后续事件改写；
 - 取消注册必须在任一完成路径释放；
 - Continuation 默认回到驱动 Scheduler 的主线程阶段。
 
@@ -968,7 +965,7 @@ GameTimer.Schedule(localRemaining, _ => activity.SetClosed());
 - FixedRate 和 FixedDelay 的下一次 Deadline 正确；
 - Coalesce、Skip、FireAll 在大步推进时次数正确；
 - RepeatCount 的总次数语义正确；
-- 回调异常不阻断后续 Timer，默认取消异常重复 Timer；
+- 回调异常中止当前 Tick、释放失败计时器并传播原异常；自动 Runner 停止后不续跑；
 - Shutdown 释放 Callback、State、Owner 和等待任务；
 - 不同 Clock 的暂停与推进互不影响；
 - FastForward 不提前、不遗漏、不重复执行；

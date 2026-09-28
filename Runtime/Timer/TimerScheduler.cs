@@ -540,7 +540,7 @@ namespace Game.Timer
                 try
                 {
                     DrainExternalCancellations();
-                    DrainDelayCompletions();
+                    DrainDelayCompletions(forceAll: delayFailure != null);
                 }
                 finally
                 {
@@ -732,7 +732,6 @@ namespace Game.Timer
             node.CatchUpPolicy = options.CatchUpPolicy;
             node.CatchUpOverflowPolicy = options.CatchUpOverflowPolicy;
             node.MaxCatchUpPerTick = options.MaxCatchUpPerTick;
-            node.ExceptionPolicy = options.ExceptionPolicy;
             node.PauseRequested = false;
             node.CanPauseExecuting = false;
 
@@ -1302,17 +1301,10 @@ namespace Game.Timer
             {
                 node.Callback(in context);
             }
-            catch (Exception exception)
+            catch
             {
-                UnityEngine.Debug.LogException(new InvalidOperationException(
-                    $"[GameTimer] 回调失败: SchedulerId={schedulerId}, Slot={slot}, Generation={handle.Generation}, " +
-                    $"Clock={node.Clock}, OwnerSlot={node.OwnerSlot}, DueTimeMs={scheduledTimeMs}, " +
-                    $"Callback={node.Callback.Method}, Policy={node.ExceptionPolicy}。", exception));
-                if (node.ExceptionPolicy == TimerExceptionPolicy.CancelTimer)
-                {
-                    nodes[slot].Status = TimerNodeStatus.Cancelled;
-                    DetachOwner(slot);
-                }
+                FreeNode(slot, false);
+                throw;
             }
             finally
             {
@@ -1390,12 +1382,10 @@ namespace Game.Timer
                         slot);
                 }
             }
-            catch (TimerClockException exception)
+            catch (TimerClockException)
             {
-                UnityEngine.Debug.LogException(exception);
-                node.PauseRequested = false;
                 FreeNode(slot, false);
-                return;
+                throw;
             }
 
             if (node.PauseRequested)
@@ -2241,11 +2231,6 @@ namespace Game.Timer
                     "CatchUpOverflowPolicy 非法。");
             }
 
-            if ((byte)options.ExceptionPolicy > (byte)TimerExceptionPolicy.Continue)
-            {
-                throw new ArgumentOutOfRangeException(nameof(options), "ExceptionPolicy 非法。");
-            }
-
             if (options.MaxCatchUpPerTick == 0)
             {
                 throw new ArgumentOutOfRangeException(
@@ -2487,9 +2472,8 @@ namespace Game.Timer
                 $"Timer 时间范围耗尽，任务已取消。SchedulerId={schedulerId}, " +
                 $"Slot={slot}, Generation={node.Generation}, DueTimeMs={node.DueTimeMs}, " +
                 $"IntervalMs={node.IntervalMs}, Reason={reason}");
-            UnityEngine.Debug.LogException(exception);
-            node.PauseRequested = false;
             FreeNode(slot, false);
+            throw exception;
         }
 
         private TimerOwnershipException OwnershipError(
@@ -2610,7 +2594,6 @@ namespace Game.Timer
             public TimerRepeatMode RepeatMode;
             public TimerCatchUpPolicy CatchUpPolicy;
             public TimerCatchUpOverflowPolicy CatchUpOverflowPolicy;
-            public TimerExceptionPolicy ExceptionPolicy;
             public byte MaxCatchUpPerTick;
             public bool PauseRequested;
             public bool CanPauseExecuting;

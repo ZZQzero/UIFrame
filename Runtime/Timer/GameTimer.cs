@@ -15,7 +15,7 @@ namespace Game.Timer
         private static TimerScheduler scheduler;
         private static UnityTimerRunner runner;
         private static Transform ownedRoot;
-        private static bool runnerDestroyedUnexpectedly;
+        private static bool runnerUnavailable;
         private static bool shuttingDown;
 
         public static bool IsInited =>
@@ -65,7 +65,7 @@ namespace Game.Timer
                 ownedRoot = rootObject.transform;
                 scheduler = createdScheduler;
                 runner = createdRunner;
-                runnerDestroyedUnexpectedly = false;
+                runnerUnavailable = false;
             }
             catch
             {
@@ -86,7 +86,7 @@ namespace Game.Timer
             object state = null,
             TimerOwner owner = default)
         {
-            return RequireScheduler(nameof(Schedule))
+            return RequireRunningScheduler(nameof(Schedule))
                 .Schedule(delayMs, callback, clock, state, owner);
         }
 
@@ -94,7 +94,7 @@ namespace Game.Timer
             in TimerOptions options,
             TimerCallback callback)
         {
-            return RequireScheduler(nameof(Schedule)).Schedule(in options, callback);
+            return RequireRunningScheduler(nameof(Schedule)).Schedule(in options, callback);
         }
 
         public static TimerHandle ScheduleAt(
@@ -104,7 +104,7 @@ namespace Game.Timer
             object state = null,
             TimerOwner owner = default)
         {
-            return RequireScheduler(nameof(ScheduleAt))
+            return RequireRunningScheduler(nameof(ScheduleAt))
                 .ScheduleAt(deadlineMs, callback, clock, state, owner);
         }
 
@@ -113,7 +113,7 @@ namespace Game.Timer
             TimerCallback callback,
             out TimerHandle handle)
         {
-            return RequireScheduler(nameof(TrySchedule))
+            return RequireRunningScheduler(nameof(TrySchedule))
                 .TrySchedule(in options, callback, out handle);
         }
 
@@ -129,22 +129,22 @@ namespace Game.Timer
 
         public static void Pause(TimerHandle handle)
         {
-            RequireScheduler(nameof(Pause)).Pause(handle);
+            RequireRunningScheduler(nameof(Pause)).Pause(handle);
         }
 
         public static bool TryPause(TimerHandle handle)
         {
-            return RequireScheduler(nameof(TryPause)).TryPause(handle);
+            return RequireRunningScheduler(nameof(TryPause)).TryPause(handle);
         }
 
         public static void Resume(TimerHandle handle)
         {
-            RequireScheduler(nameof(Resume)).Resume(handle);
+            RequireRunningScheduler(nameof(Resume)).Resume(handle);
         }
 
         public static bool TryResume(TimerHandle handle)
         {
-            return RequireScheduler(nameof(TryResume)).TryResume(handle);
+            return RequireRunningScheduler(nameof(TryResume)).TryResume(handle);
         }
 
         public static bool IsActive(TimerHandle handle)
@@ -167,7 +167,7 @@ namespace Game.Timer
 
         public static TimerOwner CreateOwner()
         {
-            return RequireScheduler(nameof(CreateOwner)).CreateOwner();
+            return RequireRunningScheduler(nameof(CreateOwner)).CreateOwner();
         }
 
         public static int CancelOwner(TimerOwner owner)
@@ -190,7 +190,7 @@ namespace Game.Timer
             TimerClock clock = TimerClock.Scaled,
             CancellationToken cancellationToken = default)
         {
-            return RequireScheduler(nameof(DelayAsync))
+            return RequireRunningScheduler(nameof(DelayAsync))
                 .DelayAsync(delayMs, clock, cancellationToken);
         }
 
@@ -232,7 +232,7 @@ namespace Game.Timer
                 scheduler = null;
                 runner = null;
                 ownedRoot = null;
-                runnerDestroyedUnexpectedly = false;
+                runnerUnavailable = false;
                 shuttingDown = false;
                 DestroyObject(rootObject);
             }
@@ -240,19 +240,23 @@ namespace Game.Timer
 
         internal static void NotifyRunnerUnavailable(
             UnityTimerRunner unavailable,
-            string reason)
+            string reason,
+            Exception failure = null)
         {
             if (runner != unavailable ||
                 scheduler == null ||
-                runnerDestroyedUnexpectedly)
+                runnerUnavailable)
             {
                 return;
             }
 
-            runnerDestroyedUnexpectedly = true;
-            Debug.LogError(
+            runnerUnavailable = true;
+            unavailable.enabled = false;
+            failure ??= new TimerStateException(
                 $"[GameTimer] UnityTimerRunner {reason}。禁止直接禁用或销毁 [GameTimer]，" +
                 "请修复调用方生命周期，并由 Launch 调用 GameTimer.Shutdown。");
+            Debug.LogException(failure);
+            scheduler.FailPendingDelays(failure);
         }
 
         [RuntimeInitializeOnLoadMethod(RuntimeInitializeLoadType.SubsystemRegistration)]
@@ -261,7 +265,7 @@ namespace Game.Timer
             scheduler = null;
             runner = null;
             ownedRoot = null;
-            runnerDestroyedUnexpectedly = false;
+            runnerUnavailable = false;
             shuttingDown = false;
         }
 
@@ -279,14 +283,20 @@ namespace Game.Timer
                     $"GameTimer.{api} 要求先调用 GameTimer.Init。");
             }
 
-            if (runnerDestroyedUnexpectedly)
+            return scheduler;
+        }
+
+        private static TimerScheduler RequireRunningScheduler(string api)
+        {
+            TimerScheduler current = RequireScheduler(api);
+            if (runnerUnavailable)
             {
                 throw new TimerStateException(
-                    $"GameTimer.{api} 被拒绝：UnityTimerRunner 已被外部销毁。" +
+                    $"GameTimer.{api} 被拒绝：UnityTimerRunner 已停止或被销毁。" +
                     "请修复错误生命周期并调用 GameTimer.Shutdown。");
             }
 
-            return scheduler;
+            return current;
         }
 
         private static void DestroyObject(GameObject instance)
@@ -348,7 +358,11 @@ namespace Game.Timer
                     "UnityTimerRunner 未 Initialize，不能 Tick。");
             }
 
-            scheduler.Tick();
+            try { scheduler.Tick(); }
+            catch (Exception exception)
+            {
+                GameTimer.NotifyRunnerUnavailable(this, "因异常停止", exception);
+            }
         }
 
         private void OnDestroy()

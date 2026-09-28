@@ -76,9 +76,16 @@ namespace Game.Pooling
                 throw new ArgumentOutOfRangeException(nameof(targetCount));
             }
 
+            EnsureUsable();
+            ValidateLocation(location);
+            var effectiveOptions = buckets.TryGetValue(location, out var existing)
+                ? existing.Options
+                : pendingLoads.TryGetValue(location, out var pending)
+                    ? pending.Options : options ?? GameObjectPoolOptions.Default;
+            if (targetCount > effectiveOptions.MaxSize)
+                throw new ArgumentOutOfRangeException(nameof(targetCount), "预热数量不能超过 MaxSize。");
             PoolBucket bucket = await GetOrCreateBucketAsync(location, options, cancellationToken);
-            int cappedTarget = Math.Min(targetCount, bucket.Options.MaxSize);
-            if (cappedTarget == 0 || bucket.CountAll >= cappedTarget)
+            if (targetCount == 0 || bucket.CountAll >= targetCount)
             {
                 return;
             }
@@ -87,12 +94,12 @@ namespace Game.Pooling
             bucket.BeginPrewarm();
             try
             {
-                while (bucket.CountAll < cappedTarget)
+                while (bucket.CountAll < targetCount)
                 {
                     bucket.PushInactive(CreateInstance(bucket));
                     createdThisFrame++;
                     if (createdThisFrame < bucket.Options.PrewarmPerFrame ||
-                        bucket.CountAll >= cappedTarget)
+                        bucket.CountAll >= targetCount)
                     {
                         continue;
                     }
@@ -317,9 +324,10 @@ namespace Game.Pooling
             }
 
             disposed = true;
+            var failure = new UIFrame.CleanupFailure();
             foreach (PoolBucket bucket in buckets.Values)
             {
-                bucket.Dispose(force);
+                failure.Run(() => bucket.Dispose(force));
             }
 
             buckets.Clear();
@@ -330,7 +338,7 @@ namespace Game.Pooling
             {
                 if (poolRoot != null)
                 {
-                    DestroyGameObject(poolRoot.gameObject);
+                    failure.Run(() => DestroyGameObject(poolRoot.gameObject));
                 }
             }
             else
@@ -339,12 +347,13 @@ namespace Game.Pooling
                 {
                     if (groupRoot != null)
                     {
-                        DestroyGameObject(groupRoot.gameObject);
+                        failure.Run(() => DestroyGameObject(groupRoot.gameObject));
                     }
                 }
             }
 
             groupRoots.Clear();
+            failure.Throw();
         }
 
         private async UniTask<PoolBucket> GetOrCreateBucketAsync(
@@ -411,21 +420,17 @@ namespace Game.Pooling
                     $"Prefab provider returned null handle for '{location}'.");
             }
 
-            if (disposed)
-            {
-                handle.Dispose();
-                throw new ObjectDisposedException(nameof(GameObjectPoolService));
-            }
-
             try
             {
+                if (disposed) throw new ObjectDisposedException(nameof(GameObjectPoolService));
                 var bucket = new PoolBucket(this, location, handle, pending.Options);
                 buckets.Add(location, bucket);
                 return bucket;
             }
             catch
             {
-                handle.Dispose();
+                try { handle.Dispose(); }
+                catch (Exception cleanupError) { Debug.LogException(cleanupError); }
                 throw;
             }
         }

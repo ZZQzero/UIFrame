@@ -108,6 +108,8 @@ UI.CloseGroup(UIGroup.Scene, destroy: true);  // 销毁并释放 Handle
 
 缓存后再开：只走 `ApplyArgs` → `OnOpen`，**不再** `OnCreate`。
 
+`Push` 暂停旧窗口时，先执行 `OnPause`，成功后才隐藏它。`OnPause` 抛错会中止本次打开并原样传播异常，框架不会继续隐藏旧窗口，也不会自动调用 `OnResume` 或重试回调。回调内已经发生的业务改动由业务处理。
+
 关闭：
 
 ```text
@@ -165,6 +167,8 @@ protected override void OnOpen(ItemArgs args)
 - **严禁** `Destroy(panel.gameObject)`。只能 `UI.Close` / `UI.Destroy` / `CloseSelf` / `CloseAndDestroySelf`。
 - 按钮监听放 `OnCreate`（或 LoopScroll 的 `OnLoopScrollCreated`）；数据刷新放 `OnOpen`。
 - 同类型 `Hud/Push/Popup/Tips/Guide` 单实例；再次打开会复用并再次 `OnOpen`，**不会先 `OnClose`**。
+- 同类型面板正在同步执行打开流程时，回调或旧结果取消的续体不能重入打开该类型，违规直接抛错。
+  打开流程结束后的再次打开与异步加载期间的请求合并保持原有语义。
 - 同类型加载中再次 Open：合并为一次加载，后一次 Args/Mode 生效。
 - **`Tips` 与 `Toast` 不要用同一面板类型**（通道不同，可能同时存在两套实例）。
 - `Back()` 只关 Popup / Window；Hud / Tips / Guide / Toast 需显式 Close。
@@ -394,7 +398,7 @@ public sealed class RankPanel : UILoopScrollBase<RankArgs>
 - `.Gen.cs` 是生成文件，不要手改。删绑定用列表上的 `×`，再「写入脚本」。只 × 不写入时，刷新会按脚本把字段加回来。
 - 刷新不会因为 Prefab 引用空了就删字段，只显示未定位。
 - 绑定列表为空但 `.Gen.cs` 仍有字段时，写入会拒绝（避免 Store 丢失把脚本写成空）。用 `×` 清空后再写入可以。
-- 回填引用只按 LocalFileId 和层级路径，找不到就失败，不猜重名节点。失败不写半份引用；重试仍失败则取消等待。
+- 回填引用只按 LocalFileId 和层级路径，找不到就失败，不猜重名节点。失败不写半份引用，立即终止本批处理并清除失败任务的等待标记；修正后显式重新生成，不自动重试。
 - Prefab Stage 若未保存就关闭，磁盘可能没有组件/引用。
 - 绑定失败时宁可报错；重名节点要靠路径区分，不要依赖同名唯一。
 - Host 按类型名精确匹配；对不上则回填失败，不改去猜别的脚本。
@@ -450,3 +454,11 @@ GamePool.Shutdown();
 | 列表 Cell / 特效多实例 | `GameObjectPool` + `UIItem` |
 | 未读角标 | `RedDot` / `RedDotView` |
 | 切 / 加 / 卸 Unity 场景 | `GameScene`（见 [Scene.md](Scene.md)） |
+
+## 统一失败语义
+
+完整规则见 [ErrorContract.md](ErrorContract.md)。Popup 只有提交结果并完成关闭后才成功；关闭或销毁失败使结果任务失败，无结果的正常关闭才取消。Shutdown 尝试所有清理后抛首个错误，后续错误单独记录。
+
+`LocalizedText.SetKey` 不接受 null 或空字符串，在修改绑定前抛错，原绑定保留。尚未配置 Key 的组件可以保持未绑定状态；这不表示显式传空 Key 可以清除绑定。
+
+多语言空 key、缺 key、当前语言翻译为空及 null 目标均报错；保存的非法语言值也报错，不自动改写。预热数量超过 MaxSize 在加载前拒绝。安全区覆盖值必须有限、非负且位于屏幕内；原生屏幕数据仍按平台规则裁剪。UI Layer 仅 -1 表示使用默认层，其他值必须为 0–31。

@@ -102,28 +102,20 @@ namespace Game.Audio
 
                 state = RuntimeState.Running;
             }
-            catch
+            catch (Exception exception)
             {
-                DisposeResidentLeases();
-                if (driverInitialized)
+                var failure = new UIFrame.CleanupFailure();
+                failure.Capture(exception);
+                failure.Run(DisposeResidentLeases);
+                if (cache != null)
                 {
-                    await cache.WaitForIdleAsync();
-                    driver.Shutdown();
+                    try { await cache.WaitForIdleAsync(); }
+                    catch (Exception cleanupError) { failure.Capture(cleanupError); }
+                    if (driverInitialized) failure.Run(driver.Shutdown);
+                    else failure.Run(cache.Dispose);
                 }
-                else
-                {
-                    cache?.Dispose();
-                }
-
-                config = null;
-                cache = null;
-                driver = null;
-                ownedRoot = null;
-                runtimeCancellation?.Dispose();
-                runtimeCancellation = null;
-                state = RuntimeState.None;
-                DestroyObject(rootObject);
-                throw;
+                failure.Run(() => ResetRuntime(rootObject));
+                failure.Throw();
             }
         }
 
@@ -310,28 +302,21 @@ namespace Game.Audio
         public static async UniTask ShutdownAsync()
         {
             RequireMainThread(nameof(ShutdownAsync));
-            if (state == RuntimeState.Running)
-            {
-                BeginShutdown();
-            }
-            else if (state == RuntimeState.ShuttingDown)
-            {
-                throw new AudioStateException(
-                    "GameAudio.ShutdownAsync 不允许并发或重复调用。");
-            }
-            else
-            {
-                throw new AudioStateException(
-                    "GameAudio.ShutdownAsync 只能在成功 InitAsync 后调用一次。");
-            }
+            if (state != RuntimeState.Running)
+                throw new AudioStateException("GameAudio.ShutdownAsync 只能在成功 InitAsync 后调用一次，不允许重入。");
 
-            if (pendingOperations != 0)
+            state = RuntimeState.ShuttingDown;
+            bgmRequestGate.Invalidate();
+            var failure = new UIFrame.CleanupFailure();
+            failure.Run(runtimeCancellation.Cancel);
+            try
             {
-                await operationsIdle.Task;
+                if (pendingOperations != 0) await operationsIdle.Task;
+                await cache.WaitForIdleAsync();
             }
-
-            await cache.WaitForIdleAsync();
-            CompleteShutdown();
+            catch (Exception exception) { failure.Capture(exception); }
+            failure.Run(CompleteShutdown);
+            failure.Throw();
         }
 
         [RuntimeInitializeOnLoadMethod(RuntimeInitializeLoadType.SubsystemRegistration)]
@@ -423,22 +408,23 @@ namespace Game.Audio
             AudioClipCache.AudioClipLease lease = null;
             bool transferred = false;
             CancellationTokenSource linkedCancellation = null;
-            CancellationToken operationCancellation;
-            if (cancellationToken.CanBeCanceled)
-            {
-                linkedCancellation =
-                    CancellationTokenSource.CreateLinkedTokenSource(
-                        cancellationToken,
-                        runtimeCancellation.Token);
-                operationCancellation = linkedCancellation.Token;
-            }
-            else
-            {
-                operationCancellation = runtimeCancellation.Token;
-            }
-
+            Exception operationFailure = null;
             try
             {
+                CancellationToken operationCancellation;
+                if (cancellationToken.CanBeCanceled)
+                {
+                    linkedCancellation =
+                        CancellationTokenSource.CreateLinkedTokenSource(
+                            cancellationToken,
+                            runtimeCancellation.Token);
+                    operationCancellation = linkedCancellation.Token;
+                }
+                else
+                {
+                    operationCancellation = runtimeCancellation.Token;
+                }
+
                 lease = await cache.AcquireAsync(
                     entry.Location,
                     entry.LoadMode,
@@ -475,15 +461,25 @@ namespace Game.Audio
 
                 return result;
             }
+            catch (Exception exception)
+            {
+                operationFailure = exception;
+                throw;
+            }
             finally
             {
+                var failure = new UIFrame.CleanupFailure();
+                if (operationFailure != null) failure.Capture(operationFailure);
                 if (!transferred)
                 {
-                    lease?.Dispose();
+                    try { lease?.Dispose(); }
+                    catch (Exception exception) { failure.Capture(exception); }
                 }
-
-                linkedCancellation?.Dispose();
-                EndOperation();
+                try { linkedCancellation?.Dispose(); }
+                catch (Exception exception) { failure.Capture(exception); }
+                try { EndOperation(); }
+                catch (Exception exception) { failure.Capture(exception); }
+                if (operationFailure == null) failure.Throw();
             }
         }
 
@@ -573,30 +569,33 @@ namespace Game.Audio
             }
         }
 
-        private static void BeginShutdown()
-        {
-            state = RuntimeState.ShuttingDown;
-            bgmRequestGate.Invalidate();
-            runtimeCancellation.Cancel();
-        }
-
         private static void CompleteShutdown()
         {
-            GameObject rootObject =
-                ownedRoot != null ? ownedRoot.gameObject : null;
-            DisposeResidentLeases();
-            driver.Shutdown();
+            var rootObject = ownedRoot != null ? ownedRoot.gameObject : null;
+            var failure = new UIFrame.CleanupFailure();
+            failure.Run(DisposeResidentLeases);
+            failure.Run(driver.Shutdown);
+            failure.Run(() => ResetRuntime(rootObject));
+            failure.Throw();
+        }
 
+        private static void ResetRuntime(GameObject rootObject)
+        {
+            var cancellation = runtimeCancellation;
             config = null;
             cache = null;
             driver = null;
             ownedRoot = null;
-            runtimeCancellation.Dispose();
             runtimeCancellation = null;
             operationsIdle = null;
             pendingOperations = 0;
+            var failure = new UIFrame.CleanupFailure();
+            try { cancellation?.Dispose(); }
+            catch (Exception exception) { failure.Capture(exception); }
+            try { DestroyObject(rootObject); }
+            catch (Exception exception) { failure.Capture(exception); }
             state = RuntimeState.None;
-            DestroyObject(rootObject);
+            failure.Throw();
         }
 
         private static AudioRuntimeDriver RequireDriver(string api)
@@ -656,12 +655,15 @@ namespace Game.Audio
 
         private static void DisposeResidentLeases()
         {
-            for (int i = ResidentLeases.Count - 1; i >= 0; i--)
+            var failure = new UIFrame.CleanupFailure();
+            while (ResidentLeases.Count > 0)
             {
-                ResidentLeases[i].Dispose();
+                int index = ResidentLeases.Count - 1;
+                var lease = ResidentLeases[index];
+                ResidentLeases.RemoveAt(index);
+                failure.Run(lease.Dispose);
             }
-
-            ResidentLeases.Clear();
+            failure.Throw();
         }
 
         private static void RequireMainThread(string api)

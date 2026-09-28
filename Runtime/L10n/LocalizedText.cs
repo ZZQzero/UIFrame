@@ -1,3 +1,4 @@
+using System;
 using TMPro;
 using UnityEngine;
 using UnityEngine.UI;
@@ -16,6 +17,8 @@ namespace Game.L10n
 
         public void SetKey(string newKey)
         {
+            if (string.IsNullOrEmpty(newKey))
+                throw new ArgumentException("[L10n] Key 不能为空。", nameof(newKey));
             key = newKey;
             Apply();
         }

@@ -14,9 +14,6 @@ namespace Game.L10n
         static readonly List<LocalizedText> ActiveTexts = new();
         static readonly List<LanguageResponsiveText> ActiveLayouts = new();
         static readonly ConditionalWeakTable<TMP_Text, AlignmentState> savedAlignment = new();
-#if UNITY_EDITOR || DEVELOPMENT_BUILD
-        static readonly HashSet<string> WarnedKeys = new();
-#endif
 
         public static event Action<GameLanguage> LanguageChanged;
 
@@ -26,11 +23,13 @@ namespace Game.L10n
 
         public static void Init(Dictionary<string, LanguageTexts> rows)
         {
-            table = rows ?? throw new ArgumentNullException(nameof(rows));
-            Current = ReadSavedLanguage();
-#if UNITY_EDITOR || DEVELOPMENT_BUILD
-            WarnedKeys.Clear();
-#endif
+            if (rows == null) throw new ArgumentNullException(nameof(rows));
+            foreach (var key in rows.Keys)
+                if (string.IsNullOrEmpty(key))
+                    throw new ArgumentException("[L10n] Key 不能为空。", nameof(rows));
+            var language = ReadSavedLanguage();
+            table = new Dictionary<string, LanguageTexts>(rows, rows.Comparer);
+            Current = language;
             RefreshTexts();
             LanguageChanged?.Invoke(Current);
             RefreshLayouts();
@@ -70,9 +69,6 @@ namespace Game.L10n
             }
 
             table = merged;
-#if UNITY_EDITOR || DEVELOPMENT_BUILD
-            WarnedKeys.Clear();
-#endif
             RefreshTexts();
             RefreshLayouts();
         }
@@ -85,9 +81,6 @@ namespace Game.L10n
             ActiveLayouts.Clear();
             LanguageChanged = null;
             savedAlignment.Clear();
-#if UNITY_EDITOR || DEVELOPMENT_BUILD
-            WarnedKeys.Clear();
-#endif
         }
 
         internal static void ValidateLanguage(GameLanguage language)
@@ -119,13 +112,12 @@ namespace Game.L10n
             EnsureInited();
             if (string.IsNullOrEmpty(key))
             {
-                return string.Empty;
+                throw new ArgumentException("[L10n] Key 不能为空。", nameof(key));
             }
 
             if (!table.TryGetValue(key, out var texts))
             {
-                WarnMissing(key, "missing or empty");
-                return key;
+                throw new KeyNotFoundException($"[L10n] 找不到 Key={key}。");
             }
 
             return Pick(key, in texts);
@@ -139,23 +131,14 @@ namespace Game.L10n
                 throw new ArgumentNullException(nameof(args));
             }
 
-            try
-            {
-                return string.Format(template, args);
-            }
-            catch (FormatException exception)
-            {
-                throw new FormatException(
-                    $"[L10n] 格式错误: Key={key}, Language={Current}, Template={template}, ArgumentCount={args.Length}。",
-                    exception);
-            }
+            return string.Format(template, args);
         }
 
         public static void SetText(TMP_Text text, string key)
         {
             if (text == null)
             {
-                return;
+                throw new ArgumentNullException(nameof(text));
             }
 
             text.text = Get(key);
@@ -166,7 +149,7 @@ namespace Game.L10n
         {
             if (text == null)
             {
-                return;
+                throw new ArgumentNullException(nameof(text));
             }
 
             text.text = Format(key, args);
@@ -177,7 +160,7 @@ namespace Game.L10n
         {
             if (text == null)
             {
-                return;
+                throw new ArgumentNullException(nameof(text));
             }
 
             bool rtl = Current == GameLanguage.ArSA;
@@ -325,18 +308,9 @@ namespace Game.L10n
         {
             if (PlayerPrefs.HasKey(PrefsKey))
             {
-                int stored = PlayerPrefs.GetInt(PrefsKey, (int)GameLanguage.ZhCN);
-                if (stored == (int)GameLanguage.EnUS)
-                {
-                    return GameLanguage.EnUS;
-                }
-
-                if (stored == (int)GameLanguage.ArSA)
-                {
-                    return GameLanguage.ArSA;
-                }
-
-                return GameLanguage.ZhCN;
+                var stored = (GameLanguage)PlayerPrefs.GetInt(PrefsKey);
+                ValidateLanguage(stored);
+                return stored;
             }
 
             var sys = Application.systemLanguage;
@@ -376,13 +350,7 @@ namespace Game.L10n
                 return primary;
             }
 
-            WarnMissing(key, "empty text for");
-            if (Current != GameLanguage.EnUS && !string.IsNullOrEmpty(row.EnUS))
-            {
-                return row.EnUS;
-            }
-
-            return string.IsNullOrEmpty(row.ZhCN) ? key : row.ZhCN;
+            throw new InvalidOperationException($"[L10n] 翻译为空: Key={key}, Language={Current}。");
         }
 
         static void EnsureInited()
@@ -391,18 +359,6 @@ namespace Game.L10n
             {
                 throw new InvalidOperationException("LanguageManager 未初始化。");
             }
-        }
-
-        static void WarnMissing(string key, string reason)
-        {
-#if UNITY_EDITOR || DEVELOPMENT_BUILD
-            if (!WarnedKeys.Add(key + "/" + Current + "/" + reason))
-            {
-                return;
-            }
-
-            Debug.LogWarning($"[Language] {reason} key: {key}, lang={Current}");
-#endif
         }
 
         sealed class AlignmentState

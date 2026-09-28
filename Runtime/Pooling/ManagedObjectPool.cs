@@ -1,23 +1,24 @@
 using System;
+using System.Collections.Generic;
 using System.Runtime.CompilerServices;
-using UnityEngine.Pool;
 
 namespace Game.Pooling
 {
-    /// <summary>
-    /// 可配置的主线程托管对象池。稳态 Get/Release 不产生托管分配。
-    /// </summary>
+    /// <summary>主线程托管对象池。稳态 Get/Release 不产生托管分配。</summary>
     public sealed class ManagedObjectPool<T> : IDisposable where T : class
     {
-        private readonly ObjectPool<T> pool;
-        private readonly Func<T> create;
-        private readonly Action<T> onRent;
-        private readonly Action<T> onReturn;
-        private readonly Action<T> onDestroy;
-
-        private bool disposed;
-        private int totalCreated;
-        private int totalDestroyed;
+        readonly List<T> inactive;
+        readonly Func<T> create;
+        readonly Action<T> onRent;
+        readonly Action<T> onReturn;
+        readonly Action<T> onDestroy;
+        readonly int maxSize;
+        readonly bool collectionCheck;
+        bool disposed;
+        bool inCallback;
+        int activeCount;
+        int totalCreated;
+        int totalDestroyed;
 
         public ManagedObjectPool(
             Func<T> create,
@@ -30,101 +31,105 @@ namespace Game.Pooling
             this.onRent = onRent;
             this.onReturn = onReturn;
             this.onDestroy = onDestroy;
-
-            ManagedPoolOptions value = options ?? ManagedPoolOptions.Default;
-            pool = new ObjectPool<T>(
-                Create,
-                OnRent,
-                OnReturn,
-                OnDestroy,
-                value.CollectionCheck && UIFrame.UIFrameSafety.CollectionChecks,
-                value.InitialCapacity,
-                value.MaxSize);
+            var value = options ?? ManagedPoolOptions.Default;
+            inactive = new List<T>(value.InitialCapacity);
+            maxSize = value.MaxSize;
+            collectionCheck = value.CollectionCheck && UIFrame.UIFrameSafety.CollectionChecks;
         }
 
-        public int CountAll => pool.CountAll;
-        public int CountActive => pool.CountActive;
-        public int CountInactive => pool.CountInactive;
+        public int CountAll => activeCount + inactive.Count;
+        public int CountActive => activeCount;
+        public int CountInactive => inactive.Count;
+        public PoolStats Stats => new(CountAll, CountActive, CountInactive, totalCreated, totalDestroyed);
 
-        public PoolStats Stats => new(
-            pool.CountAll,
-            pool.CountActive,
-            pool.CountInactive,
-            totalCreated,
-            totalDestroyed);
-
-        [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public T Get()
         {
-            ThrowIfDisposed();
-            return pool.Get();
+            EnsureUsable();
+            T item;
+            if (inactive.Count > 0) item = TakeInactive();
+            else
+            {
+                inCallback = true;
+                try { item = create(); }
+                finally { inCallback = false; }
+                if (item == null) throw new InvalidOperationException("Pool factory returned null.");
+                totalCreated++;
+            }
+            activeCount++;
+            try { Invoke(onRent, item); }
+            catch
+            {
+                activeCount--;
+                try { DestroyItem(item); }
+                catch (Exception cleanupError) { UnityEngine.Debug.LogException(cleanupError); }
+                throw;
+            }
+            return item;
         }
 
-        [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public void Release(T item)
         {
-            ThrowIfDisposed();
-
-            if (item == null)
-            {
-                throw new ArgumentNullException(nameof(item));
-            }
-
-            pool.Release(item);
+            EnsureUsable();
+            if (item == null) throw new ArgumentNullException(nameof(item));
+            if (collectionCheck)
+                foreach (var idle in inactive)
+                    if (ReferenceEquals(idle, item))
+                        throw new InvalidOperationException("Object has already been released to this pool.");
+            Invoke(onReturn, item);
+            activeCount--;
+            if (inactive.Count < maxSize) inactive.Add(item);
+            else DestroyItem(item);
         }
 
+        /// <summary>逐个移除并销毁闲置对象；失败即停止，未处理对象保留。</summary>
         public void Clear()
         {
-            ThrowIfDisposed();
-            pool.Clear();
+            EnsureUsable();
+            while (inactive.Count > 0) DestroyItem(TakeInactive());
         }
 
         public void Dispose()
         {
-            if (disposed)
-            {
-                return;
-            }
-
+            if (disposed) return;
+            EnsureUsable();
             disposed = true;
-            pool.Dispose();
+            var failure = new UIFrame.CleanupFailure();
+            while (inactive.Count > 0)
+            {
+                var item = TakeInactive();
+                try { DestroyItem(item); }
+                catch (Exception exception) { failure.Capture(exception); }
+            }
+            failure.Throw();
         }
 
-        private T Create()
+        T TakeInactive()
         {
-            T item = create();
-            if (item == null)
-            {
-                throw new InvalidOperationException("Pool factory returned null.");
-            }
-
-            totalCreated++;
+            var index = inactive.Count - 1;
+            var item = inactive[index];
+            inactive.RemoveAt(index);
             return item;
         }
 
-        private void OnRent(T item)
-        {
-            onRent?.Invoke(item);
-        }
-
-        private void OnReturn(T item)
-        {
-            onReturn?.Invoke(item);
-        }
-
-        private void OnDestroy(T item)
+        void DestroyItem(T item)
         {
             totalDestroyed++;
-            onDestroy?.Invoke(item);
+            Invoke(onDestroy, item);
+        }
+
+        void Invoke(Action<T> callback, T item)
+        {
+            if (callback == null) return;
+            inCallback = true;
+            try { callback(item); }
+            finally { inCallback = false; }
         }
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        private void ThrowIfDisposed()
+        void EnsureUsable()
         {
-            if (disposed)
-            {
-                throw new ObjectDisposedException(nameof(ManagedObjectPool<T>));
-            }
+            if (disposed) throw new ObjectDisposedException(nameof(ManagedObjectPool<T>));
+            if (inCallback) throw new InvalidOperationException("Pool cannot be mutated inside its lifecycle callbacks.");
         }
     }
 

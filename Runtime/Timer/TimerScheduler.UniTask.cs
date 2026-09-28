@@ -14,6 +14,7 @@ namespace Game.Timer
         private readonly Queue<TimerDelayPromise> delayCompletions = new();
         private int pendingDelayCount;
         private bool drainingDelayCompletions;
+        private Exception delayFailure;
 
         public async UniTask DelayAsync(
             long delayMs,
@@ -52,6 +53,25 @@ namespace Game.Timer
         private static void OnDelayCompleted(in TimerContext context)
         {
             ((TimerDelayPromise)context.State).CompleteSuccessfully();
+        }
+
+        internal void FailPendingDelays(Exception failure)
+        {
+            EnsureOwnerThread();
+            delayFailure = failure;
+            // 先解除所有节点和取消注册，再交付结果，续体不能观察到半完成的收尾。
+            for (int i = 0; i < nodes.Length; i++)
+            {
+                if (nodes[i].State is not TimerDelayPromise promise)
+                    continue;
+                RemoveFromContainer(i);
+                FreeNode(i, false);
+                promise.Fail();
+            }
+            DiscardExternalCancellations();
+            // 宿主可能在 Timer 回调内被禁用；此时仍由 Tick 的 finally 交付结果。
+            if (!ticking)
+                DrainDelayCompletions(true);
         }
 
         private void DrainExternalCancellations()
@@ -175,6 +195,7 @@ namespace Game.Timer
             private const int Pending = 0;
             private const int Succeeded = 1;
             private const int Canceled = 2;
+            private const int Faulted = 3;
 
             private readonly TimerScheduler scheduler;
             private readonly CancellationToken cancellationToken;
@@ -249,6 +270,13 @@ namespace Game.Timer
                 QueueCompletion();
             }
 
+            public void Fail()
+            {
+                Interlocked.CompareExchange(ref outcome, Faulted, Pending);
+                registration.Dispose();
+                QueueCompletion();
+            }
+
             public void CompleteTask()
             {
                 scheduler.ReleaseDelayPromise();
@@ -262,6 +290,12 @@ namespace Game.Timer
                 if (value == Canceled)
                 {
                     completion.TrySetCanceled(cancellationToken);
+                    return;
+                }
+
+                if (value == Faulted)
+                {
+                    completion.TrySetException(scheduler.delayFailure);
                     return;
                 }
 

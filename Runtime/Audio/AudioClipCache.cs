@@ -114,7 +114,8 @@ namespace Game.Audio
             catch
             {
                 await UniTask.SwitchToMainThread();
-                Release(entry);
+                try { Release(entry); }
+                catch (Exception cleanupError) { Debug.LogException(cleanupError); }
                 throw;
             }
         }
@@ -214,13 +215,16 @@ namespace Game.Audio
             }
 
             disposed = true;
+            var failure = new UIFrame.CleanupFailure();
             foreach (CacheEntry entry in entries.Values)
             {
-                entry.Handle?.Dispose();
+                var handle = entry.Handle;
                 entry.Handle = null;
+                entry.Clip = null;
+                if (handle != null) failure.Run(handle.Dispose);
             }
-
             entries.Clear();
+            failure.Throw();
         }
 
         private void BeginLoad(CacheEntry entry)
@@ -237,58 +241,45 @@ namespace Game.Audio
 
         private async UniTask LoadCoreAsync(CacheEntry entry)
         {
-            IAudioClipHandle handle = null;
             try
             {
-                handle = provider.Load(entry.Location);
-                entry.Handle = handle;
-                await handle.Completion;
-                await UniTask.SwitchToMainThread();
-                if (!handle.Succeeded)
+                AudioClip clip;
+                try
                 {
-                    throw new InvalidOperationException(
-                        $"加载 AudioClip 失败：{entry.Location}，{handle.Error}");
+                    var handle = provider.Load(entry.Location);
+                    entry.Handle = handle;
+                    await handle.Completion;
+                    await UniTask.SwitchToMainThread();
+                    if (!handle.Succeeded)
+                        throw new InvalidOperationException($"加载 AudioClip 失败：{entry.Location}，{handle.Error}");
+                    clip = handle.Clip;
+                    if (clip == null)
+                        throw new InvalidOperationException($"资源 '{entry.Location}' 不是有效的 AudioClip。");
                 }
-
-                AudioClip clip = handle.Clip;
-                if (clip == null)
+                catch (Exception exception)
                 {
-                    throw new InvalidOperationException(
-                        $"资源 '{entry.Location}' 不是有效的 AudioClip。");
+                    await UniTask.SwitchToMainThread();
+                    var handle = entry.Handle;
+                    entry.Handle = null;
+                    entries.Remove(entry.Location);
+                    try { handle?.Dispose(); }
+                    catch (Exception cleanupError) { Debug.LogException(cleanupError); }
+                    entry.Completion.TrySetException(exception);
+                    return;
                 }
 
                 entry.IsLoaded = true;
                 entry.Clip = clip;
                 entry.Completion.TrySetResult(clip);
-
-                if (entry.PendingSceneUnload &&
-                    entry.ReferenceCount == 0 &&
-                    entries.TryGetValue(entry.Location, out CacheEntry current) &&
-                    ReferenceEquals(current, entry))
-                {
+                if (entry.PendingSceneUnload && entry.ReferenceCount == 0
+                    && entries.TryGetValue(entry.Location, out var current)
+                    && ReferenceEquals(current, entry))
                     ReleaseEntry(entry);
-                }
-            }
-            catch (Exception exception)
-            {
-                await UniTask.SwitchToMainThread();
-                handle?.Dispose();
-                entry.Handle = null;
-                if (entries.TryGetValue(entry.Location, out CacheEntry current) &&
-                    ReferenceEquals(current, entry))
-                {
-                    entries.Remove(entry.Location);
-                }
-
-                entry.Completion.TrySetException(exception);
             }
             finally
             {
                 loadingCount--;
-                if (loadingCount == 0)
-                {
-                    idleCompletion.TrySetResult();
-                }
+                if (loadingCount == 0) idleCompletion.TrySetResult();
             }
         }
 
@@ -337,10 +328,11 @@ namespace Game.Audio
                     $"音频 '{entry.Location}' 尚不满足释放条件。");
             }
 
-            entry.Handle.Dispose();
+            var handle = entry.Handle;
             entry.Handle = null;
             entry.Clip = null;
             entries.Remove(entry.Location);
+            handle.Dispose();
         }
 
         private void ThrowIfDisposed()
@@ -377,9 +369,11 @@ namespace Game.Audio
                         "AudioClipLease 不允许重复 Dispose。");
                 }
 
-                owner.Release(entry);
+                var currentOwner = owner;
+                var currentEntry = entry;
                 owner = null;
                 entry = null;
+                currentOwner.Release(currentEntry);
             }
         }
 

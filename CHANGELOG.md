@@ -4,6 +4,10 @@ All notable changes to this package will be documented in this file.
 
 ## [Unreleased]
 
+- LanguageManager.Format 移除格式异常的二次包装，保留原始异常身份与堆栈。
+
+- Timer 自动 Runner 故障后终结未完成 Delay 并保留原异常；取消、Owner 释放与查询仍可执行。业务调度保持停止，恢复仍须显式 Shutdown/Init。
+
 ### Framework extensions
 
 - 新增 UI.CanvasRoot、RootReady、PanelShown；明确根节点所有权、事件触发时机、异常传播和退订契约。RootReady 失败可靠清理，回调中 Shutdown 取消 Init；PanelShown 回调中 Shutdown 取消打开。
@@ -12,6 +16,12 @@ All notable changes to this package will be documented in this file.
 
 ### Correctness and failure contracts
 
+- 修复 Popup 取消旧结果时的同类型重入，防止新结果任务丢失；空本地化 Key 在修改绑定前拒绝。
+- 托管池 Clear 先移除再销毁，失败后仅保留未处理对象；取出失败清理未交付对象，稳态取还不分配。
+- 音频加载与释放双重失败保留原异常并结束全部等待者；退出完成全部清理，播放收尾错误不阻塞退出，不重复释放。
+- `OnPause` 成功后才隐藏窗口；暂停失败中止打开并传播原异常，不自动恢复或重试业务回调。
+- Single 加载与 Reload 共用未登记句柄收尾，旧场清理失败时也释放新句柄；次级释放错误不替换首次异常。
+- 图片回归测试使用包内 Sprite，通过程序集定位包路径，不再依赖宿主 `Assets/UIFrameTest` 资源。
 - 普通面板销毁不再吞回调异常；关闭失败实例保留供排查，禁止缓存复用；CTS 和结果通道可靠终结，保留首异常。
 - 关闭成功后才移除导航栈，失败面板的显式销毁共用正常收尾；Back／分组关闭不跳过失败实例，Toast 失败不提前释放名额，回调内 Shutdown 不遗漏当前面板的销毁。
 - 销毁回调失败保留诊断状态，重复销毁不返回假成功；新增失败后连续操作、重入和首异常保留的 Unity 回归用例。
@@ -147,3 +157,9 @@ All notable changes to this package will be documented in this file.
 - Initial UPM package structure.
 - Runtime and Editor assembly definitions.
 - Panel lifecycle, stack, cache, YooAsset loading, orientation, and code-generation support.
+
+### 统一错误处理契约
+- 新增 AGENTS.md 与 Docs/ErrorContract.md：显式错误、成功提交时机、资源所有权与完整清理。
+- Popup 等关闭完成后交付结果；Shutdown 完成所有清理后传播首个失败。
+- 红点和 Timer 回调失败中止当前派发；移除 TimerExceptionPolicy/WithExceptionPolicy。
+- 移除缺失翻译替换、编辑器回填自动重试、预热容量截断及非法显式参数自动纠正。

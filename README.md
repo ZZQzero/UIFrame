@@ -220,15 +220,17 @@ LanguageManager.AddTable(activityTable);
 
 ## 错误与生命周期契约
 
+统一规则见 [错误处理契约](Docs/ErrorContract.md)，开发要求见 [AGENTS.md](AGENTS.md)。
+
 - 普通 Close / Destroy / ClearCache 的业务回调失败会传播给调用方。失败后不自动重试，也不继续依赖成功关闭的 Resume 或队列推进。
 - OnClose 或打开生命周期取消失败时，面板不进入正常缓存，实例与首次异常仍由管理器保留；同类型重新 Open 会明确报错。定位原因后可显式 Destroy 释放，销毁不会重跑失败的 OnClose。
 - Window / Popup 只有关闭成功后才移出导航栈。关闭中或失败的实例会阻止相关 Back、遮罩点击及新的导航操作；独立 Hud 不受影响。显式 Destroy 成功后统一更新遮罩并恢复上一窗口。
 - CloseGroup 在处理成员前检查同组关闭中／失败状态，普通关闭不会遗漏失败成员；窗口按栈底到栈顶的顺序关闭，避免恢复本组内接下来还要关闭的窗口。显式销毁按同一关闭流程收尾。关闭中或失败的 Toast 继续占用展示名额，销毁成功后才释放。
 - 关闭／显式销毁中的 OnDestroyPanel 若失败，必要对象／句柄清理仍执行，但失败登记不会消失；重复 Destroy 不会伪装成成功或重跑销毁回调，应排查错误后 Shutdown。Shutdown 从关闭回调内触发时，当前关闭负责在回调退出后完成自身销毁，原异常仍向外传播。
-- ClearCache 首次失败即停止；尚未处理的对象仍在缓存中。最终 Shutdown 单独记录错误并收尾。
+- ClearCache 首次失败即停止；尚未处理的对象仍在缓存中。最终 Shutdown 尝试全部清理后传播首个异常，次级错误单独记录。
 - 取消回调失败仍会 Dispose 当前 CTS，并终结结果等待。必要收尾再失败时记录次级异常，调用方仍收到首异常及其堆栈。
 - 方向参数必须是已定义枚举；空栈 Pop 抛错，主动重置请使用 ResetTo。Initialize 后首次显式 Set 即使方向相同也会应用设备配置。
-- LanguageManager.Format 的格式错误会抛出带 key、语言、模板及参数数量的异常；非法语言值不会写入状态或 PlayerPrefs。缺翻译的既有内容降级策略保留，在 Editor / Development 中告警。
+- LanguageManager.Format 直接传播 string.Format 的原始异常，不重新包装或返回错误模板；非法语言值不会写入状态或 PlayerPrefs。空 key、缺 key、缺翻译及 null 文本目标直接抛错，不替换语言或文本。
 - UIFrame 拥有自己的 EventSystem；Init 前发现现有 EventSystem（包括禁用对象）会拒绝初始化，不自动接管或删除。
 - UIFrameSafety 的 ThreadChecks 只覆盖显式接入该检查的模块，不会为 UI 或 GameScene 自动切线程；这些 API 仍要求主线程调用。
 
@@ -240,4 +242,6 @@ LanguageManager.AddTable(activityTable);
 
 `UI.CanvasRoot` 提供框架拥有的 Canvas 根节点；`RootReady` 在根与管理器初始化后触发，`PanelShown` 在面板激活并同步执行完 OnOpen 后触发（包含重开，不包含 Resume）。这些事件不等待异步内容、布局或动画完成，静态订阅需由订阅者管理，完整契约见 [Docs/USAGE.md](Docs/USAGE.md)。
 
-`GameScene.ReloadAsync` 重载当前场景，遵守预加载互斥；`WaitForIdleAsync` 等待当前操作收尾，不代表加载成功。加载调用方、多个等待方与 Shutdown 可以同时等待同一次操作，原始错误仍交给加载调用方。内置场进入内容场继续显式使用 `LoadAsync(..., Single)`，详见 [Docs/Scene.md](Docs/Scene.md)。
+`GameScene.ReloadAsync` 重载当前场景，遵守预加载互斥；`WaitForIdleAsync` 等待当前操作收尾，不代表加载成功。加载调用方、多个等待方与 Shutdown 可以同时等待同一次操作，原始错误交给加载调用方；等待中的 Shutdown 也在清空状态后传播该错误。内置场进入内容场继续显式使用 `LoadAsync(..., Single)`，详见 [Docs/Scene.md](Docs/Scene.md)。
+
+Popup 结果仅在提交结果且整个关闭操作成功后完成；关闭或销毁失败使等待任务失败，未提交结果的正常关闭才取消。Timer 回调失败终止 Tick 并释放失败计时器，不再提供异常 Continue 策略。

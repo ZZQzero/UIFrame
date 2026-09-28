@@ -56,6 +56,100 @@ namespace UIFrame.Regression
             return original;
         }
 
+        [Test] public void ResultWaiterReportsResumeFailureAfterClose()
+        {
+            var previous = Open<LifecycleFirstPanel>(UIOpenMode.Push);
+            var current = Open<LifecycleSecondPanel>(UIOpenMode.Push);
+            var primary = new InvalidOperationException("resume-primary");
+            previous.ResumeAction = () => throw primary;
+            var result = current.WaitResultAsync();
+            Assert.AreSame(primary, Assert.Throws<InvalidOperationException>(() => manager.CloseInstance(current, false)));
+            Assert.AreSame(primary, Assert.Throws<InvalidOperationException>(() => result.GetAwaiter().GetResult()));
+        }
+
+        [Test] public void ResumeCannotReopenPanelWhoseCloseHasNotCompleted()
+        {
+            var previous = Open<LifecycleFirstPanel>(UIOpenMode.Push);
+            var current = Open<LifecycleSecondPanel>(UIOpenMode.Push);
+            int reopens = 0;
+            current.OpenAction = () => reopens++;
+            previous.ResumeAction = () => manager.Open<LifecycleSecondPanel, UINone>(UIOpenMode.Push, UINone.Value).GetAwaiter().GetResult();
+            var result = current.WaitResultAsync();
+            var primary = Assert.Throws<InvalidOperationException>(() => manager.CloseInstance(current, false));
+            Assert.AreSame(primary, Assert.Throws<InvalidOperationException>(() => result.GetAwaiter().GetResult()));
+            Assert.AreEqual(0, reopens);
+            Assert.IsEmpty(Field<HashSet<UIPanel>>(manager, "_closingPanels"));
+        }
+
+        [TestCase(false)] [TestCase(true)]
+        public void FailedPauseKeepsCurrentWindowAndOriginalError(bool cleanupFailure)
+        {
+            var previous = Open<LifecycleFirstPanel>(UIOpenMode.Push);
+            var next = Prepare<LifecycleSecondPanel>(UIOpenMode.Push);
+            var primary = new InvalidOperationException("pause-primary");
+            previous.PauseAction = () => throw primary;
+            int opens = 0;
+            next.OpenAction = () => opens++;
+            if (cleanupFailure)
+            {
+                next.DestroyAction = () => throw new InvalidOperationException("pause-cleanup-secondary");
+                LogAssert.Expect(LogType.Exception, new Regex("pause-cleanup-secondary"));
+            }
+
+            Assert.AreSame(primary, Assert.Throws<InvalidOperationException>(() =>
+                manager.Open<LifecycleSecondPanel, UINone>(UIOpenMode.Push, UINone.Value)
+                    .GetAwaiter().GetResult()));
+            Assert.IsTrue(previous.gameObject.activeSelf);
+            Assert.AreSame(previous, manager.Get<LifecycleFirstPanel>());
+            Assert.AreEqual(1, previous.PauseCount);
+            Assert.AreEqual(0, previous.ResumeCount, "失败不自动恢复或重试业务回调");
+            Assert.AreEqual(0, previous.CloseCount);
+            Assert.AreEqual(0, opens);
+            Assert.AreEqual(0, next.CloseCount);
+            Assert.AreEqual(1, next.DestroyCount);
+            Assert.IsFalse(manager.IsOpen<LifecycleSecondPanel>());
+
+            manager.Back();
+            Assert.AreEqual(1, previous.CloseCount, "失败的新窗口不能残留在导航栈");
+        }
+
+        [Test] public void PushPausesBeforeHidingAndBackResumesPreviousWindow()
+        {
+            var previous = Open<LifecycleFirstPanel>(UIOpenMode.Push);
+            previous.PauseAction = () => Assert.IsTrue(previous.gameObject.activeSelf);
+            var next = Open<LifecycleSecondPanel>(UIOpenMode.Push);
+            Assert.AreEqual(1, previous.PauseCount);
+            Assert.IsFalse(previous.gameObject.activeSelf);
+            Assert.IsTrue(next.gameObject.activeSelf);
+            manager.Back();
+            Assert.IsTrue(previous.gameObject.activeSelf);
+            Assert.AreEqual(1, previous.ResumeCount);
+            Assert.AreEqual(1, next.CloseCount);
+        }
+
+        [TestCase(false)] [TestCase(true)]
+        public void ShutdownDuringPauseEndsOpenAndDestroysBothPanels(bool callbackFailure)
+        {
+            var previous = Open<LifecycleFirstPanel>(UIOpenMode.Push);
+            var next = Prepare<LifecycleSecondPanel>(UIOpenMode.Push);
+            var primary = new InvalidOperationException("pause-shutdown-primary");
+            previous.PauseAction = () =>
+            {
+                manager.Shutdown();
+                if (callbackFailure) throw primary;
+            };
+            TestDelegate open = () => manager.Open<LifecycleSecondPanel, UINone>(
+                UIOpenMode.Push, UINone.Value).GetAwaiter().GetResult();
+            if (callbackFailure)
+                Assert.AreSame(primary, Assert.Throws<InvalidOperationException>(open));
+            else
+                Assert.Throws<OperationCanceledException>(open);
+            Assert.IsFalse(manager.IsInited);
+            Assert.AreEqual(1, previous.DestroyCount);
+            Assert.AreEqual(1, next.DestroyCount);
+            Assert.AreEqual(0, previous.ResumeCount);
+        }
+
         [TestCase(false)] [TestCase(true)]
         public void ExplicitDestroyOfFailedWindowRestoresPreviousWindow(bool byType)
         {
@@ -272,7 +366,8 @@ namespace UIFrame.Regression
             foreach (var panel in panels)
             {
                 if (panel == null) continue;
-                panel.CloseAction = panel.DestroyAction = panel.OpenAction = panel.CompleteAction = null;
+                panel.CloseAction = panel.DestroyAction = panel.OpenAction = panel.CompleteAction =
+                    panel.PauseAction = panel.ResumeAction = null;
             }
             manager.Shutdown();
             foreach (var panel in panels)

@@ -38,6 +38,67 @@ namespace UIFrame.Regression
             else PlayerPrefs.DeleteKey(PrefsKey);
         }
 
+        [TestCase(null)] [TestCase("")]
+        public void EmptyComponentKeyIsRejectedBeforeChangingBinding(string invalidKey)
+        {
+            LanguageManager.Init(new() { ["old"] = Row("old") });
+            var go = TextObject();
+            var localized = go.AddComponent<LocalizedText>();
+            localized.SetKey("old");
+            Assert.Throws<ArgumentException>(() => localized.SetKey(invalidKey));
+            Assert.AreEqual("old-en", go.GetComponent<TMP_Text>().text);
+            LanguageManager.SetLanguage(GameLanguage.ZhCN);
+            Assert.AreEqual("old-zh", go.GetComponent<TMP_Text>().text);
+        }
+
+        [Test] public void MissingTranslationDoesNotSubstituteAnotherLanguage()
+        {
+            LanguageManager.Init(new() { ["empty"] = new LanguageTexts("中文", "", "عربي") });
+            Assert.Throws<InvalidOperationException>(() => LanguageManager.Get("empty"));
+            Assert.Throws<KeyNotFoundException>(() => LanguageManager.Get("missing"));
+            Assert.Throws<ArgumentException>(() => LanguageManager.Get(""));
+            Assert.Throws<ArgumentNullException>(() => LanguageManager.SetText(null, "empty"));
+            Assert.Throws<ArgumentNullException>(() => LanguageManager.SetFormat(null, "empty"));
+            Assert.Throws<ArgumentNullException>(() => LanguageManager.ApplyRtl(null));
+        }
+
+        [Test] public void FormatPreservesTheOriginalFormatterException()
+        {
+            LanguageManager.Init(new() { ["format"] = Row("{0}") });
+            var primary = new FormatException("formatter-failed");
+            Assert.AreSame(primary, Assert.Throws<FormatException>(() =>
+                LanguageManager.Format("format", new FailingFormatValue(primary))));
+        }
+
+        [TestCase("{0")] [TestCase("{1}")]
+        public void InvalidFormatDoesNotReturnTheTemplate(string template)
+        {
+            LanguageManager.Init(new() { ["format"] = Row(template) });
+            Assert.Throws<FormatException>(() => LanguageManager.Format("format", "value"));
+        }
+
+        [Test] public void FormatUsesTheSelectedTranslationAndArguments()
+        {
+            LanguageManager.Init(new() { ["format"] = Row("{0} / {1:D2}") });
+            Assert.AreEqual("item / 07-en", LanguageManager.Format("format", "item", 7));
+            Assert.Throws<ArgumentNullException>(() => LanguageManager.Format("format", null));
+        }
+
+        sealed class FailingFormatValue : IFormattable
+        {
+            readonly FormatException failure;
+            public FailingFormatValue(FormatException failure) => this.failure = failure;
+            public string ToString(string format, IFormatProvider formatProvider) => throw failure;
+        }
+
+        [Test] public void InvalidSavedLanguageDoesNotInitializeOrRewritePreference()
+        {
+            PlayerPrefs.SetInt(PrefsKey, 999);
+            Assert.Throws<ArgumentOutOfRangeException>(() => LanguageManager.Init(new()));
+            Assert.IsFalse(LanguageManager.IsInited);
+            Assert.AreEqual(999, PlayerPrefs.GetInt(PrefsKey));
+        }
+
         [Test] public void AddRequiresInitialization()
         {
             Assert.Throws<InvalidOperationException>(() => LanguageManager.AddTable(new() { ["new"] = Row("new") }));
@@ -148,11 +209,12 @@ namespace UIFrame.Regression
             var layout = go.AddComponent<LanguageResponsiveText>();
             layout.SetFontSize(GameLanguage.EnUS, 17f);
             var localized = go.AddComponent<LocalizedText>();
-            LogAssert.Expect(LogType.Warning, "[Language] missing or empty key: new, lang=EnUS");
-            localized.SetKey("new");
-            Assert.AreEqual("new", text.text);
+            localized.SetKey("old");
+            text.text = "pending-refresh";
             text.fontSize = 23f;
             LanguageManager.AddTable(new() { ["new"] = Row("new") });
+            Assert.AreEqual("old-en", text.text);
+            localized.SetKey("new");
             Assert.AreEqual("new-en", text.text);
             Assert.AreEqual(17f, text.fontSize);
             Assert.AreEqual("old-en", LanguageManager.Get("old"));
@@ -193,8 +255,7 @@ namespace UIFrame.Regression
 
         static void AssertMissing(string key)
         {
-            LogAssert.Expect(LogType.Warning, $"[Language] missing or empty key: {key}, lang=EnUS");
-            Assert.AreEqual(key, LanguageManager.Get(key));
+            Assert.Throws<KeyNotFoundException>(() => LanguageManager.Get(key));
         }
     }
 }

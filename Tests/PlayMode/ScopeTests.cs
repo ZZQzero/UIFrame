@@ -146,6 +146,7 @@ namespace UIFrame.Regression
                 throw second;
             });
 
+            LogAssert.Expect(LogType.Exception, new System.Text.RegularExpressions.Regex("InvalidOperationException: first"));
             var exception = Assert.Throws<InvalidOperationException>(() => _panel.DispatchClose());
 
             Assert.AreSame(second, exception);

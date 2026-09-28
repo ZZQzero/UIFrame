@@ -24,6 +24,29 @@ namespace UIFrame.Regression
         static object Call(string method, params object[] args) => typeof(UICompileHook)
             .GetMethod(method, BindingFlags.Static | BindingFlags.NonPublic).Invoke(null, args);
 
+        [Test] public void FailedJobIsConsumedAndDoesNotRunAgainAfterFileAppears()
+        {
+            var store = UIBindStore.instance;
+            var field = typeof(UIBindStore).GetField("_items", BindingFlags.Instance | BindingFlags.NonPublic);
+            var previous = field.GetValue(store);
+            var path = "Assets/__UIFrameJob_" + Guid.NewGuid().ToString("N") + ".txt";
+            var state = new UIPrefabBindState { ClassName = "MissingHost", GenPath = path, PendingAssign = true };
+            field.SetValue(store, new System.Collections.Generic.List<UIPrefabBindState> { state });
+            try
+            {
+                Assert.Throws<FileNotFoundException>(UICompileHook.ProcessJobs);
+                Assert.IsFalse(state.PendingAssign);
+                File.WriteAllText(path, "now exists");
+                Assert.DoesNotThrow(UICompileHook.ProcessJobs, "失败任务不能因文件出现而自动重试回填");
+            }
+            finally
+            {
+                File.Delete(path);
+                field.SetValue(store, previous);
+                store.Persist();
+            }
+        }
+
         [Test] public void HostResolutionUsesNamespace()
         {
             var root = new GameObject("binding-test");
@@ -50,8 +73,9 @@ namespace UIFrame.Regression
                 var state = new UIPrefabBindState { ClassName = "Host", NamespaceName = typeof(First.Host).Namespace };
                 state.Binds.Add(new UIBindEntry { FieldName = "First", IsGameObject = true, HierarchyPath = "" });
                 state.Binds.Add(new UIBindEntry { FieldName = "Second", IsGameObject = true });
-                LogAssert.Expect(LogType.Error, new Regex("Field=Second.*缺少节点路径"));
-                Assert.AreEqual(false, Call("AssignOnRoot", root, state));
+                var error = Assert.Throws<TargetInvocationException>(() => Call("AssignOnRoot", root, state));
+                Assert.IsInstanceOf<InvalidOperationException>(error.InnerException);
+                StringAssert.Contains("Field=Second: 缺少节点路径", error.InnerException.Message);
                 Assert.AreSame(child, host.First, "其它字段也不能部分回填");
                 Assert.AreSame(child, host.Second);
             }

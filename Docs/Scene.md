@@ -24,9 +24,9 @@ await GameScene.ShutdownAsync();
 
 - 必须先 Init。未 Init 读 `IsBusy` / `ActiveId` / `Progress` 或调加载 API 都会抛。
 - 重复 Init 会抛。
-- **`ShutdownAsync` 只清静态状态**（表、`ActiveId`、loader），**不走 YooAsset 卸场**。
+- **`ShutdownAsync` 只清静态状态**（表、`ActiveId`、loader），**不走 YooAsset 卸场**。等待中的操作失败时，清空状态后向 Shutdown 调用方传播同一异常。
   进程结束时由 Unity 拆域。不要为了“对齐 Audio”去补卸场。
-- 关闭时若有进行中的加载，会等它结束（失败也吞掉），再清静态。
+- 关闭时若有进行中的加载，会等它结束，再清静态；失败会在清理后原样传播。
 - 退出路径在调用前先看 `IsBusy`，或 `await WaitForIdleAsync()`。
 - `WaitForIdleAsync` 可与加载调用方及其它等待方并发等待同一次操作；只等待结束，原始失败由加载调用方接收，不代表加载成功，也不会自动激活预加载场景。
 
@@ -87,6 +87,7 @@ float p = GameScene.Progress; // 与回调同一值；操作结束归 0
 | 失败点 | 表 / Active | 引擎侧 |
 |--------|-------------|--------|
 | `Load` 失败 | 上一份 Active 不动 | 不会去卸上一份 |
+| `LoadSingle` / `Reload` 清理旧场失败 | 新场不登记；失败旧场仍留在表内 | 释放尚未登记的新句柄，不重试旧场卸载 |
 | `Switch` / `LoadSingle` 激活失败 | 新场**不登记** | 未登记的 handle 会 `Unload` 丢掉 |
 | 已登记场 `Activate` 失败 | **不从字典摘** | 仍占着那一场 |
 | `Switch` 卸旧失败 | 新已是 Active，旧仍在表里 | 旧场还在 |
@@ -95,7 +96,7 @@ float p = GameScene.Progress; // 与回调同一值；操作结束归 0
 `LoadSingle` 会在激活前卸掉表里其它场（新地址可以还不在表里）。激活失败时旧场可能
 已经卸完，`ActiveId` 为 null，新场未登记。清掉错误后可以再 `Load` 同一地址。
 
-未登记 handle 的卸场再失败只打日志，仍把原来的激活异常抛给等待方。
+未登记 handle 从加载返回到登记完成始终由本次操作持有；清理旧场或激活失败都会释放它。释放完成前操作仍为 Busy；释放再失败只打日志，仍把首次异常抛给等待方。
 
 失败不做回滚：已经卸掉的旧场不会自动再加载。
 
