@@ -358,10 +358,15 @@ namespace Game.Timer
                     "UnityTimerRunner 未 Initialize，不能 Tick。");
             }
 
-            try { scheduler.Tick(); }
+            Exception taskFailure = null;
+            try { scheduler.Tick(out taskFailure); }
             catch (Exception exception)
             {
-                GameTimer.NotifyRunnerUnavailable(this, "因异常停止", exception);
+                // 只有失败节点已摘除、Tick 收尾未改写异常，才允许其它任务后续运行。
+                if (ReferenceEquals(exception, taskFailure))
+                    Debug.LogException(exception);
+                else
+                    GameTimer.NotifyRunnerUnavailable(this, "因异常停止", exception);
             }
         }
 

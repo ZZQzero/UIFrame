@@ -31,7 +31,7 @@ namespace UIFrame.Regression
             finally { RedDot.Unbind(path, callback); RedDot.Remove(path); }
         }
 
-        [Test] public void RedDotFlushStopsBatchAndDoesNotReplayIt()
+        [Test] public void RedDotFlushRemovesFailedListenerAndDispatchesOthers()
         {
             const string path = "Contract/Flush";
             var primary = new InvalidOperationException("flush-failed");
@@ -44,10 +44,13 @@ namespace UIFrame.Regression
             {
                 RedDot.Set(path, 1);
                 Assert.AreSame(primary, Assert.Throws<InvalidOperationException>(RedDot.Flush));
-                Assert.AreEqual(1, laterCalls);
+                Assert.AreEqual(2, laterCalls);
+                RedDot.Flush();
+                Assert.AreEqual(2, laterCalls);
+                RedDot.Set(path, 2);
                 RedDot.Flush();
                 Assert.AreEqual(2, firstCalls);
-                Assert.AreEqual(1, laterCalls);
+                Assert.AreEqual(3, laterCalls);
             }
             finally { RedDot.Unbind(path, first); RedDot.Unbind(path, later); RedDot.Remove(path); }
         }
@@ -85,57 +88,179 @@ namespace UIFrame.Regression
             Assert.AreEqual(0, scheduler.GetStats().ActiveCount);
         }
 
-        [UnityTest] public IEnumerator RuntimeTimerFailureLogsOnceAndStopsAutomaticUpdates()
+        [Test] public void TimerClassifiesFailureByOriginRatherThanExceptionType()
+        {
+            var primary = new TimerClockException("shared-clock-failed");
+            var clock = new FailingTimeSource();
+            using var scheduler = new TimerScheduler(clock, TimerClock.Simulation);
+            void Fail(in TimerContext _) => throw primary;
+            scheduler.Schedule(TimerOptions.Once(0, TimerClock.Simulation), Fail);
+            Exception isolated = null;
+            Assert.AreSame(primary, Assert.Throws<TimerClockException>(() => scheduler.Tick(out isolated)));
+            Assert.AreSame(primary, isolated);
+            clock.Failure = primary;
+            Assert.AreSame(primary, Assert.Throws<TimerClockException>(() => scheduler.Tick(out isolated)));
+            Assert.IsNull(isolated);
+        }
+
+        sealed class FailingTimeSource : ITimeSource
+        {
+            public Exception Failure;
+            public long NowMs => Failure == null ? 0 : throw Failure;
+        }
+
+        [UnityTest] public IEnumerator RedDotFailureKeepsOtherPathsAndFutureFramesUpdating()
+        {
+            const string badPath = "Contract/Isolation/A", otherPath = "Contract/Isolation/B";
+            int failures = 0, sameValue = -1, otherValue = -1;
+            Action<int> bad = value => { if (value > 0) { failures++; throw new InvalidOperationException("red-dot-isolated"); } };
+            Action<int> same = value => sameValue = value;
+            Action<int> other = value => otherValue = value;
+            RedDot.Bind(badPath, bad);
+            RedDot.Bind(badPath, same);
+            RedDot.Bind(otherPath, other);
+            try
+            {
+                LogAssert.Expect(LogType.Exception, new Regex("red-dot-isolated"));
+                RedDot.Set(badPath, 1);
+                RedDot.Set(otherPath, 2);
+                yield return null;
+                yield return null;
+                Assert.AreEqual(1, failures);
+                Assert.AreEqual(1, sameValue);
+                Assert.AreEqual(2, otherValue);
+                RedDot.Set(badPath, 3);
+                RedDot.Set(otherPath, 4);
+                yield return null;
+                yield return null;
+                Assert.AreEqual(1, failures);
+                Assert.AreEqual(3, sameValue);
+                Assert.AreEqual(4, otherValue);
+            }
+            finally
+            {
+                RedDot.Unbind(badPath, bad);
+                RedDot.Unbind(badPath, same);
+                RedDot.Unbind(otherPath, other);
+                RedDot.Remove("Contract/Isolation");
+            }
+        }
+
+        [Test] public void RedDotMultipleFailuresPreserveFirstErrorAndDoNotSkipHealthyListener()
+        {
+            const string path = "Contract/MultipleFailures";
+            var primary = new InvalidOperationException("red-dot-first");
+            int failures = 0, last = -1;
+            Action<int> first = value => { if (value > 0) { failures++; throw primary; } };
+            Action<int> second = value => { if (value > 0) { failures++; throw new InvalidOperationException("red-dot-second"); } };
+            Action<int> healthy = value => last = value;
+            RedDot.Bind(path, first);
+            RedDot.Bind(path, second);
+            RedDot.Bind(path, healthy);
+            try
+            {
+                RedDot.Set(path, 1);
+                LogAssert.Expect(LogType.Exception, new Regex("red-dot-second"));
+                Assert.AreSame(primary, Assert.Throws<InvalidOperationException>(RedDot.Flush));
+                Assert.AreEqual(1, last);
+                RedDot.Set(path, 2);
+                RedDot.Flush();
+                Assert.AreEqual(2, failures);
+                Assert.AreEqual(2, last);
+            }
+            finally
+            {
+                RedDot.Unbind(path, first);
+                RedDot.Unbind(path, second);
+                RedDot.Unbind(path, healthy);
+                RedDot.Remove(path);
+            }
+        }
+
+        [TestCase(false)] [TestCase(true)]
+        public void RedDotFailureDoesNotRemoveAnExplicitReplacementSubscription(bool duringBind)
+        {
+            const string path = "Contract/Replacement";
+            var primary = new InvalidOperationException("old-subscription-failed");
+            bool replaced = false;
+            int last = -1, failures = 0;
+            Action<int> callback = null;
+            callback = value =>
+            {
+                if (!replaced && (duringBind || value > 0))
+                {
+                    RedDot.Unbind(path, callback);
+                    replaced = true;
+                    RedDot.Bind(path, callback);
+                    failures++;
+                    throw primary;
+                }
+                last = value;
+            };
+            try
+            {
+                if (duringBind)
+                    Assert.AreSame(primary, Assert.Throws<InvalidOperationException>(() => RedDot.Bind(path, callback)));
+                else
+                {
+                    RedDot.Bind(path, callback);
+                    RedDot.Set(path, 1);
+                    Assert.AreSame(primary, Assert.Throws<InvalidOperationException>(RedDot.Flush));
+                }
+                RedDot.Set(path, 2);
+                RedDot.Flush();
+                Assert.AreEqual(1, failures);
+                Assert.AreEqual(2, last);
+            }
+            finally { RedDot.Unbind(path, callback); RedDot.Remove(path); }
+        }
+
+        [UnityTest] public IEnumerator RuntimeTimerFailureStopsOnlyTheFailedTask()
         {
             var root = new GameObject("contract-timer-root");
             int calls = 0, laterCalls = 0;
             var primary = new InvalidOperationException("runtime-timer-primary");
             void Failing(in TimerContext _) { calls++; throw primary; }
             void Later(in TimerContext _) => laterCalls++;
-            GameTimer.Init(root.transform, new TimerSchedulerOptions
-            {
-                RuntimeBudget = new TimerBudget(1, 0, 8)
-            });
+            GameTimer.Init(root.transform);
             using var cancellation = new CancellationTokenSource();
             using var scope = new UIFrameScope(default);
             try
             {
-                LogAssert.Expect(LogType.Exception, new Regex("runtime-timer-primary"));
                 GameTimer.Schedule(TimerOptions.Repeat(0, 1, clock: TimerClock.Unscaled), Failing);
                 var later = GameTimer.Schedule(TimerOptions.Once(0, TimerClock.Unscaled), Later);
                 var owned = scope.Schedule(TimerOptions.Once(60000, TimerClock.Unscaled), Later);
-                var delays = new[]
-                {
-                    GameTimer.DelayAsync(60000, TimerClock.Unscaled, cancellation.Token),
-                    GameTimer.DelayAsync(60000, TimerClock.Unscaled),
-                    GameTimer.DelayAsync(60000, TimerClock.Unscaled)
-                };
-                yield return null;
+                var canceled = GameTimer.DelayAsync(60000, TimerClock.Unscaled, cancellation.Token);
+                var pending = GameTimer.DelayAsync(60000, TimerClock.Unscaled);
+                LogAssert.Expect(LogType.Exception, new Regex("runtime-timer-primary"));
+                TickRunner(root);
+                Assert.AreEqual(1, calls);
+                Assert.AreEqual(0, laterCalls);
+                Assert.AreEqual(UniTaskStatus.Pending, pending.Status);
+                Assert.IsTrue(root.GetComponentInChildren<UnityTimerRunner>().enabled);
+                var due = GameTimer.DelayAsync(0, TimerClock.Unscaled);
+                var owner = GameTimer.CreateOwner();
+                GameTimer.ReleaseOwner(owner);
+                cancellation.Cancel();
                 yield return null;
                 yield return null;
                 Assert.AreEqual(1, calls);
-                Assert.AreEqual(0, laterCalls);
-                Assert.Throws<TimerStateException>(() => GameTimer.Schedule(TimerOptions.Once(0), Later));
-                Assert.Throws<TimerStateException>(() => GameTimer.DelayAsync(1));
-                Assert.Throws<TimerStateException>(() => GameTimer.CreateOwner());
-                cancellation.Cancel();
-                foreach (var delay in delays)
-                {
-                    Assert.AreEqual(UniTaskStatus.Faulted, delay.Status);
-                    Assert.AreSame(primary, Assert.Throws<InvalidOperationException>(() => delay.GetAwaiter().GetResult()));
-                }
-                Assert.IsTrue(GameTimer.IsInited);
+                Assert.AreEqual(1, laterCalls);
+                Assert.AreEqual(UniTaskStatus.Succeeded, due.Status);
+                due.GetAwaiter().GetResult();
+                Assert.Throws<OperationCanceledException>(() => canceled.GetAwaiter().GetResult());
+                Assert.AreEqual(UniTaskStatus.Pending, pending.Status);
                 Assert.IsTrue(GameTimer.IsActive(owned));
-                Assert.Greater(GameTimer.GetRemainingMs(owned), 0);
-                GameTimer.Cancel(later);
                 Assert.IsFalse(GameTimer.TryCancel(later));
                 scope.Dispose();
-                Assert.AreEqual(0, GameTimer.GetStats().ActiveCount);
                 Assert.AreEqual(0, GameTimer.GetStats().OwnerCount);
+                Assert.AreEqual(1, GameTimer.GetStats().ActiveCount);
+                GameTimer.Shutdown();
+                Assert.Throws<OperationCanceledException>(() => pending.GetAwaiter().GetResult());
             }
             finally
             {
-                GameTimer.Shutdown();
+                if (GameTimer.IsInited) GameTimer.Shutdown();
                 UnityEngine.Object.Destroy(root);
             }
         }
@@ -203,11 +328,10 @@ namespace UIFrame.Regression
             }
         }
 
-        [Test] public void FailedDelayContinuationCanExplicitlyShutdown()
+        [Test] public void LostRunnerDelayContinuationCanExplicitlyShutdown()
         {
             var root = new GameObject("continuation-stop-timer-root");
             GameTimer.Init(root.transform);
-            var primary = new InvalidOperationException("continuation-timer-primary");
             var delay = GameTimer.DelayAsync(60000);
             Exception received = null;
             delay.GetAwaiter().OnCompleted(() =>
@@ -216,13 +340,11 @@ namespace UIFrame.Regression
                 catch (Exception exception) { received = exception; }
                 GameTimer.Shutdown();
             });
-            void Fail(in TimerContext _) => throw primary;
             try
             {
-                GameTimer.Schedule(0, Fail, TimerClock.Unscaled);
-                LogAssert.Expect(LogType.Exception, new Regex("continuation-timer-primary"));
-                TickRunner(root);
-                Assert.AreSame(primary, received);
+                LogAssert.Expect(LogType.Exception, new Regex("UnityTimerRunner 被外部禁用"));
+                root.GetComponentInChildren<UnityTimerRunner>().enabled = false;
+                Assert.IsInstanceOf<TimerStateException>(received);
                 Assert.IsFalse(GameTimer.IsInited);
             }
             finally

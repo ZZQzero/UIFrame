@@ -782,11 +782,6 @@ namespace UIFrame.Editor
 
         public static string ToCsTypeName(System.Type type)
         {
-            if (type == null)
-            {
-                return "UnityEngine.Object";
-            }
-
             return type.FullName.Replace('+', '.');
         }
 

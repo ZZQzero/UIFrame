@@ -99,7 +99,7 @@ namespace UIFrame
                 throw new InvalidOperationException($"[UIFrame] {name} 未设置 Cell location。");
             }
 
-            return location.Trim();
+            return location;
         }
     }
 }

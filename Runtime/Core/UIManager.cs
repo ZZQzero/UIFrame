@@ -88,11 +88,6 @@ namespace UIFrame
 
             foreach (var list in _toasts.Values)
             {
-                if (list == null)
-                {
-                    continue;
-                }
-
                 for (var i = 0; i < list.Count; i++)
                 {
                     closing.Add(list[i]);
@@ -609,10 +604,10 @@ namespace UIFrame
 
             CancelToastLoads(panelType);
             var drained = new List<TipsWaitItem>(8);
-            _tips.DrainWhere(item => item != null && item.PanelType == panelType, drained);
+            _tips.DrainWhere(item => item.PanelType == panelType, drained);
             RejectToastWaits(drained);
 
-            if (_toasts.TryGetValue(panelType, out var toasts) && toasts != null && toasts.Count > 0)
+            if (_toasts.TryGetValue(panelType, out var toasts) && toasts.Count > 0)
             {
                 var closing = new List<UIPanel>(toasts.Count);
                 for (var i = 0; i < toasts.Count; i++)
@@ -709,8 +704,7 @@ namespace UIFrame
 
             var drained = new List<TipsWaitItem>(8);
             _tips.DrainWhere(
-                item => item != null
-                        && UIPanelCatalog.TryResolve(item.PanelType, UIOpenMode.Toast, out var waitBind)
+                item => UIPanelCatalog.TryResolve(item.PanelType, UIOpenMode.Toast, out var waitBind)
                         && waitBind.Group == group,
                 drained);
             RejectToastWaits(drained);
@@ -785,7 +779,7 @@ namespace UIFrame
                 return panel as TPanel;
             }
 
-            if (_toasts.TryGetValue(type, out var toasts) && toasts != null && toasts.Count > 0)
+            if (_toasts.TryGetValue(type, out var toasts) && toasts.Count > 0)
             {
                 return toasts[toasts.Count - 1] as TPanel;
             }
@@ -1015,10 +1009,7 @@ namespace UIFrame
             var count = 0;
             foreach (var list in _toasts.Values)
             {
-                if (list != null)
-                {
-                    count += list.Count;
-                }
+                count += list.Count;
             }
 
             // 正在关闭或关闭失败不等于释放展示名额。
@@ -1065,7 +1056,6 @@ namespace UIFrame
         {
             return panel != null
                    && _toasts.TryGetValue(panel.PanelType, out var list)
-                   && list != null
                    && list.Contains(panel);
         }
 

@@ -39,7 +39,7 @@ namespace UIFrame
                     nameof(location));
             }
 
-            _singleLocation = location.Trim();
+            _singleLocation = location;
             _locationForIndex = null;
         }
 
@@ -159,7 +159,7 @@ namespace UIFrame
                     $"LoopScroll cell location for index {index} is empty.");
             }
 
-            return location.Trim();
+            return location;
         }
     }
 }

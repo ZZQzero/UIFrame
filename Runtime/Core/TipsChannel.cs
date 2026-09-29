@@ -122,7 +122,7 @@ namespace UIFrame
         public bool TryEnqueue(TipsWaitItem item, out TipsWaitItem droppedOldest)
         {
             droppedOldest = null;
-            if (item == null || Settings.MaxQueued <= 0)
+            if (Settings.MaxQueued <= 0)
             {
                 return false;
             }
@@ -152,12 +152,9 @@ namespace UIFrame
 
         public void Drain(ICollection<TipsWaitItem> dest)
         {
-            if (dest != null)
+            for (var i = 0; i < _queue.Count; i++)
             {
-                for (var i = 0; i < _queue.Count; i++)
-                {
-                    dest.Add(_queue[i]);
-                }
+                dest.Add(_queue[i]);
             }
 
             _queue.Clear();
@@ -165,20 +162,15 @@ namespace UIFrame
 
         public void DrainWhere(Predicate<TipsWaitItem> match, ICollection<TipsWaitItem> dest)
         {
-            if (match == null)
-            {
-                return;
-            }
-
             for (var i = _queue.Count - 1; i >= 0; i--)
             {
                 var item = _queue[i];
-                if (item == null || !match(item))
+                if (!match(item))
                 {
                     continue;
                 }
 
-                dest?.Add(item);
+                dest.Add(item);
                 _queue.RemoveAt(i);
             }
         }
@@ -193,7 +185,7 @@ namespace UIFrame
         {
             while (_queue.Count > Settings.MaxQueued)
             {
-                dropped?.Add(_queue[0]);
+                dropped.Add(_queue[0]);
                 _queue.RemoveAt(0);
             }
         }

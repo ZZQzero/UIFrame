@@ -173,6 +173,7 @@ protected override void OnOpen(ItemArgs args)
 - **`Tips` 与 `Toast` 不要用同一面板类型**（通道不同，可能同时存在两套实例）。
 - `Back()` 只关 Popup / Window；Hud / Tips / Guide / Toast 需显式 Close。
 - 必须 `UI.Register`。未注册、空 Location、重复且不一致的注册都会抛。
+- 资源地址原样传递，不自动去除首尾空格。无参打开重载使用 `UINone.Value`；显式传入 `null` 不会自动补成无参对象。
 - 默认 `cache: true`：Close 只隐藏，不释放内存；要释放用 `destroy: true` 或 `ClearCache()`。
 
 ---
@@ -457,8 +458,10 @@ GamePool.Shutdown();
 
 ## 统一失败语义
 
-完整规则见 [ErrorContract.md](ErrorContract.md)。Popup 只有提交结果并完成关闭后才成功；关闭或销毁失败使结果任务失败，无结果的正常关闭才取消。Shutdown 尝试所有清理后抛首个错误，后续错误单独记录。
+通用规则见 [ErrorContract.md](ErrorContract.md)。Popup 只有提交结果并完成关闭后才成功；关闭、销毁或关闭后必要导航失败，使本次结果任务与发起调用者均收到失败；无结果的正常关闭才取消。提交结果不等于任务已成功，整个关闭操作才是结果确定点。Shutdown 尝试所有清理后抛首个错误，后续错误单独记录。
 
 `LocalizedText.SetKey` 不接受 null 或空字符串，在修改绑定前抛错，原绑定保留。尚未配置 Key 的组件可以保持未绑定状态；这不表示显式传空 Key 可以清除绑定。
+
+`LanguageAutoSize` 只校验当前模式使用的字段：固定模式校验 `fontSize`，自动缩放模式校验 `min/max`。切换模式时按新模式校验；非法配置在写入前拒绝，保留原配置。省略值的默认行为不变。
 
 多语言空 key、缺 key、当前语言翻译为空及 null 目标均报错；保存的非法语言值也报错，不自动改写。预热数量超过 MaxSize 在加载前拒绝。安全区覆盖值必须有限、非负且位于屏幕内；原生屏幕数据仍按平台规则裁剪。UI Layer 仅 -1 表示使用默认层，其他值必须为 0–31。

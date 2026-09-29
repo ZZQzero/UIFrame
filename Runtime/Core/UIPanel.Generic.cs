@@ -13,12 +13,6 @@ namespace UIFrame
                 return;
             }
 
-            if (args == null && typeof(TArgs) == typeof(UINone))
-            {
-                Args = (TArgs)(object)UINone.Value;
-                return;
-            }
-
             var actual = args == null ? "null" : args.GetType().Name;
             throw new System.InvalidOperationException(
                 $"[UIFrame] 打开参数类型不匹配: {PanelType.Name}, 期望 {typeof(TArgs).Name}, 实际 {actual}");

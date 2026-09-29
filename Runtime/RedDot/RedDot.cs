@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Runtime.ExceptionServices;
 using System.Threading;
 using UnityEngine;
 
@@ -127,7 +128,8 @@ namespace UIFrame
                 Listeners.Add(path, bucket);
             }
 
-            if (!bucket.Add(callback))
+            Listener listener = bucket.Add(callback);
+            if (listener == null)
             {
                 throw new InvalidOperationException(
                     $"红点路径 \"{path}\" 已重复绑定同一回调。");
@@ -139,7 +141,7 @@ namespace UIFrame
             }
             catch
             {
-                Unbind(path, callback);
+                RemoveListener(path, listener);
                 throw;
             }
         }
@@ -162,7 +164,13 @@ namespace UIFrame
                 return;
             }
 
-            if (bucket.Remove(callback) && bucket.Count == 0)
+            RemoveListener(path, bucket.Find(callback));
+        }
+
+        private static void RemoveListener(string path, Listener listener)
+        {
+            if (listener != null && Listeners.TryGetValue(path, out ListenerBucket bucket)
+                && bucket.Remove(listener) && bucket.Count == 0)
             {
                 Listeners.Remove(path);
                 dirtyWrite.Remove(path);
@@ -191,9 +199,13 @@ namespace UIFrame
         /// <summary>
         /// 派发本批次变化。Play 模式会在 LateUpdate 自动调用。
         /// 回调中产生的变化留到下一批派发。
+        /// 失败订阅被移除，其它订阅继续；本批结束后抛出首个回调异常。
         /// </summary>
-        public static void Flush()
+        public static void Flush() => Flush(out _);
+
+        internal static void Flush(out Exception listenerFailure)
         {
+            listenerFailure = null;
             EnsureMainThread();
 
             if (isFlushing || dirtyWrite.Count == 0)
@@ -206,6 +218,7 @@ namespace UIFrame
             dirtyWrite = swap;
             dirtyWrite.Clear();
             isFlushing = true;
+            ExceptionDispatchInfo failure = null;
 
             try
             {
@@ -218,7 +231,7 @@ namespace UIFrame
                     }
 
                     DispatchEntries.Add(
-                        new DispatchEntry(path, GetUnchecked(path), bucket.Callbacks));
+                        new DispatchEntry(path, GetUnchecked(path), bucket.Items));
                 }
 
                 for (int entryIndex = 0;
@@ -226,10 +239,16 @@ namespace UIFrame
                      entryIndex++)
                 {
                     DispatchEntry entry = DispatchEntries[entryIndex];
-                    Action<int>[] callbacks = entry.Callbacks;
-                    for (int i = 0; i < callbacks.Length; i++)
+                    Listener[] listeners = entry.Listeners;
+                    for (int i = 0; i < listeners.Length; i++)
                     {
-                        callbacks[i](entry.Value);
+                        try { listeners[i].Callback(entry.Value); }
+                        catch (Exception exception)
+                        {
+                            RemoveListener(entry.Path, listeners[i]);
+                            if (failure == null) failure = ExceptionDispatchInfo.Capture(exception);
+                            else Debug.LogException(exception);
+                        }
                     }
                 }
             }
@@ -239,6 +258,9 @@ namespace UIFrame
                 dirtyRead.Clear();
                 isFlushing = false;
             }
+
+            listenerFailure = failure?.SourceException;
+            failure?.Throw();
         }
 
         [RuntimeInitializeOnLoadMethod(RuntimeInitializeLoadType.SubsystemRegistration)]
@@ -470,32 +492,41 @@ namespace UIFrame
             }
         }
 
+        private sealed class Listener
+        {
+            public readonly Action<int> Callback;
+            public Listener(Action<int> callback) => Callback = callback;
+        }
+
         private sealed class ListenerBucket
         {
-            public Action<int>[] Callbacks { get; private set; } =
-                Array.Empty<Action<int>>();
+            public Listener[] Items { get; private set; } = Array.Empty<Listener>();
 
-            public int Count => Callbacks.Length;
+            public int Count => Items.Length;
 
-            public bool Add(Action<int> callback)
+            public Listener Find(Action<int> callback)
             {
-                Action<int>[] current = Callbacks;
-                if (Array.IndexOf(current, callback) >= 0)
-                {
-                    return false;
-                }
-
-                var next = new Action<int>[current.Length + 1];
-                Array.Copy(current, next, current.Length);
-                next[current.Length] = callback;
-                Callbacks = next;
-                return true;
+                foreach (var listener in Items)
+                    if (listener.Callback == callback) return listener;
+                return null;
             }
 
-            public bool Remove(Action<int> callback)
+            public Listener Add(Action<int> callback)
             {
-                Action<int>[] current = Callbacks;
-                int index = Array.IndexOf(current, callback);
+                if (Find(callback) != null) return null;
+                Listener[] current = Items;
+                var listener = new Listener(callback);
+                var next = new Listener[current.Length + 1];
+                Array.Copy(current, next, current.Length);
+                next[current.Length] = listener;
+                Items = next;
+                return listener;
+            }
+
+            public bool Remove(Listener listener)
+            {
+                Listener[] current = Items;
+                int index = Array.IndexOf(current, listener);
                 if (index < 0)
                 {
                     return false;
@@ -503,11 +534,11 @@ namespace UIFrame
 
                 if (current.Length == 1)
                 {
-                    Callbacks = Array.Empty<Action<int>>();
+                    Items = Array.Empty<Listener>();
                     return true;
                 }
 
-                var next = new Action<int>[current.Length - 1];
+                var next = new Listener[current.Length - 1];
                 if (index > 0)
                 {
                     Array.Copy(current, 0, next, 0, index);
@@ -523,7 +554,7 @@ namespace UIFrame
                         current.Length - index - 1);
                 }
 
-                Callbacks = next;
+                Items = next;
                 return true;
             }
         }
@@ -532,13 +563,13 @@ namespace UIFrame
         {
             public readonly string Path;
             public readonly int Value;
-            public readonly Action<int>[] Callbacks;
+            public readonly Listener[] Listeners;
 
-            public DispatchEntry(string path, int value, Action<int>[] callbacks)
+            public DispatchEntry(string path, int value, Listener[] listeners)
             {
                 Path = path;
                 Value = value;
-                Callbacks = callbacks;
+                Listeners = listeners;
             }
         }
     }
@@ -548,10 +579,12 @@ namespace UIFrame
     {
         private void LateUpdate()
         {
-            try { RedDot.Flush(); }
+            Exception listenerFailure = null;
+            try { RedDot.Flush(out listenerFailure); }
             catch (Exception exception)
             {
-                enabled = false;
+                if (!ReferenceEquals(exception, listenerFailure))
+                    enabled = false;
                 Debug.LogException(exception);
             }
         }

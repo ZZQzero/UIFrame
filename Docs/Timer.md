@@ -626,15 +626,16 @@ Scheduler，并为其分配独立预算。这样网络超时不会被大量表�
 
 回调失败会释放该计时器及其 Owner 关联，并原样向 Tick 调用方传播异常，终止本次 Tick。
 未执行的计时器保留待执行状态；显式再次 Tick 可处理它们，但不会重跑失败计时器。
-Unity 自动更新边界记录一次异常并停用 Runner，不自动续跑。需要重新启动时由业务显式 Shutdown/Init。
+失败节点已释放且 Tick 收尾正常时，Unity 自动更新边界记录原异常，Runner 保持运行，下一帧继续处理其它任务。失败计时器不会重跑，其它 Delay 不因该回调异常而失败。
+只有共享时钟、调度状态或驱动生命周期失效等不能证明已隔离的错误才停用 Runner；恢复由业务显式 Shutdown/Init。错误分类依据发生位置和节点收尾结果，不按业务抛出的异常类型猜测。
 停用后 IsInited 仍为 true，表示资源尚待显式 Shutdown；它不表示 Runner 仍在运行。
-尚未确定结果的 DelayAsync 立即以原异常结束并释放取消注册；非法禁用或销毁 Runner 使用 TimerStateException。
+Runner 因上述驱动故障停用时，尚未确定结果的 DelayAsync 立即以原异常结束并释放取消注册；非法禁用或销毁 Runner 使用 TimerStateException。
 已确定的到期或主动取消结果保持不变。若宿主在计时器回调内被禁用，等待的续体仍在回调结束后交付；停机收尾不受每帧交付预算限制。
 Schedule / ScheduleAt / TrySchedule / DelayAsync / CreateOwner / Pause / Resume（含 Try 形式）仍拒绝新工作。
 Cancel / TryCancel / CancelOwner / ReleaseOwner / TryReleaseOwner、查询及 Shutdown 保持可用，原有参数、线程与所有权校验不变。
 其它未执行的普通计时器保持登记但不再自动执行，由其 Owner 或 Shutdown 清理；不会自动重试或恢复。
-删除 TimerExceptionPolicy 与 WithExceptionPolicy；不再提供 Continue 或“记录后正常返回”的策略。
-重复计时器的下一截止时间溢出同样释放该计时器并抛出 TimerClockException。
+不提供 TimerExceptionPolicy、WithExceptionPolicy 或失败计时器的 Continue 策略。公开 Tick 仍向调用方抛出原异常，不会因允许其它任务后续运行而返回假成功。
+重复计时器的下一截止时间溢出同样释放该计时器并抛出 TimerClockException，属于已隔离的任务失败；共享时间源读取失败则属于调度器故障。
 
 ## 12. UniTask 集成
 
@@ -965,7 +966,7 @@ GameTimer.Schedule(localRemaining, _ => activity.SetClosed());
 - FixedRate 和 FixedDelay 的下一次 Deadline 正确；
 - Coalesce、Skip、FireAll 在大步推进时次数正确；
 - RepeatCount 的总次数语义正确；
-- 回调异常中止当前 Tick、释放失败计时器并传播原异常；自动 Runner 停止后不续跑；
+- 回调异常中止当前 Tick、释放失败计时器并传播原异常；自动 Runner 后续只运行其它任务；共享驱动故障仍停机并终结等待；
 - Shutdown 释放 Callback、State、Owner 和等待任务；
 - 不同 Clock 的暂停与推进互不影响；
 - FastForward 不提前、不遗漏、不重复执行；

@@ -184,6 +184,10 @@ UIFrame 的 `UILoader` 已经负责 `UIPanel` 的 YooAsset 句柄，`UIManager` 
 列表面板只实现 `ProvideData`（多 Prefab 再实现 `GetCellLocation`），不要自己写
 `GetObject` / `ReturnObject`。
 
+Cell 地址在准备、预热和获取时均原样使用，不自动去除首尾空格；空白地址仍报错。
+`fixedHorizontalScrollbarSize` / `fixedVerticalScrollbarSize` 赋值须为 0–1 的有限值，0 表示自动；非法值抛错且不改变原配置。
+`ScrollToCell` / `ScrollToCellWithinTime` 对有限列表的越界索引、非有限或非正速度／时间直接抛错；后者不支持 `JustAppear`，同样抛错。这些错误在停止已有滚动之前拒绝。
+
 列表面板在 `OnOpen` 里做 Prepare 时，应传入 `OpenCancellationToken`（缓存关闭会取消）。
 `destroyCancellationToken` 只在面板真正销毁时取消，缓存关闭不会取消。
 

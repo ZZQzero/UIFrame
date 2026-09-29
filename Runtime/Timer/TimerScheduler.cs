@@ -52,6 +52,7 @@ namespace Game.Timer
         private long nextSequence;
         private int runtimeClockStartIndex;
         private bool tickCallActive;
+        private Exception isolatedFailure;
         private bool ticking;
         private bool clearing;
         private bool shuttingDown;
@@ -462,8 +463,11 @@ namespace Game.Timer
             }
         }
 
-        public TimerTickResult Tick()
+        public TimerTickResult Tick() => Tick(out _);
+
+        internal TimerTickResult Tick(out Exception taskFailure)
         {
+            taskFailure = null;
             EnsureUsable();
             if (tickCallActive)
             {
@@ -472,6 +476,7 @@ namespace Game.Timer
             }
 
             tickCallActive = true;
+            isolatedFailure = null;
             try
             {
                 return TickCore();
@@ -479,6 +484,8 @@ namespace Game.Timer
             finally
             {
                 tickCallActive = false;
+                taskFailure = isolatedFailure;
+                isolatedFailure = null;
             }
         }
 
@@ -1301,9 +1308,10 @@ namespace Game.Timer
             {
                 node.Callback(in context);
             }
-            catch
+            catch (Exception exception)
             {
                 FreeNode(slot, false);
+                isolatedFailure = exception;
                 throw;
             }
             finally
@@ -1382,9 +1390,10 @@ namespace Game.Timer
                         slot);
                 }
             }
-            catch (TimerClockException)
+            catch (TimerClockException exception)
             {
                 FreeNode(slot, false);
+                isolatedFailure = exception;
                 throw;
             }
 
@@ -2473,6 +2482,7 @@ namespace Game.Timer
                 $"Slot={slot}, Generation={node.Generation}, DueTimeMs={node.DueTimeMs}, " +
                 $"IntervalMs={node.IntervalMs}, Reason={reason}");
             FreeNode(slot, false);
+            isolatedFailure = exception;
             throw exception;
         }
 

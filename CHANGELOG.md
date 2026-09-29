@@ -4,6 +4,12 @@ All notable changes to this package will be documented in this file.
 
 ## [Unreleased]
 
+- 移除资源地址自动 Trim 和显式 null 参数的 UINone 补全；LoopScroll 非法尺寸、索引及速度／时间直接抛错。字号仅校验当前模式使用的字段；删除内部调用链已保证非空的重复判断，保留现有故障隔离边界。
+
+- 缩小 Timer 与红点的故障范围：已移除的失败计时器不再停掉全局 Runner；红点仅结束失败订阅，其它通知继续。保留原异常、禁止失败项重试，共享状态或驱动故障仍停机。
+
+- 澄清错误契约的失败范围、结果确定点、配置校验和最终清理职责；区分失败操作重试与后续独立调用，依据错误来源和收尾状态判断隔离。区分通用原则与模块策略，按变更影响要求文档与回归验证。本次规则调整不改变运行行为。
+
 - LanguageManager.Format 移除格式异常的二次包装，保留原始异常身份与堆栈。
 
 - Timer 自动 Runner 故障后终结未完成 Delay 并保留原异常；取消、Owner 释放与查询仍可执行。业务调度保持停止，恢复仍须显式 Shutdown/Init。

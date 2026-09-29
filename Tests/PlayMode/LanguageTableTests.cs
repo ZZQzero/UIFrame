@@ -246,6 +246,34 @@ namespace UIFrame.Regression
             Assert.AreEqual("old-en", LanguageManager.Get("old"));
         }
 
+        [Test] public void FontSettingsValidateOnlyTheActiveModeBeforeChangingState()
+        {
+            LanguageManager.Init(new() { ["old"] = Row("old") });
+            var go = TextObject();
+            var text = go.GetComponent<TMP_Text>();
+            var layout = go.AddComponent<LanguageResponsiveText>();
+            layout.Set(GameLanguage.EnUS, new LanguageAutoSize
+                { fontSize = 18, min = -1, max = float.NaN });
+            Assert.IsFalse(text.enableAutoSizing);
+            Assert.AreEqual(18, text.fontSize);
+            Assert.Throws<ArgumentException>(() => layout.SetAutoSize(GameLanguage.EnUS, true, -1, 30));
+            layout.Set(GameLanguage.EnUS, new LanguageAutoSize
+                { autoSize = true, min = 12, max = 24, fontSize = float.NaN });
+            Assert.IsTrue(text.enableAutoSizing);
+            Assert.AreEqual(12, text.fontSizeMin);
+            Assert.AreEqual(24, text.fontSizeMax);
+            Assert.Throws<ArgumentException>(() => layout.SetFontSize(GameLanguage.EnUS, float.NaN));
+            Assert.Throws<ArgumentException>(() => layout.SetAutoSize(GameLanguage.EnUS, true, 25, 24));
+            LanguageManager.SetLanguage(GameLanguage.ZhCN);
+            LanguageManager.SetLanguage(GameLanguage.EnUS);
+            Assert.IsTrue(text.enableAutoSizing);
+            Assert.AreEqual(12, text.fontSizeMin);
+            Assert.AreEqual(24, text.fontSizeMax);
+            layout.SetFontSize(GameLanguage.EnUS, 18);
+            Assert.IsFalse(text.enableAutoSizing);
+            Assert.AreEqual(18, text.fontSize);
+        }
+
         GameObject TextObject()
         {
             var go = new GameObject("language-table-test", typeof(RectTransform), typeof(TextMeshProUGUI));

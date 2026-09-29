@@ -157,9 +157,12 @@ namespace Game.L10n
 
         static void ValidateSettings(LanguageAutoSize slot)
         {
-            if (!float.IsFinite(slot.min) || !float.IsFinite(slot.max) || !float.IsFinite(slot.fontSize)
-                || slot.min < 0f || slot.max < 0f || slot.fontSize < 0f
-                || (slot.autoSize && slot.min > 0f && slot.max > 0f && slot.min > slot.max))
+            bool invalid = slot.autoSize
+                ? !float.IsFinite(slot.min) || !float.IsFinite(slot.max)
+                    || slot.min < 0f || slot.max < 0f
+                    || (slot.min > 0f && slot.max > 0f && slot.min > slot.max)
+                : !float.IsFinite(slot.fontSize) || slot.fontSize < 0f;
+            if (invalid)
             {
                 throw new ArgumentException(
                     $"[L10n] 无效字号配置: Min={slot.min}, Max={slot.max}, FontSize={slot.fontSize}。");

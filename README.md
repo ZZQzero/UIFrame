@@ -244,4 +244,4 @@ LanguageManager.AddTable(activityTable);
 
 `GameScene.ReloadAsync` 重载当前场景，遵守预加载互斥；`WaitForIdleAsync` 等待当前操作收尾，不代表加载成功。加载调用方、多个等待方与 Shutdown 可以同时等待同一次操作，原始错误交给加载调用方；等待中的 Shutdown 也在清空状态后传播该错误。内置场进入内容场继续显式使用 `LoadAsync(..., Single)`，详见 [Docs/Scene.md](Docs/Scene.md)。
 
-Popup 结果仅在提交结果且整个关闭操作成功后完成；关闭或销毁失败使等待任务失败，未提交结果的正常关闭才取消。Timer 回调失败终止 Tick 并释放失败计时器，不再提供异常 Continue 策略。
+Popup 结果仅在提交结果且整个关闭操作成功后完成；关闭或销毁失败使等待任务失败，未提交结果的正常关闭才取消。Timer 回调失败终止当前 Tick 并移除失败计时器，其它任务后续继续运行，不重试失败计时器。红点回调失败只移除该次订阅，同批其它订阅继续通知；Flush 最后仍抛出原异常。共享调度状态或驱动故障仍按模块契约停机。

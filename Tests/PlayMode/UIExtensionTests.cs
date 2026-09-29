@@ -10,6 +10,7 @@ using UnityEngine.TestTools;
 namespace UIFrame.Regression
 {
     public class ExtensionPanel : FailurePanel { }
+    public class AddressPanel : FailurePanel { }
 
     public class UIExtensionTests
     {
@@ -82,6 +83,29 @@ namespace UIFrame.Regression
 
         T Field<T>(string name) => (T)typeof(UIManager)
             .GetField(name, BindingFlags.Instance | BindingFlags.NonPublic).GetValue(manager);
+
+        [Test] public void RegisteredAddressIsNotTrimmedOrAliased()
+        {
+            manager = new UIManager();
+            manager.Init();
+            const string location = " extension-panel ";
+            UIPanelCatalog.Register<AddressPanel>(location);
+            Assert.AreEqual(location, UIPanelCatalog.Resolve(typeof(AddressPanel), UIOpenMode.Hud).Location);
+            Assert.DoesNotThrow(() => UIPanelCatalog.Register<AddressPanel>(location));
+            Assert.Throws<InvalidOperationException>(() => UIPanelCatalog.Register<AddressPanel>("extension-panel"));
+        }
+
+        [TestCase(UIOpenMode.Hud)] [TestCase(UIOpenMode.Toast)]
+        public void ExplicitNullArgumentsDoNotBecomeUINone(UIOpenMode mode)
+        {
+            var panel = Prepare(mode);
+            int opens = 0;
+            panel.OpenAction = () => opens++;
+            Assert.Throws<InvalidOperationException>(() =>
+                manager.Open<ExtensionPanel, UINone>(mode, null).GetAwaiter().GetResult());
+            Assert.AreEqual(0, opens);
+            Assert.IsTrue(panel.DestroyDispatched);
+        }
 
         [TestCase(UIOpenMode.Hud)] [TestCase(UIOpenMode.Toast)]
         public void PanelShownRunsAfterOpenWithCanvasAvailable(UIOpenMode mode)

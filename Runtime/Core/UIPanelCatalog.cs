@@ -49,7 +49,7 @@ namespace UIFrame
 
             var entry = new Entry
             {
-                Location = location.Trim(),
+                Location = location,
                 Group = group,
                 Cache = cache,
             };

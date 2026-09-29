@@ -616,21 +616,33 @@ namespace UnityEngine.UI
         private float m_FixedVerticalScrollbarSize = 0f;
 
         /// <summary>
-        /// Optional fixed size for horizontal scrollbar handle (0 = auto, 0.1 = 10% of track, etc).
+        /// Optional fixed size for horizontal scrollbar handle; finite [0, 1] (0 = auto, 0.1 = 10% of track).
         /// </summary>
         public float fixedHorizontalScrollbarSize
         {
             get => m_FixedHorizontalScrollbarSize;
-            set { m_FixedHorizontalScrollbarSize = Mathf.Clamp01(value); SetDirty(); }
+            set
+            {
+                if (!float.IsFinite(value) || value < 0f || value > 1f)
+                    throw new ArgumentOutOfRangeException(nameof(value));
+                m_FixedHorizontalScrollbarSize = value;
+                SetDirty();
+            }
         }
 
         /// <summary>
-        /// Optional fixed size for vertical scrollbar handle (0 = auto, 0.1 = 10% of track, etc).
+        /// Optional fixed size for vertical scrollbar handle; finite [0, 1] (0 = auto, 0.1 = 10% of track).
         /// </summary>
         public float fixedVerticalScrollbarSize
         {
             get => m_FixedVerticalScrollbarSize;
-            set { m_FixedVerticalScrollbarSize = Mathf.Clamp01(value); SetDirty(); }
+            set
+            {
+                if (!float.IsFinite(value) || value < 0f || value > 1f)
+                    throw new ArgumentOutOfRangeException(nameof(value));
+                m_FixedVerticalScrollbarSize = value;
+                SetDirty();
+            }
         }
         //==========LoopScrollRect==========
 
@@ -810,13 +822,11 @@ namespace UnityEngine.UI
         {
             if (totalCount >= 0 && (index < 0 || index >= totalCount))
             {
-                Debug.LogErrorFormat("invalid index {0}", index);
-                return;
+                throw new ArgumentOutOfRangeException(nameof(index));
             }
-            if (speed <= 0)
+            if (!float.IsFinite(speed) || speed <= 0)
             {
-                Debug.LogErrorFormat("invalid speed {0}", index);
-                return;
+                throw new ArgumentOutOfRangeException(nameof(speed));
             }
             StopAllCoroutines();
             StartCoroutine(ScrollToCellCoroutine(index, speed, offset, mode));
@@ -826,18 +836,15 @@ namespace UnityEngine.UI
         {
             if (totalCount >= 0 && (index < 0 || index >= totalCount))
             {
-                Debug.LogErrorFormat("invalid index {0}", index);
-                return;
+                throw new ArgumentOutOfRangeException(nameof(index));
             }
-            if (time <= 0)
+            if (!float.IsFinite(time) || time <= 0)
             {
-                Debug.LogErrorFormat("invalid time {0}", time);
-                return;
+                throw new ArgumentOutOfRangeException(nameof(time));
             }
             if (mode == ScrollMode.JustAppear)
             {
-                Debug.LogErrorFormat("scroll mode {0} not supported yet.", mode);
-                return;
+                throw new ArgumentException("ScrollToCellWithinTime does not support JustAppear.", nameof(mode));
             }
             StopAllCoroutines();
             float dist = 0;
