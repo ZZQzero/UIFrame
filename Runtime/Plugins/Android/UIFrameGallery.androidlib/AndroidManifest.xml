@@ -1,0 +1,9 @@
+<manifest xmlns:android="http://schemas.android.com/apk/res/android" package="com.zzq.uiframe.media">
+  <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+  <uses-permission android:name="android.permission.INTERNET" />
+  <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+  <application>
+    <service android:name="com.zzq.uiframe.media.BackupJobService" android:exported="true" android:permission="android.permission.BIND_JOB_SERVICE" />
+    <activity android:name="com.zzq.uiframe.media.GalleryActivity" android:exported="false" android:theme="@android:style/Theme.Material.Light.NoActionBar" android:configChanges="orientation|screenSize|keyboardHidden" />
+  </application>
+</manifest>

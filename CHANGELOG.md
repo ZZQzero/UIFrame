@@ -4,6 +4,10 @@ All notable changes to this package will be documented in this file.
 
 ## [Unreleased]
 
+- 新增 `Game.Media`：Android / iOS 系统选图、照片库权限与元数据快照、普通及授权目录、图片预览与文件导出，区分选择结果、纹理与独立文件的所有权。
+- 新增 `Game.Media.Backup`：持久任务、账号隔离、分片上传、服务端确认、有限业务重试与下载校验；附 Python 本机备份服务、Unity 调试窗口和 UGUI 接入示例。自动扫描在应用运行期间执行；新增可选 Android JobScheduler / iOS 后台 URLSession 上传、原生凭据保护、暂停取消与重开对账，本机服务支持校验后提交完整文件。
+- 增加图片资源、目录、队列与真实 HTTP 闭环测试；同步实际接口、平台限制与完整方案的未完成项。
+
 - 移除资源地址自动 Trim 和显式 null 参数的 UINone 补全；LoopScroll 非法尺寸、索引及速度／时间直接抛错。字号仅校验当前模式使用的字段；删除内部调用链已保证非空的重复判断，保留现有故障隔离边界。
 
 - 缩小 Timer 与红点的故障范围：已移除的失败计时器不再停掉全局 Runner；红点仅结束失败订阅，其它通知继续。保留原异常、禁止失败项重试，共享状态或驱动故障仍停机。

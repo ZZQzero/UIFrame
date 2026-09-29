@@ -1,0 +1,4 @@
+-keep class com.zzq.uiframe.media.GalleryBridge { public static *; }
+-keep class com.zzq.uiframe.media.GalleryActivity { *; }
+-keep class com.zzq.uiframe.media.BackupBridge { public static *; }
+-keep class com.zzq.uiframe.media.BackupJobService { *; }

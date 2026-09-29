@@ -6,6 +6,13 @@
 # See: https://github.com/github/gitignore/tree/main/Global
 #
 .utmp/
+!/Samples~/
+!/Samples~/**
+!/Tools~/
+!/Tools~/**
+**/__pycache__/
+**/*.pyc
+**/credentials.json
 /[Ll]ibrary/
 /[Tt]emp/
 /[Oo]bj/

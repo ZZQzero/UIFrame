@@ -20,6 +20,14 @@
     "com.unity.ugui": "2.0.0",
     "com.unity.render-pipelines.universal": "17.3.0",
     "com.unity.inputsystem": "1.19.0",
-    "com.unity.modules.audio": "1.0.0"
-  }
+    "com.unity.modules.audio": "1.0.0",
+    "com.unity.modules.imageconversion": "1.0.0"
+  },
+  "samples": [
+    {
+      "displayName": "图片选择与备份示例",
+      "description": "系统选图、图片预览、相册查询与持久备份的 UGUI 接入示例。",
+      "path": "Samples~/GalleryDemo"
+    }
+  ]
 }

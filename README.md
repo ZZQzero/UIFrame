@@ -43,6 +43,8 @@ https://github.com/ZZQzero/UIFrame.git
 
 各系统详细用法与注意点见 [USAGE.md](Docs/USAGE.md)。场景见 [Scene.md](Docs/Scene.md)，红点见 [RedDot.md](Docs/RedDot.md)，对象池见 [Pool.md](Docs/Pool.md)。Timer / 音频 / 输入 / 事件 / FSM 见 `Docs/` 下对应文档。
 
+图片选择、照片库查询、普通 / 授权目录、图片预览与持久备份见 [Gallery.md](Docs/Gallery.md)。编辑器入口为 **Tools → UIFrame → 图片与备份**；包内附本机备份参考服务。支持显式启用 Android / iOS 原生后台上传；新照片发现仍在应用运行期间执行，具体范围与验证结果见文档。
+
 ## 快速开始
 
 ```csharp

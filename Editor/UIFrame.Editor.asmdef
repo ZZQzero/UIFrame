@@ -2,7 +2,8 @@
   "name": "UIFrame.Editor",
   "rootNamespace": "UIFrame.Editor",
   "references": [
-    "UIFrame.Runtime"
+    "UIFrame.Runtime",
+    "UniTask"
   ],
   "includePlatforms": [
     "Editor"
