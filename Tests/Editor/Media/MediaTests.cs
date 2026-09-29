@@ -30,6 +30,173 @@ namespace UIFrame.Regression
             StorageDirectory = Path.Combine(root,"backup"), AllowDevelopmentHttp = true
         };
 
+        [UnityTest] public IEnumerator PreviewCancellationDoesNotLeaveDecodedTextures() => UniTask.ToCoroutine(async () =>
+        {
+            var fixture = new Texture2D(509, 503, TextureFormat.RGBA32, false);
+            File.WriteAllBytes(imagePath, fixture.EncodeToPNG()); UnityEngine.Object.DestroyImmediate(fixture);
+            var before = Resources.FindObjectsOfTypeAll<Texture2D>().Select(x => x.GetInstanceID()).ToHashSet();
+            Texture2D[] Residuals() => Resources.FindObjectsOfTypeAll<Texture2D>().Where(x => !before.Contains(x.GetInstanceID()) &&
+                (x.width == 509 && x.height == 503 || x.width == 17)).ToArray();
+            try
+            {
+                int canceled = 0;
+                for (int i = 0; i < 12; i++)
+                {
+                    using var cancel = new CancellationTokenSource();
+                    var task = GameImageReader.LoadPreviewAsync(ImageReference.FromFile(imagePath), new ImagePreviewOptions { MaxEdge = 17 }, cancel.Token);
+                    await UniTask.DelayFrame(1 + i % 3); cancel.Cancel();
+                    try { using var image = await task; } catch (OperationCanceledException) { canceled++; }
+                }
+                await UniTask.DelayFrame(3);
+                Assert.Greater(canceled, 0); Assert.IsEmpty(Residuals(), "Canceled loads must release the download handler's source texture.");
+                using var normal = await GameImageReader.LoadPreviewAsync(ImageReference.FromFile(imagePath));
+                Assert.IsFalse(normal.Texture.isReadable); Assert.AreEqual(1, normal.Texture.mipmapCount);
+            }
+            finally { foreach (var texture in Residuals()) UnityEngine.Object.DestroyImmediate(texture); }
+        });
+
+        [UnityTest] public IEnumerator PixelBudgetIsExplicitAndReadablePreviewRemainsAvailable() => UniTask.ToCoroutine(async () =>
+        {
+            Exception failure = null;
+            try { using var image = await GameImageReader.LoadPreviewAsync(ImageReference.FromFile(imagePath), new ImagePreviewOptions { MaxPixels = 31 }); }
+            catch (Exception error) { failure = error; }
+            Assert.AreEqual("ImageTooLarge", ((GalleryException)failure).Code);
+            using var accepted = await GameImageReader.LoadPreviewAsync(ImageReference.FromFile(imagePath), new ImagePreviewOptions { MaxPixels = 32, Readable = true });
+            Assert.AreEqual(32, accepted.Texture.GetPixels32().Length); Assert.AreEqual(1, accepted.Texture.mipmapCount);
+            using var canceled = new CancellationTokenSource();
+            var first = GameImageReader.LoadPreviewAsync(ImageReference.FromFile(imagePath));
+            var waiting = GameImageReader.LoadPreviewAsync(ImageReference.FromFile(imagePath), cancellationToken: canceled.Token);
+            canceled.Cancel(); failure = null;
+            try { using var unused = await waiting; } catch (Exception error) { failure = error; }
+            Assert.IsInstanceOf<OperationCanceledException>(failure);
+            using var finished = await first;
+            using var next = await GameImageReader.LoadPreviewAsync(ImageReference.FromFile(imagePath));
+        });
+
+        [Test] public void JpegHeaderSkipsRepeatedMetadataAndStillReadsExif()
+        {
+            string path = Path.Combine(root, "metadata.jpg");
+            using (var file = File.Create(path))
+            {
+                file.Write(new byte[] {255,216}, 0, 2);
+                var segment = new byte[65537]; segment[0]=255; segment[1]=225; segment[2]=255; segment[3]=255;
+                for (int i=0;i<128;i++) file.Write(segment,0,segment.Length);
+                byte[] exif = {255,225,0,34,69,120,105,102,0,0,73,73,42,0,8,0,0,0,1,0,18,1,3,0,1,0,0,0,6,0,0,0,0,0,0,0};
+                file.Write(exif,0,exif.Length);
+                byte[] dimensions = {255,192,0,11,8,0,8,0,16,1,1,17,0,255,217}; file.Write(dimensions,0,dimensions.Length);
+            }
+            var header = ImageHeader.ReadFile(path);
+            Assert.AreEqual(16,header.Width); Assert.AreEqual(8,header.Height); Assert.AreEqual(6,header.Orientation);
+        }
+
+        [UnityTest] public IEnumerator DirectoryVisitorBoundsPagesAndPreservesCallbackFailure() => UniTask.ToCoroutine(async () =>
+        {
+            for(int i=0;i<400;i++) File.WriteAllText(Path.Combine(root,i+".png"), "metadata only");
+            int count=0, pages=0;
+            await GameImageDirectory.VisitAsync(root, page => { Assert.LessOrEqual(page.Count,200); count+=page.Count; pages++; return UniTask.FromResult(true); });
+            Assert.AreEqual(401,count); Assert.AreEqual(3,pages);
+            int stoppedPages=0;
+            Assert.IsFalse(await GameImageDirectory.VisitAsync(root,page => { stoppedPages++; return UniTask.FromResult(false); }));
+            Assert.AreEqual(1,stoppedPages);
+            var original = new Exception("page consumer failed"); Exception observed=null; int calls=0;
+            try { await GameImageDirectory.VisitAsync(root,page => { calls++; throw original; }); } catch(Exception error) { observed=error; }
+            Assert.AreSame(original,observed); Assert.AreEqual(1,calls);
+        });
+
+        [UnityTest] public IEnumerator IncompleteBaselineIsNotCommittedAndCompletedBaselineReopens() => UniTask.ToCoroutine(async () =>
+        {
+            string scope="baseline-probe";
+            using(var service=new ImageBackupService(Config()))
+            {
+                await service.EnsureScanAsync(scope,default); var original=new Exception("Interrupted enumeration"); Exception observed=null;
+                try { await service.EstablishBaselineAsync(scope,async consume => { await consume(new[]{ImageReference.FromFile(imagePath)}); throw original; },default); }
+                catch(Exception error) { observed=error; }
+                Assert.AreSame(original,observed); Assert.IsFalse(service.ScanHasBaseline(scope));
+                Assert.IsEmpty(Directory.GetFiles(Config().StorageDirectory,"*.baseline.new"));
+                await service.EstablishBaselineAsync(scope,consume=>consume(new[]{ImageReference.FromFile(imagePath)}),default);
+            }
+            using(var reopened=new ImageBackupService(Config()))
+            {
+                await reopened.EnsureScanAsync(scope,default); Assert.IsTrue(reopened.ScanHasBaseline(scope));
+                var image=ImageReference.FromFile(imagePath); Assert.IsTrue(reopened.ScanKnows(scope,"file:"+image.Id+"\n"+image.Version));
+            }
+        });
+
+        [UnityTest] public IEnumerator SharedReceiptLoadSurvivesOneCanceledWaiter() => UniTask.ToCoroutine(async () =>
+        {
+            string scope="Directory::False";
+            using(var service=new ImageBackupService(Config()))
+            {
+                service.SaveScan(scope,new BackupScanState { baselineEstablished=true });
+                for(int i=0;i<200;i++) service.SaveScanEntry(scope,new BackupReceipt { fingerprint="image-"+i,error=i==7?"unavailable":null });
+            }
+            using(var service=new ImageBackupService(Config()))
+            {
+                var automatic=new AutomaticImageBackup(service); using var cancel=new CancellationTokenSource();
+                var first=automatic.GetPreparationFailuresAsync(cancel.Token); var second=automatic.GetPreparationFailuresAsync(); cancel.Cancel();
+                Exception observed=null; try { await first; } catch(Exception error) { observed=error; }
+                Assert.IsInstanceOf<OperationCanceledException>(observed); Assert.AreEqual(1,(await second).Count);
+                Assert.AreEqual(1,(await automatic.GetPreparationFailuresAsync()).Count);
+            }
+        });
+
+        [Test] public void DirectoryIdentityCanonicalizesOldAndNewFormats()
+        {
+            string legacy="{\"bookmark\":\"saved-bookmark\",\"relative\":\"photo.png\"}";
+            string compact=ImageIdentity.Directory(legacy);
+            Assert.IsFalse(compact.Contains("saved-bookmark")); Assert.AreEqual(compact,ImageIdentity.Directory(compact));
+            Assert.AreEqual("directory:"+compact+"\nv1",ImageIdentity.Source("directory:"+legacy+"\nv1"));
+            Assert.AreEqual("directory:content://provider/a\nv1",ImageIdentity.Source("directory:content://provider/a\nv1"));
+        }
+
+        [UnityTest] public IEnumerator LegacyDirectoryReceiptsAndAcceptedTaskKeepTheirIdentity() => UniTask.ToCoroutine(async () =>
+        {
+            string legacy="directory:{\"bookmark\":\"saved-bookmark\",\"relative\":\"photo.png\"}", scope="legacy-directory";
+            string compact=ImageIdentity.Source(legacy), key=null, id=null;
+            using(var service=new ImageBackupService(Config()))
+            {
+                id=(await service.EnqueueAsync(new[]{ImageReference.FromFile(imagePath)}))[0];
+                var task=service.GetTasks().Single(); key=task.key; task.source=legacy;
+                ImageBackupService.AtomicJson(Path.Combine(Config().StorageDirectory,"batches",task.batchId,id+".json"),task);
+                service.SaveScan(scope,new BackupScanState { baselineEstablished=true });
+                service.SaveScanEntry(scope,new BackupReceipt { fingerprint=legacy+"\nv1",source=legacy,error="old failure" });
+            }
+            using(var service=new ImageBackupService(Config()))
+            {
+                var task=service.GetTasks().Single(); Assert.AreEqual(id,task.id); Assert.AreEqual(key,task.key); Assert.AreEqual(compact,task.source);
+                await service.EnsureScanAsync(scope,default); Assert.IsTrue(service.ScanKnows(scope,compact+"\nv1"));
+                Assert.AreEqual("old failure",service.GetScanFailures(scope).Single().Error);
+                var receipt=service.LoadScan(scope).entries.Single(); receipt.retryRequested=true; receipt.error=null;
+                service.SaveScanEntry(scope,receipt);
+            }
+            using(var service=new ImageBackupService(Config()))
+            {
+                await service.EnsureScanAsync(scope,default);
+                Assert.IsFalse(service.ScanKnows(scope,compact+"\nv1")); Assert.IsEmpty(service.GetScanFailures(scope));
+                Assert.AreEqual(1,service.LoadScan(scope).entries.Count);
+            }
+        });
+
+        sealed class UnknownLengthContent : System.Net.Http.HttpContent
+        {
+            readonly byte[] data;
+            internal UnknownLengthContent(int size) { data=Enumerable.Repeat((byte)'x',size).ToArray(); }
+            protected override bool TryComputeLength(out long length) { length=0; return false; }
+            protected override System.Threading.Tasks.Task<System.IO.Stream> CreateContentReadStreamAsync() => System.Threading.Tasks.Task.FromResult<Stream>(new MemoryStream(data,false));
+            protected override System.Threading.Tasks.Task SerializeToStreamAsync(Stream stream,System.Net.TransportContext context) => throw new InvalidOperationException("Response must be streamed.");
+        }
+        [UnityTest] public IEnumerator BackupResponseLimitCoversKnownAndUnknownLengths() => UniTask.ToCoroutine(async () =>
+        {
+            using(var boundary=new System.Net.Http.HttpResponseMessage { Content=new UnknownLengthContent(65536) })
+                Assert.AreEqual(65536,(await ImageBackupService.ReadResponse(boundary,default)).Length);
+            foreach(bool known in new[]{false,true})
+            {
+                using var oversized=new System.Net.Http.HttpResponseMessage { Content=known ? (System.Net.Http.HttpContent)new System.Net.Http.ByteArrayContent(new byte[65537]) : new UnknownLengthContent(65537) };
+                Exception observed=null; try { await ImageBackupService.ReadResponse(oversized,default); } catch(Exception error) { observed=error; }
+                Assert.IsInstanceOf<IOException>(observed);
+            }
+        });
+
         [UnityTest] public IEnumerator AsyncOpenPreservesQueueAndCanceledOpenReleasesOwnership() => UniTask.ToCoroutine(async () =>
         {
             using (var service = await ImageBackupService.CreateAsync(Config()))

@@ -98,26 +98,38 @@ namespace Game.Media
         }
         public static async UniTask<IReadOnlyList<ImageAlbum>> QueryAlbumsAsync(CancellationToken cancellationToken = default)
         {
-            var result = await NativeMedia.Request(new MediaRequest { op = "albums" }, cancellationToken);
             var albums = new List<ImageAlbum>();
-            foreach (var item in result.items ?? Array.Empty<MediaItem>()) albums.Add(new ImageAlbum(item.id, item.name, item.count));
+            await NativeMedia.Request(new MediaRequest { op = "albums" }, cancellationToken, items =>
+            {
+                foreach (var item in items) albums.Add(new ImageAlbum(item.id, item.name, item.count));
+                return UniTask.FromResult(true);
+            });
             return albums.AsReadOnly();
         }
         public static async UniTask<ImageSnapshot> QueryImagesAsync(string albumId = null, CancellationToken cancellationToken = default)
         {
-            var result = await NativeMedia.Request(new MediaRequest { op = "images", album = albumId }, cancellationToken);
-            var items = result.items ?? Array.Empty<MediaItem>(); var images = new ImageReference[items.Length];
-            long deadline = System.Diagnostics.Stopwatch.GetTimestamp() + System.Diagnostics.Stopwatch.Frequency / 500;
-            for (int i = 0; i < images.Length; i++)
+            var images = new List<ImageReference>();
+            await VisitImagesAsync(page => { images.AddRange(page); return UniTask.FromResult(true); }, albumId, cancellationToken);
+            return new ImageSnapshot(images.ToArray());
+        }
+        /// <summary>Consumes at most 200 items per callback. Return false to stop; the visit returns false when stopped.</summary>
+        public static async UniTask<bool> VisitImagesAsync(Func<IReadOnlyList<ImageReference>, UniTask<bool>> consume,
+            string albumId = null, CancellationToken cancellationToken = default)
+        {
+            if (consume == null) throw new ArgumentNullException(nameof(consume));
+            bool completed = true;
+            await NativeMedia.Request(new MediaRequest { op = "images", album = albumId }, cancellationToken,
+                async items => completed = await ConsumePage(items, "library", consume));
+            return completed;
+        }
+        internal static UniTask<bool> ConsumePage(MediaItem[] items, string source, Func<IReadOnlyList<ImageReference>, UniTask<bool>> consume)
+        {
+            var images = new ImageReference[items.Length];
+            for (int i = 0; i < items.Length; i++)
             {
-                if (i != 0 && i % 200 == 0 && System.Diagnostics.Stopwatch.GetTimestamp() >= deadline)
-                {
-                    await UniTask.Yield(PlayerLoopTiming.Update, cancellationToken);
-                    deadline = System.Diagnostics.Stopwatch.GetTimestamp() + System.Diagnostics.Stopwatch.Frequency / 500;
-                }
-                var item = items[i]; images[i] = new ImageReference("library", item.id, item.name, item.mime, item.size, item.width, item.height, item.version);
+                var item = items[i]; images[i] = new ImageReference(item.source ?? source, item.id, item.name, item.mime, item.size, item.width, item.height, item.version);
             }
-            return new ImageSnapshot(images);
+            return consume(Array.AsReadOnly(images));
         }
     }
 }

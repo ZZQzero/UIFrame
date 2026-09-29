@@ -6,6 +6,7 @@
 #import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
 #import <Network/Network.h>
 #include <atomic>
+#import <CommonCrypto/CommonDigest.h>
 
 static std::atomic<bool> UFMWifi(false);
 extern "C" bool UFMIsUnmeteredWifi() {
@@ -23,12 +24,68 @@ extern "C" bool UFMIsUnmeteredWifi() {
     return UFMWifi.load();
 }
 
+static void UFMCheckIO(NSError *error) {
+    if(error) @throw [NSException exceptionWithName:@"ReadFailed" reason:error.localizedDescription userInfo:nil];
+}
+@interface UFMPageStore : NSObject
+@property NSString *path;
+@property NSFileHandle *writer;
+@property NSFileHandle *reader;
+@property NSMutableArray *items;
+@property NSUInteger remaining;
+- (void)add:(NSDictionary*)item;
+- (void)finish;
+- (NSDictionary*)next;
+- (void)close;
+@end
+@implementation UFMPageStore
+- (instancetype)init {
+    if((self=[super init])) {
+        _items=[NSMutableArray new]; _path=[NSTemporaryDirectory() stringByAppendingPathComponent:[@"uiframe-metadata-" stringByAppendingString:NSUUID.UUID.UUIDString]];
+        NSError *error=nil; [[NSData data] writeToFile:_path options:NSDataWritingAtomic error:&error]; UFMCheckIO(error);
+        _writer=[NSFileHandle fileHandleForWritingToURL:[NSURL fileURLWithPath:_path] error:&error]; UFMCheckIO(error);
+    } return self;
+}
+- (void)add:(NSDictionary*)item { [_items addObject:item]; if(_items.count==200) [self flush]; }
+- (void)flush {
+    if(!_items.count) return;
+    NSError *error=nil; NSData *data=[NSJSONSerialization dataWithJSONObject:_items options:0 error:&error]; UFMCheckIO(error);
+    if(data.length>16*1024*1024) @throw [NSException exceptionWithName:@"ReadFailed" reason:@"Metadata page exceeds 16 MiB" userInfo:nil];
+    uint32_t length=(uint32_t)data.length;
+    [_writer writeData:[NSData dataWithBytes:&length length:sizeof(length)] error:&error]; UFMCheckIO(error);
+    [_writer writeData:data error:&error]; UFMCheckIO(error); _remaining++; [_items removeAllObjects];
+}
+- (void)finish { [self flush]; NSError *error=nil; [_writer closeAndReturnError:&error]; _writer=nil; UFMCheckIO(error); }
+- (NSDictionary*)next {
+    if(!_remaining) return @{@"status":@"ok",@"items":@[],@"more":@NO};
+    NSError *error=nil;
+    if(!_reader) { _reader=[NSFileHandle fileHandleForReadingFromURL:[NSURL fileURLWithPath:_path] error:&error]; UFMCheckIO(error); }
+    NSData *header=[_reader readDataUpToLength:4 error:&error]; UFMCheckIO(error);
+    uint32_t length=0; if(header.length==4) memcpy(&length,header.bytes,4);
+    if(!length || length>16*1024*1024) @throw [NSException exceptionWithName:@"ReadFailed" reason:@"Invalid metadata page length" userInfo:nil];
+    NSData *data=[_reader readDataUpToLength:length error:&error]; UFMCheckIO(error);
+    if(data.length!=length) @throw [NSException exceptionWithName:@"ReadFailed" reason:@"Truncated metadata page" userInfo:nil];
+    NSArray *page=[NSJSONSerialization JSONObjectWithData:data options:0 error:&error]; UFMCheckIO(error); _remaining--;
+    return @{@"status":@"ok",@"items":page,@"more":@(_remaining!=0)};
+}
+- (void)close {
+    NSFileHandle *writer=_writer, *reader=_reader; NSString *path=_path;
+    _writer=nil; _reader=nil; _path=nil; [_items removeAllObjects];
+    NSError *first=nil, *error=nil;
+    [writer closeAndReturnError:&error]; first=error;
+    error=nil; [reader closeAndReturnError:&error]; if(error) { if(first) NSLog(@"UIFrame pages cleanup: %@",error); else first=error; }
+    error=nil; if(path) [[NSFileManager defaultManager] removeItemAtPath:path error:&error];
+    if(error) { if(first) NSLog(@"UIFrame pages cleanup: %@",error); else first=error; }
+    UFMCheckIO(first);
+}
+- (void)dealloc { @try { [self close]; } @catch(NSException *error) { NSLog(@"UIFrame pages cleanup: %@",error); } }
+@end
+
 @interface UFMJob : NSObject
 @property(nonatomic,strong) NSDictionary *request;
 @property(nonatomic,copy) NSString *identifier;
 @property(nonatomic,copy) NSString *result;
-@property(nonatomic,strong) NSArray *pages;
-@property(nonatomic) NSUInteger offset;
+@property(nonatomic,strong) UFMPageStore *pages;
 @property(nonatomic) PHImageRequestID imageRequest;
 @property(nonatomic) BOOL imagePending;
 @property(atomic) BOOL canceled;
@@ -58,6 +115,8 @@ static void UFMInitialize() {
 static NSDictionary *UFMError(NSString *code, NSString *message) { return @{ @"status":@"error", @"code":code, @"error":message ?: @"Native operation failed." }; }
 static NSError *UFMFailure(NSString *message) { return [NSError errorWithDomain:@"UIFrameGallery" code:1 userInfo:@{NSLocalizedDescriptionKey:message}]; }
 static void UFMClean(UFMJob *job) {
+    UFMPageStore *pages=job.pages; job.pages=nil;
+    @try { [pages close]; } @catch(NSException *error) { NSLog(@"UIFrame pages cleanup: %@",error); }
     NSString *path=job.request[@"output"];
     if(path.length && [[NSFileManager defaultManager] fileExistsAtPath:path]) {
         NSError *error=nil; if(![[NSFileManager defaultManager] removeItemAtPath:path error:&error]) NSLog(@"UIFrameGallery cleanup: %@",error);
@@ -70,7 +129,7 @@ static void UFMComplete(UFMJob *job, NSDictionary *result) {
         if(job.securityRoot) { [job.securityRoot stopAccessingSecurityScopedResource]; job.securityRoot=nil; }
         if(job.canceled || ![result[@"status"] isEqual:@"ok"]) UFMClean(job);
         if(job.canceled) [UFMJobs removeObjectForKey:job.identifier];
-        else if ([result[@"status"] isEqual:@"ok"] && [@[@"images",@"albums",@"directory"] containsObject:job.request[@"op"]]) job.pages=result[@"items"];
+        else if ([result[@"status"] isEqual:@"ok"] && job.pages) { /* Metadata pages are sealed. */ }
         else { NSData *data=[NSJSONSerialization dataWithJSONObject:result options:0 error:nil]; job.result=[[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding]; }
     }
 }
@@ -104,31 +163,47 @@ static NSURL *UFMResolveDirectory(UFMJob *job, NSString *bookmark, NSError **err
     if(![url startAccessingSecurityScopedResource]) { *error=UFMFailure(@"Directory authorization unavailable."); return nil; }
     job.securityRoot=url; return url;
 }
+static NSString *UFMBookmarkPath(NSString *key, NSError **error) {
+    if(key.length!=64 || [key rangeOfCharacterFromSet:[[NSCharacterSet characterSetWithCharactersInString:@"0123456789abcdef"] invertedSet]].location!=NSNotFound) { *error=UFMFailure(@"Invalid directory bookmark identifier."); return nil; }
+    NSString *root=[NSSearchPathForDirectoriesInDomains(NSApplicationSupportDirectory,NSUserDomainMask,YES).firstObject stringByAppendingPathComponent:@"UIFrameDirectories"];
+    if(![[NSFileManager defaultManager] createDirectoryAtPath:root withIntermediateDirectories:YES attributes:nil error:error]) return nil;
+    return [root stringByAppendingPathComponent:key];
+}
+static NSString *UFMRegisterBookmark(NSString *bookmark, NSError **error) {
+    NSData *data=[bookmark dataUsingEncoding:NSUTF8StringEncoding]; unsigned char digest[CC_SHA256_DIGEST_LENGTH];
+    CC_SHA256(data.bytes,(CC_LONG)data.length,digest); NSMutableString *key=[NSMutableString new];
+    for(NSUInteger i=0;i<CC_SHA256_DIGEST_LENGTH;i++) [key appendFormat:@"%02x",digest[i]];
+    NSString *path=UFMBookmarkPath(key,error); if(!path) return nil;
+    if(![data writeToFile:path options:NSDataWritingAtomic error:error]) return nil;
+    return key;
+}
 static NSDictionary *UFMDirectory(UFMJob *job) {
     NSError *error=nil; NSURL *root=UFMResolveDirectory(job,job.request[@"path"],&error);
     if(!root) return UFMError(@"PermissionDenied",error.description);
+    NSString *bookmarkId=UFMRegisterBookmark(job.request[@"path"],&error); if(!bookmarkId) return UFMError(@"WriteFailed",error.description);
     NSArray *keys=@[NSURLIsDirectoryKey,NSURLIsSymbolicLinkKey,NSURLFileSizeKey,NSURLContentModificationDateKey];
     __block NSError *enumerationError=nil;
     NSDirectoryEnumerator *enumerator=[[NSFileManager defaultManager] enumeratorAtURL:root includingPropertiesForKeys:keys options:0 errorHandler:^BOOL(NSURL *url,NSError *problem) { enumerationError=problem; return NO; }];
-    NSMutableArray *items=[NSMutableArray new];
-    for(NSURL *url in enumerator) {
+    job.pages=[UFMPageStore new];
+    for(NSURL *url in enumerator) { @autoreleasepool {
         if(job.canceled) break;
         NSDictionary *values=[url resourceValuesForKeys:keys error:&error]; if(!values) return UFMError(@"ReadFailed",error.description);
         if([values[NSURLIsSymbolicLinkKey] boolValue]) { [enumerator skipDescendants]; continue; }
         if([values[NSURLIsDirectoryKey] boolValue]) { if(![job.request[@"recursive"] boolValue]) [enumerator skipDescendants]; continue; }
         NSString *mime=UFMMime(url.pathExtension); if(![mime hasPrefix:@"image/"]) continue;
         NSString *relative=[url.path substringFromIndex:root.path.length+1];
-        NSDictionary *identity=@{@"bookmark":job.request[@"path"],@"relative":relative};
+        NSDictionary *identity=@{@"bookmarkId":bookmarkId,@"relative":relative};
         NSString *identifier=[[NSString alloc] initWithData:[NSJSONSerialization dataWithJSONObject:identity options:0 error:nil] encoding:NSUTF8StringEncoding];
-        [items addObject:@{@"id":identifier,@"source":@"directory",@"name":url.lastPathComponent,@"mime":mime,@"size":values[NSURLFileSizeKey] ?: @(-1),
+        [job.pages add:@{@"id":identifier,@"source":@"directory",@"name":url.lastPathComponent,@"mime":mime,@"size":values[NSURLFileSizeKey] ?: @(-1),
             @"version":[NSString stringWithFormat:@"%.6f:%@",[values[NSURLContentModificationDateKey] timeIntervalSince1970],values[NSURLFileSizeKey]]}];
-    }
-    return enumerationError ? UFMError(@"ReadFailed",enumerationError.description) : @{ @"status":@"ok", @"items":items };
+    }}
+    if(enumerationError) return UFMError(@"ReadFailed",enumerationError.description);
+    [job.pages finish]; return @{@"status":@"ok"};
 }
 static NSDictionary *UFMLibrary(UFMJob *job) {
     NSString *access=UFMAccess();
     if(![access isEqual:@"Authorized"] && ![access isEqual:@"Limited"]) return UFMError(@"PermissionDenied",@"Photo library read access has not been granted.");
-    NSMutableArray *items=[NSMutableArray new];
+    job.pages=[UFMPageStore new];
     if([job.request[@"op"] isEqual:@"albums"]) {
         NSMutableSet *seen=[NSMutableSet new];
         for(NSNumber *type in @[@(PHAssetCollectionTypeSmartAlbum),@(PHAssetCollectionTypeAlbum)]) {
@@ -137,7 +212,7 @@ static NSDictionary *UFMLibrary(UFMJob *job) {
                 if(job.canceled) break;
                 if([seen containsObject:collection.localIdentifier]) continue; [seen addObject:collection.localIdentifier];
                 NSUInteger count=[PHAsset fetchAssetsInAssetCollection:collection options:UFMImageOptions()].count;
-                [items addObject:@{ @"id":collection.localIdentifier, @"name":collection.localizedTitle ?: @"相册", @"count":@(count) }];
+                [job.pages add:@{ @"id":collection.localIdentifier, @"name":collection.localizedTitle ?: @"相册", @"count":@(count) }];
             }
         }
     } else {
@@ -147,15 +222,15 @@ static NSDictionary *UFMLibrary(UFMJob *job) {
             if(!collection) return UFMError(@"SourceUnavailable",@"Album is no longer accessible.");
             assets=[PHAsset fetchAssetsInAssetCollection:collection options:UFMImageOptions()];
         } else assets=[PHAsset fetchAssetsWithOptions:UFMImageOptions()];
-        for(PHAsset *asset in assets) {
+        for(PHAsset *asset in assets) { @autoreleasepool {
             if(job.canceled) break;
             PHAssetResource *resource=[PHAssetResource assetResourcesForAsset:asset].firstObject;
             NSString *name=resource.originalFilename ?: @"image";
-            [items addObject:@{ @"id":asset.localIdentifier,@"name":name,@"mime":UFMMime(name.pathExtension),@"size":@(-1),
+            [job.pages add:@{ @"id":asset.localIdentifier,@"name":name,@"mime":UFMMime(name.pathExtension),@"size":@(-1),
                 @"width":@(asset.pixelWidth),@"height":@(asset.pixelHeight),@"version":[NSString stringWithFormat:@"%.6f",asset.modificationDate.timeIntervalSince1970] }];
-        }
+        }}
     }
-    return @{ @"status":@"ok", @"items":items };
+    [job.pages finish]; return @{@"status":@"ok"};
 }
 // Executed on the worker queue. PhotoKit copies resources without retaining a full-resolution NSData buffer.
 static NSString *UFMSource(UFMJob *job, NSError **error) {
@@ -163,7 +238,12 @@ static NSString *UFMSource(UFMJob *job, NSError **error) {
     if([job.request[@"source"] isEqual:@"directory"]) {
         NSDictionary *identity=[NSJSONSerialization JSONObjectWithData:[job.request[@"path"] dataUsingEncoding:NSUTF8StringEncoding] options:0 error:error];
         if(!identity) return nil;
-        NSURL *root=UFMResolveDirectory(job,identity[@"bookmark"],error); if(!root) return nil;
+        NSString *bookmark=identity[@"bookmark"];
+        if(!bookmark) {
+            NSString *stored=UFMBookmarkPath(identity[@"bookmarkId"],error); if(!stored) return nil;
+            bookmark=[NSString stringWithContentsOfFile:stored encoding:NSUTF8StringEncoding error:error]; if(!bookmark) return nil;
+        }
+        NSURL *root=UFMResolveDirectory(job,bookmark,error); if(!root) return nil;
         NSString *path=[[root.path stringByAppendingPathComponent:identity[@"relative"]] stringByStandardizingPath];
         NSString *resolved=[path stringByResolvingSymlinksInPath];
         if(![resolved hasPrefix:[[root.path stringByResolvingSymlinksInPath] stringByAppendingString:@"/"]]) { *error=UFMFailure(@"Image lies outside the granted directory."); return nil; }
@@ -193,6 +273,10 @@ static NSDictionary *UFMCopyImage(UFMJob *job, NSString *source, NSString *desti
             total+=count;
         }
     } @finally { [input close]; [output close]; }
+}
+static BOOL UFMFitsPixels(UFMJob *job, double w, double h) {
+    double scale=MIN(1,[job.request[@"edge"] doubleValue]/MAX(w,h));
+    return MAX(1,floor(w*scale))*MAX(1,floor(h*scale)) <= [job.request[@"maxPixels"] doubleValue];
 }
 static NSDictionary *UFMEncodeImage(UFMJob *job, CGImageRef image) {
     if (job.canceled) return @{@"status":@"canceled"};
@@ -227,6 +311,10 @@ static NSDictionary *UFMReadSource(UFMJob *job, NSString *source) {
     }
     CGImageSourceRef imageSource=CGImageSourceCreateWithURL((__bridge CFURLRef)[NSURL fileURLWithPath:source],NULL);
     if(!imageSource) return UFMError(@"UnsupportedFormat",@"ImageIO cannot read this image.");
+    NSDictionary *properties=CFBridgingRelease(CGImageSourceCopyPropertiesAtIndex(imageSource,0,NULL));
+    if(!UFMFitsPixels(job,[properties[(id)kCGImagePropertyPixelWidth] doubleValue],[properties[(id)kCGImagePropertyPixelHeight] doubleValue])) {
+        CFRelease(imageSource); return UFMError(@"ImageTooLarge",@"Requested image exceeds MaxPixels.");
+    }
     NSDictionary *options=@{ (id)kCGImageSourceCreateThumbnailFromImageAlways:@YES, (id)kCGImageSourceCreateThumbnailWithTransform:@YES,
         (id)kCGImageSourceThumbnailMaxPixelSize:job.request[@"edge"], (id)kCGImageSourceShouldCacheImmediately:@YES };
     CGImageRef image=CGImageSourceCreateThumbnailAtIndex(imageSource,0,(__bridge CFDictionaryRef)options); CFRelease(imageSource);
@@ -238,6 +326,7 @@ static NSDictionary *UFMReadSource(UFMJob *job, NSString *source) {
 static void UFMReadThumbnail(UFMJob *job) {
     PHAsset *asset=[PHAsset fetchAssetsWithLocalIdentifiers:@[job.request[@"path"]] options:nil].firstObject;
     if(!asset) { UFMComplete(job,UFMError(@"SourceUnavailable",@"Photo is no longer accessible.")); return; }
+    if(!UFMFitsPixels(job,asset.pixelWidth,asset.pixelHeight)) { UFMComplete(job,UFMError(@"ImageTooLarge",@"Requested image exceeds MaxPixels.")); return; }
     PHImageRequestOptions *options=[PHImageRequestOptions new]; options.networkAccessAllowed=YES;
     options.deliveryMode=PHImageRequestOptionsDeliveryModeHighQualityFormat; options.resizeMode=PHImageRequestOptionsResizeModeExact;
     CGFloat edge=[job.request[@"edge"] doubleValue];
@@ -251,7 +340,7 @@ static void UFMReadThumbnail(UFMJob *job) {
             if(job.canceled) { UFMComplete(job,@{@"status":@"canceled"}); return; }
             CGFloat w=image.size.width, h=image.size.height, scale=MIN(1,edge/MAX(w,h));
             CGSize size=CGSizeMake(MAX(1,floor(w*scale)),MAX(1,floor(h*scale)));
-            UIGraphicsImageRendererFormat *format=[UIGraphicsImageRendererFormat defaultFormat]; format.scale=1; format.opaque=NO;
+            UIGraphicsImageRendererFormat *format=[UIGraphicsImageRendererFormat defaultFormat]; format.scale=1; format.opaque=NO; format.preferredRange=UIGraphicsImageRendererFormatRangeStandard;
             UIGraphicsImageRenderer *renderer=[[UIGraphicsImageRenderer alloc] initWithSize:size format:format];
             UIImage *normalized=[renderer imageWithActions:^(UIGraphicsImageRendererContext *context) { [image drawInRect:CGRectMake(0,0,size.width,size.height)]; }];
             UFMComplete(job,UFMEncodeImage(job,normalized.CGImage));
@@ -407,7 +496,7 @@ extern "C" void UFMStart(const char *json) {
         else if([op isEqual:@"requestAccess"]) {
             if(![[NSBundle mainBundle] objectForInfoDictionaryKey:@"NSPhotoLibraryUsageDescription"]) { UFMComplete(job,UFMError(@"InvalidConfiguration",@"Photo library usage description is missing.")); return; }
             [PHPhotoLibrary requestAuthorizationForAccessLevel:PHAccessLevelReadWrite handler:^(PHAuthorizationStatus status) { UFMComplete(job,@{@"status":@"ok",@"access":UFMAccess()}); }];
-        } else [UFMQueue addOperationWithBlock:^{ @autoreleasepool {
+        } else [UFMQueue addOperationWithBlock:^{ @autoreleasepool { @try {
             if([op isEqual:@"albums"] || [op isEqual:@"images"]) UFMComplete(job,UFMLibrary(job));
             else if([op isEqual:@"directory"]) UFMComplete(job,UFMDirectory(job));
             else if([op isEqual:@"export"] || [op isEqual:@"preview"]) {
@@ -418,22 +507,26 @@ extern "C" void UFMStart(const char *json) {
                 else UFMReadAsset(job);
             }
             else UFMComplete(job,UFMError(@"UnsupportedOperation",op));
-        }}];
+        } @catch(NSException *error) { UFMComplete(job,UFMError(@"ReadFailed",error.reason)); } }}];
     });
 }
-extern "C" char *UFMPoll(const char *identifier) {
+extern "C" char *UFMPoll(const char *identifier) { @autoreleasepool {
     UFMInitialize(); NSString *key=[NSString stringWithUTF8String:identifier];
     @synchronized(UFMJobs) {
         UFMJob *job=UFMJobs[key]; if(!job.finished) return NULL;
         if(job.pages) {
-            NSUInteger end=MIN(job.pages.count,job.offset+200); BOOL more=end<job.pages.count;
-            NSDictionary *page=@{@"status":@"ok",@"items":[job.pages subarrayWithRange:NSMakeRange(job.offset,end-job.offset)],@"more":@(more)};
-            job.offset=end; if(!more) [UFMJobs removeObjectForKey:key];
+            NSDictionary *page;
+            @try {
+                page=[job.pages next];
+                if(![page[@"more"] boolValue]) { UFMPageStore *pages=job.pages; job.pages=nil; [pages close]; }
+            }
+            @catch(NSException *error) { UFMClean(job); page=UFMError(@"ReadFailed",error.reason); }
+            if(![page[@"more"] boolValue]) [UFMJobs removeObjectForKey:key];
             NSData *data=[NSJSONSerialization dataWithJSONObject:page options:0 error:nil]; return strdup([[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding].UTF8String);
         }
         char *result=strdup(job.result.UTF8String); [UFMJobs removeObjectForKey:key]; return result;
     }
-}
+}}
 extern "C" void UFMFree(void *value) { free(value); }
 extern "C" void UFMCancel(const char *identifier) {
     UFMInitialize(); NSString *key=[NSString stringWithUTF8String:identifier]; __block UFMJob *job;

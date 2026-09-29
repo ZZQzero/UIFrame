@@ -52,7 +52,7 @@ public final class GalleryBridge {
         volatile boolean canceled;
         boolean finished;
         String result;
-        JSONArray pages; int offset;
+        PageStore pages;
         final CancellationSignal signal = new CancellationSignal();
         Closeable input;
         volatile GalleryActivity activity;
@@ -91,6 +91,7 @@ public final class GalleryBridge {
                 }
                 complete(job, result);
             } catch (OutOfMemoryError e) { fail(job, "MemoryLimitExceeded", "Native image allocation failed."); }
+              catch (PixelLimit e) { fail(job, "ImageTooLarge", e.getMessage()); }
               catch (MediaFailure e) { fail(job, e.code, e.toString()); }
               catch (SecurityException e) { fail(job, "PermissionDenied", e.toString()); }
               catch (Exception e) { fail(job, "ReadFailed", e.toString()); }
@@ -102,11 +103,10 @@ public final class GalleryBridge {
             if (!job.finished) return null;
             if(job.pages!=null) {
                 try {
-                    JSONArray page=new JSONArray(); int end=Math.min(job.pages.length(),job.offset+200);
-                    for(;job.offset<end;job.offset++) page.put(job.pages.get(job.offset));
-                    boolean more=end<job.pages.length(); if(!more) jobs.remove(id,job);
-                    return response("ok").put("items",page).put("more",more).toString();
-                } catch(Exception error) { throw new IllegalStateException(error); }
+                    JSONObject page=job.pages.next();
+                    if(!page.getBoolean("more")) { jobs.remove(id,job); PageStore pages=job.pages; job.pages=null; pages.close(); }
+                    return page.toString();
+                } catch(Exception error) { clean(job); jobs.remove(id,job); throw new IllegalStateException(error); }
             }
             jobs.remove(id, job); return job.result;
         }
@@ -138,12 +138,13 @@ public final class GalleryBridge {
             job.finished = true;
             if (job.canceled || !response.optString("status").equals("ok")) clean(job);
             if (job.canceled) jobs.remove(job.id, job);
-            else if(response.optString("status").equals("ok") && Arrays.asList("images","albums","directory").contains(job.request.optString("op")))
-                job.pages=response.optJSONArray("items");
+            else if(response.optString("status").equals("ok") && job.pages!=null) { /* Pages are sealed before completion. */ }
             else job.result = response.toString();
         }
     }
     static void clean(Job job) {
+        PageStore pages=job.pages; job.pages=null;
+        if(pages!=null) { try { pages.close(); } catch(IOException error) { android.util.Log.e("UIFrameGallery","Page store cleanup failed",error); } }
         String output = job.request.optString("output");
         if (!output.isEmpty()) delete(new File(output));
     }
@@ -219,92 +220,135 @@ public final class GalleryBridge {
         return response("ok").put("items", new JSONArray().put(item));
     }
     static JSONObject preview(Job job) throws Exception {
-        int edge = job.request.getInt("edge"); Bitmap bitmap;
-        if (Build.VERSION.SDK_INT >= 28) {
-            ImageDecoder.Source source = "file".equals(job.request.optString("source"))
-                ? ImageDecoder.createSource(new File(job.request.getString("path")))
-                : ImageDecoder.createSource(context.getContentResolver(), Uri.parse(job.request.getString("path")));
-            bitmap = ImageDecoder.decodeBitmap(source, (decoder, info, src) -> {
-                int w = info.getSize().getWidth(), h = info.getSize().getHeight();
-                double scale = Math.min(1.0, edge / (double)Math.max(w, h));
-                decoder.setTargetSize(Math.max(1, (int)(w * scale)), Math.max(1, (int)(h * scale)));
-                decoder.setAllocator(ImageDecoder.ALLOCATOR_SOFTWARE);
-            });
-        } else {
-            BitmapFactory.Options options = new BitmapFactory.Options(); options.inJustDecodeBounds = true;
-            try (InputStream input = open(job)) { BitmapFactory.decodeStream(input, null, options); }
-            if (options.outWidth <= 0 || options.outHeight <= 0) throw new IOException("Unsupported image format.");
-            options.inJustDecodeBounds = false; options.inSampleSize = 1;
-            while (Math.max(options.outWidth, options.outHeight) / options.inSampleSize > edge * 2) options.inSampleSize *= 2;
-            try (InputStream input = open(job)) { bitmap = BitmapFactory.decodeStream(input, null, options); }
-            if (bitmap == null) throw new IOException("Image decode failed.");
-            int orientation = 1;
-            if ("image/jpeg".equals(options.outMimeType)) {
-                try (InputStream input = open(job)) { orientation = new ExifInterface(input).getAttributeInt(ExifInterface.TAG_ORIENTATION, 1); }
-                catch (Exception error) { bitmap.recycle(); throw error; }
-            }
-            Matrix matrix = new Matrix();
-            switch(orientation) {
-                case 2: matrix.setScale(-1,1); break;
-                case 3: matrix.setRotate(180); break;
-                case 4: matrix.setScale(1,-1); break;
-                case 5: matrix.setRotate(90); matrix.postScale(-1,1); break;
-                case 6: matrix.setRotate(90); break;
-                case 7: matrix.setRotate(-90); matrix.postScale(-1,1); break;
-                case 8: matrix.setRotate(-90); break;
-            }
-            float scale = Math.min(1f, edge / (float)Math.max(bitmap.getWidth(),bitmap.getHeight())); matrix.postScale(scale, scale);
-            Bitmap transformed = Bitmap.createBitmap(bitmap, 0, 0, bitmap.getWidth(), bitmap.getHeight(), matrix, true);
-            if (transformed != bitmap) bitmap.recycle(); bitmap = transformed;
-        }
-        boolean jpeg="jpg".equals(job.request.optString("format"));
-        if(jpeg) {
-            Bitmap flattened=Bitmap.createBitmap(bitmap.getWidth(),bitmap.getHeight(),Bitmap.Config.ARGB_8888);
-            try {
-                Canvas canvas=new Canvas(flattened);
-                int r=(int)Math.round(Math.max(0,Math.min(1,job.request.optDouble("backgroundR",1)))*255);
-                int g=(int)Math.round(Math.max(0,Math.min(1,job.request.optDouble("backgroundG",1)))*255);
-                int b=(int)Math.round(Math.max(0,Math.min(1,job.request.optDouble("backgroundB",1)))*255);
-                canvas.drawColor(Color.rgb(r,g,b)); canvas.drawBitmap(bitmap,0,0,null);
-            } catch(Exception error) { flattened.recycle(); bitmap.recycle(); throw error; }
-            bitmap.recycle(); bitmap=flattened;
-        }
-        File file = new File(job.request.getString("output"), jpeg ? "image.jpg" : "preview.png");
+        int edge = job.request.getInt("edge"); Bitmap bitmap = null;
         try {
+            if (Build.VERSION.SDK_INT >= 28) {
+                ImageDecoder.Source source = "file".equals(job.request.optString("source"))
+                    ? ImageDecoder.createSource(new File(job.request.getString("path")))
+                    : ImageDecoder.createSource(context.getContentResolver(), Uri.parse(job.request.getString("path")));
+                bitmap = ImageDecoder.decodeBitmap(source, (decoder, info, src) -> {
+                    int w = info.getSize().getWidth(), h = info.getSize().getHeight();
+                    checkPixels(job,w,h);
+                    decoder.setTargetColorSpace(android.graphics.ColorSpace.get(android.graphics.ColorSpace.Named.SRGB));
+                    double scale = Math.min(1.0, edge / (double)Math.max(w, h));
+                    decoder.setTargetSize(Math.max(1, (int)(w * scale)), Math.max(1, (int)(h * scale)));
+                    decoder.setAllocator(ImageDecoder.ALLOCATOR_SOFTWARE);
+                });
+            } else {
+                BitmapFactory.Options options = new BitmapFactory.Options(); options.inJustDecodeBounds = true;
+                try (InputStream input = open(job)) { BitmapFactory.decodeStream(input, null, options); }
+                if (options.outWidth <= 0 || options.outHeight <= 0) throw new IOException("Unsupported image format.");
+                checkPixels(job,options.outWidth,options.outHeight);
+                options.inJustDecodeBounds = false; options.inSampleSize = 1;
+                while (Math.max(options.outWidth, options.outHeight) / options.inSampleSize > edge) options.inSampleSize *= 2;
+                try (InputStream input = open(job)) { bitmap = BitmapFactory.decodeStream(input, null, options); }
+                if (bitmap == null) throw new IOException("Image decode failed.");
+                int orientation = 1;
+                if ("image/jpeg".equals(options.outMimeType)) {
+                    try (InputStream input = open(job)) { orientation = new ExifInterface(input).getAttributeInt(ExifInterface.TAG_ORIENTATION, 1); }
+                }
+                Matrix matrix = new Matrix();
+                switch(orientation) {
+                    case 2: matrix.setScale(-1,1); break;
+                    case 3: matrix.setRotate(180); break;
+                    case 4: matrix.setScale(1,-1); break;
+                    case 5: matrix.setRotate(90); matrix.postScale(-1,1); break;
+                    case 6: matrix.setRotate(90); break;
+                    case 7: matrix.setRotate(-90); matrix.postScale(-1,1); break;
+                    case 8: matrix.setRotate(-90); break;
+                }
+                float scale = Math.min(1f, edge / (float)Math.max(bitmap.getWidth(),bitmap.getHeight())); matrix.postScale(scale, scale);
+                Bitmap transformed = Bitmap.createBitmap(bitmap, 0, 0, bitmap.getWidth(), bitmap.getHeight(), matrix, true);
+                if (transformed != bitmap) bitmap.recycle(); bitmap = transformed;
+            }
+            boolean jpeg="jpg".equals(job.request.optString("format"));
+            if(jpeg) {
+                Bitmap flattened=Bitmap.createBitmap(bitmap.getWidth(),bitmap.getHeight(),Bitmap.Config.ARGB_8888);
+                try {
+                    Canvas canvas=new Canvas(flattened);
+                    int r=(int)Math.round(Math.max(0,Math.min(1,job.request.optDouble("backgroundR",1)))*255);
+                    int g=(int)Math.round(Math.max(0,Math.min(1,job.request.optDouble("backgroundG",1)))*255);
+                    int b=(int)Math.round(Math.max(0,Math.min(1,job.request.optDouble("backgroundB",1)))*255);
+                    canvas.drawColor(Color.rgb(r,g,b)); canvas.drawBitmap(bitmap,0,0,null);
+                    bitmap.recycle(); bitmap=flattened; flattened=null;
+                } finally { if(flattened!=null) flattened.recycle(); }
+            }
+            File file = new File(job.request.getString("output"), jpeg ? "image.jpg" : "preview.png");
             job.check();
             try(FileOutputStream out = new FileOutputStream(file)) {
-                if (!bitmap.compress(jpeg?Bitmap.CompressFormat.JPEG:Bitmap.CompressFormat.PNG, jpeg?job.request.optInt("quality",90):100, out)) throw new IOException("PNG encode failed.");
+                if (!bitmap.compress(jpeg?Bitmap.CompressFormat.JPEG:Bitmap.CompressFormat.PNG, jpeg?job.request.optInt("quality",90):100, out)) throw new IOException("Image encode failed.");
             }
             return response("ok").put("items", new JSONArray().put(new JSONObject().put("path", file.getAbsolutePath()).put("width", bitmap.getWidth()).put("height", bitmap.getHeight())));
-        } finally { bitmap.recycle(); }
+        } finally { if (bitmap != null) bitmap.recycle(); }
+    }
+    static final class PixelLimit extends IllegalArgumentException { PixelLimit() { super("Requested image exceeds MaxPixels."); } }
+    static void checkPixels(Job job, int width, int height) {
+        double scale=Math.min(1.0,job.request.optInt("edge",2048)/(double)Math.max(width,height));
+        long w=Math.max(1,(long)(width*scale)),h=Math.max(1,(long)(height*scale));
+        if(w*h>job.request.optInt("maxPixels",4194304)) throw new PixelLimit();
+    }
+    // One bounded page in memory; the spool keeps source enumeration independent of consumer speed.
+    static final class PageStore implements Closeable {
+        final File file;
+        DataOutputStream output;
+        DataInputStream input;
+        JSONArray page=new JSONArray(); int remaining;
+        PageStore() throws IOException {
+            file=File.createTempFile("uiframe-metadata-",".pages",context.getCacheDir());
+            try { output=new DataOutputStream(new BufferedOutputStream(new FileOutputStream(file))); }
+            catch(IOException error) { if(!file.delete()) error.addSuppressed(new IOException("Cannot release metadata spool")); throw error; }
+        }
+        void add(JSONObject item) throws Exception { page.put(item); if(page.length()==200) flushPage(); }
+        void flushPage() throws Exception {
+            if(page.length()==0) return;
+            byte[] bytes=page.toString().getBytes(java.nio.charset.StandardCharsets.UTF_8);
+            if(bytes.length>16*1024*1024) throw new IOException("Metadata page exceeds 16 MiB");
+            output.writeInt(bytes.length); output.write(bytes); remaining++; page=new JSONArray();
+        }
+        void finish() throws Exception { flushPage(); DataOutputStream writer=output; output=null; writer.close(); }
+        JSONObject next() throws Exception {
+            if(remaining==0) return response("ok").put("items",new JSONArray()).put("more",false);
+            if(input==null) input=new DataInputStream(new BufferedInputStream(new FileInputStream(file)));
+            int length=input.readInt(); if(length<=0 || length>16*1024*1024) throw new IOException("Invalid metadata page length");
+            byte[] bytes=new byte[length]; input.readFully(bytes); remaining--;
+            return response("ok").put("items",new JSONArray(new String(bytes,java.nio.charset.StandardCharsets.UTF_8))).put("more",remaining!=0);
+        }
+        public void close() throws IOException {
+            DataOutputStream writer=output; DataInputStream reader=input; output=null; input=null; page=new JSONArray();
+            // try-with-resources attempts every release and preserves the first failure.
+            try(Closeable spool=() -> { if(file.exists()&&!file.delete()) throw new IOException("Cannot release metadata spool"); };
+                DataOutputStream ownedWriter=writer; DataInputStream ownedReader=reader) { }
+        }
     }
     static JSONObject library(Job job, boolean albums) throws Exception {
         String access = access(); if (!access.equals("Authorized") && !access.equals("Limited")) throw new SecurityException("Library access not granted.");
         String[] columns = {"_id", "_display_name", "mime_type", "_size", "width", "height", "date_modified", "bucket_id", "bucket_display_name"};
-        String album = job.request.optString("album"); JSONArray result = new JSONArray();
-        LinkedHashMap<String, JSONObject> groups = new LinkedHashMap<>();
+        String album = job.request.optString("album"); job.pages=new PageStore();
+        JSONObject group=null; String previous=null;
         try(Cursor cursor = context.getContentResolver().query(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, columns,
-            album.isEmpty() ? null : "bucket_id = ?", album.isEmpty() ? null : new String[] {album}, "date_added DESC, _id DESC", job.signal)) {
+            album.isEmpty() ? null : "bucket_id = ?", album.isEmpty() ? null : new String[] {album}, albums?"bucket_id ASC":"date_added DESC, _id DESC", job.signal)) {
             if (cursor == null) throw new IOException("MediaStore query returned no cursor.");
             while(cursor.moveToNext()) {
                 job.check(); String bucket = cursor.getString(7);
                 if (albums) {
-                    JSONObject group = groups.get(bucket);
-                    if (group == null) { group = new JSONObject().put("id", bucket).put("name", cursor.getString(8)).put("count", 0); groups.put(bucket, group); }
-                    group.put("count", group.getInt("count") + 1);
-                } else result.put(new JSONObject().put("id", Uri.withAppendedPath(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, cursor.getString(0)).toString())
+                    if(group==null || !Objects.equals(previous,bucket)) {
+                        if(group!=null) job.pages.add(group);
+                        group=new JSONObject().put("id",bucket).put("name",cursor.getString(8)).put("count",0); previous=bucket;
+                    }
+                    group.put("count",group.getInt("count")+1);
+                } else job.pages.add(new JSONObject().put("id", Uri.withAppendedPath(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, cursor.getString(0)).toString())
                     .put("name", cursor.getString(1)).put("mime", cursor.getString(2)).put("size", cursor.getLong(3))
                     .put("width", cursor.getInt(4)).put("height", cursor.getInt(5)).put("version", cursor.getString(6) + ":" + cursor.getLong(3)));
             }
         }
-        if (albums) for(JSONObject group : groups.values()) result.put(group);
-        return response("ok").put("items", result);
+        if(group!=null) job.pages.add(group); job.pages.finish(); return response("ok");
     }
     static JSONObject directory(Job job) throws Exception {
         Uri tree = Uri.parse(job.request.getString("path"));
         if (!DocumentsContract.isTreeUri(tree)) throw new IllegalArgumentException("A granted directory tree URI is required.");
+        job.pages=new PageStore();
         ArrayDeque<String> pending = new ArrayDeque<>(); pending.add(DocumentsContract.getTreeDocumentId(tree));
-        HashSet<String> visited = new HashSet<>(); JSONArray items = new JSONArray();
+        HashSet<String> visited = new HashSet<>();
         String[] columns = {DocumentsContract.Document.COLUMN_DOCUMENT_ID, DocumentsContract.Document.COLUMN_DISPLAY_NAME,
             DocumentsContract.Document.COLUMN_MIME_TYPE, DocumentsContract.Document.COLUMN_SIZE, DocumentsContract.Document.COLUMN_LAST_MODIFIED};
         while (!pending.isEmpty()) {
@@ -315,13 +359,13 @@ public final class GalleryBridge {
                 while(cursor.moveToNext()) {
                     job.check(); String id=cursor.getString(0), mime=cursor.getString(2);
                     if(DocumentsContract.Document.MIME_TYPE_DIR.equals(mime)) { if(job.request.optBoolean("recursive")) pending.add(id); }
-                    else if(mime != null && mime.startsWith("image/")) items.put(new JSONObject()
+                    else if(mime != null && mime.startsWith("image/")) job.pages.add(new JSONObject()
                         .put("id", DocumentsContract.buildDocumentUriUsingTree(tree,id).toString()).put("name",cursor.getString(1))
                         .put("mime",mime).put("size",cursor.isNull(3) ? -1 : cursor.getLong(3)).put("source","directory")
                         .put("version",cursor.getString(4)+":"+cursor.getString(3)));
                 }
             }
         }
-        return response("ok").put("items",items);
+        job.pages.finish(); return response("ok");
     }
 }

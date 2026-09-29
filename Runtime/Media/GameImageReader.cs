@@ -9,6 +9,8 @@ namespace Game.Media
 {
     public static class GameImageReader
     {
+        static readonly SemaphoreSlim processingGate = new SemaphoreSlim(1, 1);
+
         public static UniTask<ImageTexture> LoadThumbnailAsync(ImageReference image, int maxEdge = 256, CancellationToken cancellationToken = default)
             => LoadPreviewAsync(image, new ImagePreviewOptions { MaxEdge = maxEdge }, cancellationToken);
 
@@ -16,7 +18,22 @@ namespace Game.Media
         {
             MediaThread.Check(); if (image == null) throw new ArgumentNullException(nameof(image));
             options ??= new ImagePreviewOptions(); options.Validate(); cancellationToken.ThrowIfCancellationRequested();
+            int edge = options.MaxEdge, pixels = options.MaxPixels; bool readable = options.Readable;
             using var lease = image.Acquire();
+            await processingGate.WaitAsync(cancellationToken);
+            try { return await LoadPreviewCore(image, edge, pixels, readable, cancellationToken); }
+            finally { await ReleaseProcessing(); }
+        }
+
+        static async UniTask ReleaseProcessing()
+        {
+            // Runtime Destroy is deferred; do not admit another decoder in the same frame.
+            try { if (Application.isPlaying) await UniTask.NextFrame(); }
+            finally { processingGate.Release(); }
+        }
+
+        static async UniTask<ImageTexture> LoadPreviewCore(ImageReference image, int edge, int pixels, bool readable, CancellationToken cancellationToken)
+        {
             string nativeDirectory = null; string path = image.Id; Texture2D texture = null;
             bool failed = false;
             try
@@ -24,24 +41,32 @@ namespace Game.Media
                 if (NativeMedia.Available)
                 {
                     string output = ImagePaths.NewDirectory();
-                    var result = await NativeMedia.Request(new MediaRequest { op = "preview", source = image.Source, path = image.Id, output = output, edge = options.MaxEdge }, cancellationToken);
+                    var result = await NativeMedia.Request(new MediaRequest { op = "preview", source = image.Source, path = image.Id, output = output, edge = edge, maxPixels = pixels }, cancellationToken);
                     nativeDirectory = output; path = result.items[0].path;
                 }
                 else if (image.Source != "file") throw new PlatformNotSupportedException("Native source unavailable.");
                 var header = await UniTask.RunOnThreadPool(() => ImageHeader.ReadFile(path), cancellationToken: cancellationToken);
                 if (!NativeMedia.Available && (long)header.Width * header.Height > 16 * 1024 * 1024)
                     throw new GalleryException("ImageTooLarge", "Desktop preview is limited to 16 megapixels; mobile uses native downsampling.");
-                // DownloadHandlerTexture performs image decoding on Unity's worker thread.
-                using (var request = UnityWebRequestTexture.GetTexture(new Uri(path).AbsoluteUri))
+                ImageHeader.CheckTarget(header.Width, header.Height, edge, pixels);
+                bool transform = header.Orientation > 1 || Math.Max(header.Width, header.Height) > edge;
+                var parameters = DownloadedTextureParams.Default;
+                parameters.mipmapChain = false; parameters.readable = readable && !transform;
+                cancellationToken.ThrowIfCancellationRequested();
+                using (var request = UnityWebRequestTexture.GetTexture(new Uri(path).AbsoluteUri, parameters))
                 {
-                    await request.SendWebRequest().ToUniTask(cancellationToken: cancellationToken);
+                    // Complete this bounded local decode and take ownership before observing cancellation.
+                    // Canceling the await can orphan a texture already created by the download handler.
+                    await request.SendWebRequest().ToUniTask();
                     texture = DownloadHandlerTexture.GetContent(request);
                 }
-                if (header.Orientation > 1 || Math.Max(texture.width, texture.height) > options.MaxEdge)
+                cancellationToken.ThrowIfCancellationRequested();
+                if (transform)
                 {
-                    var transformed = RenderImage(texture, header.Orientation, options.MaxEdge, false, default);
+                    var transformed = RenderImage(texture, header.Orientation, edge, false, default);
                     ImageTexture.Destroy(texture); texture = transformed;
                 }
+                if (!readable && texture.isReadable) texture.Apply(false, true);
                 cancellationToken.ThrowIfCancellationRequested();
                 if (nativeDirectory != null) { Directory.Delete(nativeDirectory, true); nativeDirectory = null; }
                 var resource = new ImageTexture(texture); texture = null; return resource;
@@ -58,12 +83,22 @@ namespace Game.Media
         {
             MediaThread.Check(); if (image == null) throw new ArgumentNullException(nameof(image));
             options ??= new ImageExportOptions(); options.Validate(); cancellationToken.ThrowIfCancellationRequested();
+            var copy = new ImageExportOptions { Mode = options.Mode, MaxEdge = options.MaxEdge, MaxPixels = options.MaxPixels,
+                JpegQuality = options.JpegQuality, JpegBackground = options.JpegBackground };
             using var lease = image.Acquire();
+            if (copy.Mode == ImageExportMode.PreserveProvidedBytes) return await ExportCore(image, copy, cancellationToken);
+            await processingGate.WaitAsync(cancellationToken);
+            try { return await ExportCore(image, copy, cancellationToken); }
+            finally { await ReleaseProcessing(); }
+        }
+
+        static async UniTask<ImageFile> ExportCore(ImageReference image, ImageExportOptions options, CancellationToken cancellationToken)
+        {
             if (NativeMedia.Available && (options.Mode != ImageExportMode.PreserveProvidedBytes || image.Source != "file"))
             {
                 var folder = ImagePaths.NewDirectory();
                 var result = await NativeMedia.Request(new MediaRequest { op = options.Mode == ImageExportMode.PreserveProvidedBytes ? "export" : "preview",
-                    source = image.Source, path = image.Id, output = folder, edge = options.MaxEdge, quality = options.JpegQuality,
+                    source = image.Source, path = image.Id, output = folder, edge = options.MaxEdge, maxPixels = options.MaxPixels, quality = options.JpegQuality,
                     format = options.Mode == ImageExportMode.Jpeg ? "jpg" : "png", backgroundR = options.JpegBackground.r,
                     backgroundG = options.JpegBackground.g, backgroundB = options.JpegBackground.b }, cancellationToken);
                 try { return new ImageFile(result.items[0].path, new ImageStorage(folder)); }
@@ -80,7 +115,7 @@ namespace Game.Media
                 }
                 else
                 {
-                    using var preview = await LoadPreviewAsync(image, new ImagePreviewOptions { MaxEdge = options.MaxEdge }, cancellationToken);
+                    using var preview = await LoadPreviewCore(image, options.MaxEdge, options.MaxPixels, options.Mode == ImageExportMode.Png, cancellationToken);
                     byte[] bytes;
                     if (options.Mode == ImageExportMode.Jpeg)
                     {
@@ -127,85 +162,91 @@ namespace Game.Media
     {
         public readonly int Width, Height, Orientation;
         ImageHeader(int width, int height, int orientation) { Width = width; Height = height; Orientation = orientation; }
+        internal static void CheckTarget(int width, int height, int edge, int pixels)
+        {
+            double scale = Math.Min(1d, edge / (double)Math.Max(width, height));
+            long w = Math.Max(1, (long)(width * scale)), h = Math.Max(1, (long)(height * scale));
+            if (w * h > pixels) throw new GalleryException("ImageTooLarge", "Requested image exceeds MaxPixels; reduce MaxEdge or explicitly raise the pixel budget.");
+        }
         internal static ImageHeader ReadFile(string path)
         {
             using var input = File.OpenRead(path);
             if (input.Length > 128L * 1024 * 1024)
                 throw new GalleryException("ImageTooLarge", "Preview encoded input is limited to 128 MiB; use file export for larger originals.");
-            using var header = new MemoryStream();
+            return ReadStream(input);
+        }
+        static ImageHeader ReadStream(Stream input)
+        {
             int first = input.ReadByte(), second = input.ReadByte();
             if (first == 137 && second == 80)
             {
-                input.Position = 0; var png = new byte[24]; int count = input.Read(png, 0, png.Length);
-                if (count != png.Length) throw new GalleryException("InvalidImage", "Truncated PNG header.");
-                return Read(png);
+                input.Position = 0; var png = new byte[24]; ReadExact(input, png, 0, png.Length);
+                if (png[2] != 78 || png[3] != 71) throw new GalleryException("InvalidImage", "Invalid PNG signature.");
+                int width = Big(png, 16, 4), height = Big(png, 20, 4);
+                if (width <= 0 || height <= 0) throw new GalleryException("InvalidImage", "Invalid PNG dimensions.");
+                return new ImageHeader(width, height, 1);
             }
             if (first != 255 || second != 216) throw new GalleryException("UnsupportedFormat", "Managed preview supports JPEG and PNG.");
-            header.WriteByte(255); header.WriteByte(216);
-            // Keep only the header needed for dimensions/EXIF, never the compressed pixel payload.
+            int w = 0, h = 0, orientation = 1;
+            // A single reusable JPEG segment: memory does not grow with APP1/XMP segment count.
+            var segment = new byte[65535];
             while (input.Position < input.Length)
             {
                 int prefix = input.ReadByte(), marker = input.ReadByte();
                 if (prefix != 255 || marker < 0) break;
                 while (marker == 255) marker = input.ReadByte();
                 if (marker < 0 || marker == 217 || marker == 218) break;
+                if (marker == 1 || marker >= 208 && marker <= 215) continue;
                 int high = input.ReadByte(), low = input.ReadByte();
                 if (high < 0 || low < 0) break;
                 int length = (high << 8) | low;
-                if (length < 2 || input.Position + length - 2 > input.Length) break;
-                // Other segments (e.g. ICC profiles) need no managed copy.
-                if (marker >= 192 && marker <= 195 || marker == 225)
+                if (length < 2 || input.Position + length - 2 > input.Length) throw new GalleryException("InvalidImage", "Truncated JPEG segment.");
+                int count = length - 2;
+                if (marker >= 192 && marker <= 195 && count >= 6)
                 {
-                    header.WriteByte(255); header.WriteByte((byte)marker); header.WriteByte((byte)high); header.WriteByte((byte)low);
-                    var segment = new byte[length - 2]; int read = 0;
-                    while (read < segment.Length) { int n = input.Read(segment, read, segment.Length - read); if (n == 0) break; read += n; }
-                    header.Write(segment, 0, read);
+                    ReadExact(input, segment, 0, 6); h = Big(segment, 1, 2); w = Big(segment, 3, 2);
+                    input.Seek(count - 6, SeekOrigin.Current);
                 }
-                else input.Seek(length - 2, SeekOrigin.Current);
+                else if (marker == 225 && count >= 14)
+                {
+                    ReadExact(input, segment, 0, 6);
+                    if (segment[0] == 69 && segment[1] == 120 && segment[2] == 105 && segment[3] == 102 && segment[4] == 0 && segment[5] == 0)
+                    {
+                        ReadExact(input, segment, 6, count - 6);
+                        orientation = ReadOrientation(segment, count);
+                    }
+                    else input.Seek(count - 6, SeekOrigin.Current);
+                }
+                else input.Seek(count, SeekOrigin.Current);
             }
-            return Read(header.ToArray());
+            if (w <= 0 || h <= 0) throw new GalleryException("InvalidImage", "JPEG dimensions missing.");
+            return new ImageHeader(w, h, orientation >= 1 && orientation <= 8 ? orientation : 1);
+        }
+        static void ReadExact(Stream input, byte[] bytes, int offset, int count)
+        {
+            while (count > 0) { int n = input.Read(bytes, offset, count); if (n == 0) throw new GalleryException("InvalidImage", "Truncated image header."); offset += n; count -= n; }
+        }
+        static int ReadOrientation(byte[] bytes, int end)
+        {
+            const int start = 6; bool little = bytes[start] == 73;
+            uint Read(int offset, int size)
+            {
+                if (offset < start || offset > end - size) throw new GalleryException("InvalidImage", "Invalid EXIF offset.");
+                uint value = 0; for (int i = 0; i < size; i++) value = (value << 8) | bytes[offset + (little ? size - 1 - i : i)]; return value;
+            }
+            uint offset = Read(start + 4, 4);
+            if (offset > end - start - 2) return 1;
+            int ifd = start + (int)offset; uint count = Read(ifd, 2);
+            for (int i = 0; i < count && ifd + 2 + i * 12 + 12 <= end; i++)
+            {
+                int entry = ifd + 2 + i * 12;
+                if (Read(entry, 2) == 274 && Read(entry + 2, 2) == 3 && Read(entry + 4, 4) == 1) return (int)Read(entry + 8, 2);
+            }
+            return 1;
         }
         internal static ImageHeader Read(byte[] bytes)
         {
-            if (bytes.Length >= 24 && bytes[0] == 137 && bytes[1] == 80 && bytes[2] == 78 && bytes[3] == 71)
-            {
-                int width = Big(bytes,16,4), height = Big(bytes,20,4);
-                if (width <= 0 || height <= 0) throw new GalleryException("InvalidImage", "Invalid PNG dimensions.");
-                return new ImageHeader(width, height, 1);
-            }
-            if (bytes.Length < 4 || bytes[0] != 255 || bytes[1] != 216) throw new GalleryException("UnsupportedFormat", "Managed preview supports JPEG and PNG.");
-            int w = 0, h = 0, orientation = 1;
-            for (int p = 2; p + 4 <= bytes.Length;)
-            {
-                if (bytes[p++] != 255) break;
-                while (p < bytes.Length && bytes[p] == 255) p++;
-                if (p >= bytes.Length) break; int marker = bytes[p++];
-                if (marker == 217 || marker == 218) break;
-                int length = Big(bytes,p,2); if (length < 2 || p + length > bytes.Length) break;
-                if (marker >= 192 && marker <= 195 && length >= 8) { h = Big(bytes,p+3,2); w = Big(bytes,p+5,2); }
-                if (marker == 225 && length > 16 && bytes[p+2] == 69 && bytes[p+3] == 120 && bytes[p+4] == 105 && bytes[p+5] == 102)
-                {
-                    int start = p+8, end = p+length; bool little = bytes[start] == 73;
-                    uint Read(int offset, int size)
-                    {
-                        if (offset < start || offset > end-size) throw new GalleryException("InvalidImage", "Invalid EXIF offset.");
-                        uint v=0; for(int j=0;j<size;j++) v=(v<<8)|bytes[offset+(little ? size-1-j : j)]; return v;
-                    }
-                    uint offset = Read(start+4,4);
-                    if (offset <= length-10)
-                    {
-                        int ifd = start+(int)offset; uint count = Read(ifd,2);
-                        for (int i=0;i<count && ifd+2+i*12+12<=end;i++)
-                        {
-                            int entry=ifd+2+i*12;
-                            if (Read(entry,2)==274 && Read(entry+2,2)==3 && Read(entry+4,4)==1) orientation=(int)Read(entry+8,2);
-                        }
-                    }
-                }
-                p += length;
-            }
-            if(w<=0 || h<=0) throw new GalleryException("InvalidImage", "JPEG dimensions missing.");
-            return new ImageHeader(w,h,orientation >= 1 && orientation <= 8 ? orientation : 1);
+            using var stream = new MemoryStream(bytes, false); return ReadStream(stream);
         }
         static int Big(byte[] data,int p,int count) { int value=0; for(int i=0;i<count;i++) value=checked((value<<8)|data[p+i]); return value; }
     }

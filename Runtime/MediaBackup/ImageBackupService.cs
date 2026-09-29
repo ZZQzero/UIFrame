@@ -87,6 +87,7 @@ namespace Game.Media.Backup
         long nextNativeRefresh;
         ServerCapabilities capabilities;
         readonly Dictionary<string, ScanIndex> scans = new Dictionary<string, ScanIndex>();
+        readonly Dictionary<string, UniTaskCompletionSource<ScanIndex>> scanLoads = new Dictionary<string, UniTaskCompletionSource<ScanIndex>>();
         int metadataReads;
         sealed class ScanIndex
         {
@@ -560,7 +561,7 @@ namespace Game.Media.Backup
             {
                 using var request = Request(HttpMethod.Get, "/v1/backups/" + Uri.EscapeDataString(record.backupId) + "/content");
                 using var response = await client.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, cancellationToken);
-                await CheckResponse(response);
+                await CheckResponse(response, cancellationToken);
                 using (var input = await response.Content.ReadAsStreamAsync())
                 using (var output = new FileStream(temporary, FileMode.CreateNew, FileAccess.Write, FileShare.None))
                 { await input.CopyToAsync(output, 128 * 1024, cancellationToken); output.Flush(true); }
@@ -598,44 +599,111 @@ namespace Game.Media.Backup
         internal bool HasPendingNativeTransfers => tasks.Values.Any(x => x.nativeOwned && (x.state == BackupState.Queued || x.state == BackupState.Uploading));
         internal IReadOnlyList<BackupPreparationFailure> GetScanFailures(string key)
         {
-            Check(); if (!scans.ContainsKey(key)) LoadScan(key);
-            return scans[key].entries.Values.Where(x => !string.IsNullOrEmpty(x.error)).Select(x => new BackupPreparationFailure
+            return GetScanIndex(key).entries.Values.Where(x => !string.IsNullOrEmpty(x.error)).Select(x => new BackupPreparationFailure
             { Fingerprint = x.fingerprint, Source = x.source, Name = x.name, Error = x.error }).ToList().AsReadOnly();
         }
-        internal BackupScanState LoadScan(string key)
+        ScanIndex GetScanIndex(string key)
         {
             Check();
-            if (!scans.TryGetValue(key, out var index)) { index = ReadScan(key, default); scans.Add(key, index); }
-            return index.Snapshot();
+            if (!scans.TryGetValue(key, out var index))
+            {
+                if (scanLoads.ContainsKey(key)) throw new InvalidOperationException("An asynchronous scan load is active; await it before using synchronous reads.");
+                index = ReadScan(key, default); scans.Add(key, index);
+            }
+            return index;
         }
-        internal async UniTask<BackupScanState> LoadScanAsync(string key, CancellationToken token)
+        internal BackupScanState LoadScan(string key) => GetScanIndex(key).Snapshot();
+        internal async UniTask EnsureScanAsync(string key, CancellationToken token)
         {
             Check(); token.ThrowIfCancellationRequested();
-            if (scans.TryGetValue(key, out var cached)) return cached.Snapshot();
-            using var linked = CancellationTokenSource.CreateLinkedTokenSource(token, lifetime.Token);
-            metadataReads++;
+            if (scans.ContainsKey(key)) return;
+            if (!scanLoads.TryGetValue(key, out var pending))
+            {
+                pending = new UniTaskCompletionSource<ScanIndex>(); scanLoads.Add(key, pending);
+                metadataReads++; ReadScanAsync(key, pending).Forget();
+            }
+            await pending.Task.AttachExternalCancellation(token);
+        }
+        async UniTaskVoid ReadScanAsync(string key, UniTaskCompletionSource<ScanIndex> completion)
+        {
+            ScanIndex loaded = null; Exception failure = null;
             try
             {
-                var loaded = await UniTask.RunOnThreadPool(() => ReadScan(key, linked.Token));
-                linked.Token.ThrowIfCancellationRequested();
-                if (!scans.TryGetValue(key, out cached)) { cached = loaded; scans.Add(key, cached); }
-                return cached.Snapshot();
+                loaded = await UniTask.RunOnThreadPool(() => ReadScan(key, lifetime.Token));
+                lifetime.Token.ThrowIfCancellationRequested(); scans.Add(key, loaded);
             }
-            finally { metadataReads--; }
+            catch (Exception error) { failure = error; }
+            finally { scanLoads.Remove(key); metadataReads--; }
+            if (failure != null) completion.TrySetException(failure); else completion.TrySetResult(loaded);
         }
+        internal bool ScanHasBaseline(string key) => scans[key].baseline;
+        internal bool ScanKnows(string key, string fingerprint) => scans[key].entries.TryGetValue(fingerprint, out var entry) && !entry.retryRequested;
+        internal string ScanError(string key) => scans[key].entries.Values.FirstOrDefault(x => !string.IsNullOrEmpty(x.error))?.error;
         ScanIndex ReadScan(string key, CancellationToken token)
         {
             string path = Path.Combine(root, "scan-" + Hash(key) + ".json");
             var state = File.Exists(path) ? JsonUtility.FromJson<BackupScanState>(File.ReadAllText(path)) : new BackupScanState();
             var index = new ScanIndex { baseline = state.baselineEstablished };
-            foreach (var entry in state.entries) index.entries.Add(entry.fingerprint, entry);
+            foreach (var entry in state.entries) { NormalizeReceipt(entry); index.entries[entry.fingerprint] = entry; }
+            if (state.baselineEstablished && File.Exists(path + ".baseline"))
+            {
+                using var input = new StreamReader(path + ".baseline"); string line;
+                while ((line = input.ReadLine()) != null) { token.ThrowIfCancellationRequested(); var entry = JsonUtility.FromJson<BackupReceipt>(line); NormalizeReceipt(entry); index.entries[entry.fingerprint] = entry; }
+            }
             string directory = path + ".entries";
             if (Directory.Exists(directory)) foreach (var file in Directory.EnumerateFiles(directory, "*.json"))
             {
                 token.ThrowIfCancellationRequested();
-                var entry = JsonUtility.FromJson<BackupReceipt>(File.ReadAllText(file)); index.entries[entry.fingerprint] = entry;
+                var entry = JsonUtility.FromJson<BackupReceipt>(File.ReadAllText(file)); NormalizeReceipt(entry);
+                string canonical = Path.Combine(directory, Hash(entry.fingerprint) + ".json");
+                if (!StringComparer.Ordinal.Equals(file, canonical) && File.Exists(canonical)) continue;
+                index.entries[entry.fingerprint] = entry;
             }
             return index;
+        }
+        internal async UniTask EstablishBaselineAsync(string key,
+            Func<Func<IReadOnlyList<ImageReference>, UniTask<bool>>, UniTask<bool>> visit, CancellationToken token)
+        {
+            Check(); metadataReads++;
+            using var linked = CancellationTokenSource.CreateLinkedTokenSource(token, lifetime.Token);
+            string path = Path.Combine(root, "scan-" + Hash(key) + ".json"), temporary = path + ".baseline.new";
+            bool failed = false;
+            try
+            {
+                FileStream stream = null; StreamWriter writer = null; var cleanup = new UIFrame.CleanupFailure();
+                try
+                {
+                    stream = new FileStream(temporary, FileMode.Create, FileAccess.Write, FileShare.None);
+                    writer = new StreamWriter(stream, new UTF8Encoding(false), 8192, true);
+                    bool completed = await visit(async page => await UniTask.RunOnThreadPool(() =>
+                    {
+                        foreach (var image in page)
+                        {
+                            linked.Token.ThrowIfCancellationRequested();
+                            writer.WriteLine(JsonUtility.ToJson(new BackupReceipt { fingerprint = image.Source + ":" + image.Id + "\n" + image.Version }));
+                        }
+                        return true;
+                    }));
+                    if (!completed) throw new InvalidOperationException("Baseline enumeration did not complete.");
+                    linked.Token.ThrowIfCancellationRequested(); writer.Flush(); stream.Flush(true);
+                }
+                catch (Exception error) { cleanup.Capture(error); }
+                finally
+                {
+                    if (writer != null) cleanup.Run(writer.Dispose);
+                    if (stream != null) cleanup.Run(stream.Dispose);
+                }
+                cleanup.Throw();
+                string target = path + ".baseline";
+                if (File.Exists(target)) File.Replace(temporary, target, null); else File.Move(temporary, target);
+                AtomicJson(path, new BackupScanState { baselineEstablished = true }); scans.Remove(key);
+            }
+            catch { failed = true; throw; }
+            finally
+            {
+                metadataReads--;
+                if (failed) { try { File.Delete(temporary); } catch (Exception cleanup) { Debug.LogException(cleanup); } }
+            }
         }
         internal void SaveScan(string key, BackupScanState state)
         {
@@ -646,10 +714,10 @@ namespace Game.Media.Backup
         }
         internal void SaveScanEntry(string key, BackupReceipt entry)
         {
-            Check(); if (!scans.ContainsKey(key)) LoadScan(key);
+            var index = GetScanIndex(key);
             string directory = Path.Combine(root, "scan-" + Hash(key) + ".json.entries"); Directory.CreateDirectory(directory);
             AtomicJson(Path.Combine(directory, Hash(entry.fingerprint) + ".json"), entry);
-            scans[key].entries[entry.fingerprint] = CloneReceipt(entry);
+            index.entries[entry.fingerprint] = CloneReceipt(entry);
         }
         internal string PolicyPath => Path.Combine(root, "automatic.json");
         internal static void AtomicJson<T>(string path, T value)
@@ -676,20 +744,36 @@ namespace Game.Media.Backup
         async UniTask<T> Send<T>(HttpMethod method, string path, HttpContent content, CancellationToken token)
         {
             using var request = Request(method, path); request.Content = content;
-            using var response = await client.SendAsync(request, token); await CheckResponse(response);
-            return JsonUtility.FromJson<T>(await response.Content.ReadAsStringAsync());
+            using var response = await client.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, token);
+            string text = await ReadResponse(response, token); await CheckResponse(response, token, text);
+            return JsonUtility.FromJson<T>(text);
         }
         HttpRequestMessage Request(HttpMethod method, string path)
         {
             string token = GetAccessToken(); if (string.IsNullOrWhiteSpace(token)) throw new InvalidOperationException("No access token available.");
             var request = new HttpRequestMessage(method, server + path); request.Headers.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", token); return request;
         }
-        static async UniTask CheckResponse(HttpResponseMessage response)
+        internal static async UniTask<string> ReadResponse(HttpResponseMessage response, CancellationToken token)
+        {
+            const int limit = 64 * 1024;
+            if (response.Content.Headers.ContentLength > limit) throw new IOException("Backup response exceeds 64 KiB.");
+            using var input = await response.Content.ReadAsStreamAsync();
+            using var output = new MemoryStream(); var buffer = new byte[4096];
+            while (true)
+            {
+                int n = await input.ReadAsync(buffer, 0, Math.Min(buffer.Length, limit + 1 - (int)output.Length), token);
+                if (n == 0) break;
+                if (output.Length + n > limit) throw new IOException("Backup response exceeds 64 KiB.");
+                output.Write(buffer, 0, n);
+            }
+            return Encoding.UTF8.GetString(output.GetBuffer(), 0, (int)output.Length);
+        }
+        static async UniTask CheckResponse(HttpResponseMessage response, CancellationToken token, string body = null)
         {
             if (response.IsSuccessStatusCode) return;
             TimeSpan? retry = response.Headers.RetryAfter?.Delta;
             if (!retry.HasValue && response.Headers.RetryAfter?.Date != null) retry = response.Headers.RetryAfter.Date.Value - DateTimeOffset.UtcNow;
-            throw new BackupHttpException((int)response.StatusCode, await response.Content.ReadAsStringAsync(), retry);
+            throw new BackupHttpException((int)response.StatusCode, body ?? await ReadResponse(response, token), retry);
         }
         static bool Transient(Exception error) => error is HttpRequestException || error is System.Threading.Tasks.TaskCanceledException || error is BackupHttpException http &&
             (http.StatusCode == 408 || http.StatusCode == 429 || http.StatusCode == 500 || http.StatusCode == 502 || http.StatusCode == 503 || http.StatusCode == 504);
@@ -705,7 +789,9 @@ namespace Game.Media.Backup
         }
         List<BackupTaskInfo> LoadTasks() => tasks.Values.Select(x => x.Snapshot()).ToList();
         IEnumerable<BackupTaskInfo> ReadTasks() => Directory.EnumerateFiles(Path.Combine(root, "batches"), "*.json", SearchOption.AllDirectories)
-            .OrderBy(x => x, StringComparer.Ordinal).Select(x => JsonUtility.FromJson<BackupTaskInfo>(File.ReadAllText(x)));
+            .OrderBy(x => x, StringComparer.Ordinal).Select(x => NormalizeTask(JsonUtility.FromJson<BackupTaskInfo>(File.ReadAllText(x))));
+        static BackupTaskInfo NormalizeTask(BackupTaskInfo task) { task.source = ImageIdentity.Source(task.source); return task; }
+        static void NormalizeReceipt(BackupReceipt entry) { entry.fingerprint = ImageIdentity.Source(entry.fingerprint); entry.source = ImageIdentity.Source(entry.source); }
         BackupTaskInfo Find(string id) => id != null && tasks.TryGetValue(id, out var record) ? record.Snapshot() : throw new ArgumentException("Task not found.", nameof(id));
         string Payload(BackupTaskInfo task) => Path.Combine(root, "batches", task.batchId, task.id + ".payload");
         void DeletePayload(BackupTaskInfo task)

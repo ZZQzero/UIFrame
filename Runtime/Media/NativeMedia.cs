@@ -11,7 +11,7 @@ namespace Game.Media
     {
         public string id, op, source, path, output, album, format;
         public float backgroundR = 1, backgroundG = 1, backgroundB = 1;
-        public int count = 1, edge = 2048, quality = 90;
+        public int count = 1, edge = 2048, quality = 90, maxPixels = 4 * 1024 * 1024;
         public long maxBytes;
         public bool recursive;
     }
@@ -51,7 +51,7 @@ namespace Game.Media
         [DllImport("__Internal")]
         [return: MarshalAs(UnmanagedType.I1)] static extern bool UFMPending(string id);
 #endif
-        internal static async UniTask<MediaResponse> Request(MediaRequest request, CancellationToken token)
+        internal static async UniTask<MediaResponse> Request(MediaRequest request, CancellationToken token, Func<MediaItem[], UniTask<bool>> consume = null)
         {
             MediaThread.Check();
             request.id = Guid.NewGuid().ToString("N");
@@ -76,7 +76,15 @@ namespace Game.Media
                         finished = !result.more;
                         if (result.status == "canceled") throw new OperationCanceledException();
                         if (result.status != "ok") throw new GalleryException(result.code ?? "NativeFailure", result.error);
-                        if (result.more || pages != null)
+                        if (consume != null)
+                        {
+                            token.ThrowIfCancellationRequested();
+                            bool proceed = await consume(result.items ?? Array.Empty<MediaItem>());
+                            result.items = null;
+                            if (!proceed) return result;
+                            if (!result.more) return result;
+                        }
+                        else if (result.more || pages != null)
                         {
                             if (pages == null) pages = new List<MediaItem>();
                             if (result.items != null) pages.AddRange(result.items);

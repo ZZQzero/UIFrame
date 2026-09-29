@@ -33,9 +33,12 @@ namespace Game.Media
     public sealed class ImagePreviewOptions
     {
         public int MaxEdge { get; set; } = 2048;
+        public int MaxPixels { get; set; } = 4 * 1024 * 1024;
+        public bool Readable { get; set; }
         internal void Validate()
         {
             if (MaxEdge < 1 || MaxEdge > 8192) throw new ArgumentOutOfRangeException(nameof(MaxEdge), "Expected 1..8192 pixels.");
+            if (MaxPixels < 1 || MaxPixels > 16 * 1024 * 1024) throw new ArgumentOutOfRangeException(nameof(MaxPixels), "Expected 1..16777216 pixels.");
         }
     }
 
@@ -43,13 +46,14 @@ namespace Game.Media
     {
         public ImageExportMode Mode { get; set; } = ImageExportMode.PreserveProvidedBytes;
         public int MaxEdge { get; set; } = 2048;
+        public int MaxPixels { get; set; } = 4 * 1024 * 1024;
         public int JpegQuality { get; set; } = 90;
         public Color JpegBackground { get; set; } = Color.white;
         internal void Validate()
         {
             if (!Enum.IsDefined(typeof(ImageExportMode), Mode)) throw new ArgumentOutOfRangeException(nameof(Mode));
             if (Mode == ImageExportMode.PreserveProvidedBytes) return;
-            new ImagePreviewOptions { MaxEdge = MaxEdge }.Validate();
+            new ImagePreviewOptions { MaxEdge = MaxEdge, MaxPixels = MaxPixels }.Validate();
             if (Mode == ImageExportMode.Jpeg && (JpegQuality < 1 || JpegQuality > 100))
                 throw new ArgumentOutOfRangeException(nameof(JpegQuality));
         }
@@ -71,7 +75,7 @@ namespace Game.Media
         internal ImageReference(string source, string id, string name, string mime, long size = -1,
             int width = 0, int height = 0, string version = null, ImageStorage owner = null, string originId = null)
         {
-            Source = source; Id = id; OriginId = originId ?? id; FileName = name; MimeType = mime; Version = version;
+            Source = source; Id = source == "directory" ? ImageIdentity.Directory(id) : id; OriginId = originId ?? Id; FileName = name; MimeType = mime; Version = version;
             ByteCount = size < 0 ? (long?)null : size; Width = width > 0 ? (int?)width : null;
             Height = height > 0 ? (int?)height : null; Owner = owner;
         }
@@ -112,4 +116,32 @@ namespace Game.Media
             return Array.AsReadOnly(result);
         }
     }
+    // One canonical format at the persistence boundary. Legacy embedded bookmarks remain readable.
+    internal static class ImageIdentity
+    {
+        [Serializable] sealed class DirectoryIdentity { public string bookmark, bookmarkId, relative; }
+        [Serializable] sealed class CompactIdentity { public string bookmarkId, relative; }
+        internal static string Directory(string value)
+        {
+            if (string.IsNullOrEmpty(value) || value[0] != '{') return value; // Android content URI.
+            var id = JsonUtility.FromJson<DirectoryIdentity>(value);
+            if (string.IsNullOrEmpty(id.relative) || string.IsNullOrEmpty(id.bookmark) && string.IsNullOrEmpty(id.bookmarkId))
+                throw new GalleryException("InvalidImage", "Invalid directory image identity.");
+            if (string.IsNullOrEmpty(id.bookmarkId))
+            {
+                using var sha = System.Security.Cryptography.SHA256.Create();
+                id.bookmarkId = BitConverter.ToString(sha.ComputeHash(System.Text.Encoding.UTF8.GetBytes(id.bookmark))).Replace("-", "").ToLowerInvariant();
+            }
+            return JsonUtility.ToJson(new CompactIdentity { bookmarkId = id.bookmarkId, relative = id.relative });
+        }
+        internal static string Source(string value)
+        {
+            const string prefix = "directory:";
+            if (value == null || !value.StartsWith(prefix, StringComparison.Ordinal)) return value;
+            int version = value.LastIndexOf('\n');
+            return prefix + Directory(version < 0 ? value.Substring(prefix.Length) : value.Substring(prefix.Length, version - prefix.Length))
+                + (version < 0 ? "" : value.Substring(version));
+        }
+    }
+
 }

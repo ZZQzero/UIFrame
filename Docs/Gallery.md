@@ -18,7 +18,9 @@
 | 原生后台传输 | Android JobScheduler / iOS 后台 URLSession；显式启用后传输已入队文件，系统决定执行时机 |
 | 后台发现新照片 | 尚未实现；`SupportsBackgroundDiscovery` 返回 false |
 
-相册查询保持完整元数据快照语义；原生到 Unity 每次最多传输 200 条，跨帧解析和创建引用，再通过 `GetPage` 读取快照。原生仍会枚举整个查询范围，尚不是数据库游标式的按需枚举；尚未提供系统变化通知和跨页面共享的缩略图缓存。图库变化后请重新查询；旧引用读取失败会传播。外部目录需要实际设备验证授权的持久性，不保证所有文件提供者都支持相同能力。
+整库处理推荐 `GameGallery.VisitImagesAsync`、`GameImageDirectory.VisitAsync` 或 `ImageDirectoryHandle.VisitAsync`：每页最多 200 条，等待当前回调完成后再交付下一页；回调返回 `true` 继续、`false` 正常停止，访问方法返回是否完成整个遍历。回调异常保留原异常并结束遍历，Token 取消仍抛取消异常。普通目录在工作线程逐页枚举；移动端先将枚举结果按页暂存到磁盘，再逐页交付和释放，不在原生与 C# 层各积累一份整库 JSON。单页编码上限 16 MiB，超出明确失败；暂存占用随元数据总量增长，正常完成、取消或失败会清理，进程异常退出可能留下由系统管理的临时文件。它仍不是数据库游标式的按需枚举。
+
+`QueryImagesAsync` / `QueryAsync` 保留完整快照语义，因此内存仍随照片数增长；`GetPage` 只是读取已有快照。尚未提供系统变化通知和跨页面共享的缩略图缓存。图库变化后请重新查询；旧引用读取失败会传播。外部目录需要实际设备验证授权的持久性，不保证所有文件提供者都支持相同能力。
 
 实施计划中的后台发现、变化通知、有界共享缓存及完整真机矩阵仍是后续工作，不能把已有编译或本机测试当作这些功能已完成。
 
@@ -52,11 +54,15 @@ using var uploadFile = await GameImageReader.ExportFileAsync(selection.Items[0])
 
 选图结果释放后不能发起新读取；已经受理的读取使用短期租约。所有权释放不等于取消在途操作，取消需传 Token。面板作用域登记失败时，调用方仍负责释放尚未移交的结果。
 
-移动端按目标尺寸原生解码。Editor / 桌面使用有界的托管预览，只接受 JPEG / PNG，源像素上限为 16 MP；大于上限明确报 `ImageTooLarge`。Unity 预览阶段读入的编码文件上限为 128 MiB，限制的是预览缓冲，不限制独立原文件导出。托管预览会完整解码上限内的源图，然后缩小，不承诺与移动端相同的峰值内存。预览 `MaxEdge` 范围为 1–8192，默认 2048。
+移动端按目标尺寸原生解码。Editor / 桌面使用有界的托管预览，只接受 JPEG / PNG，源像素上限为 16 MP；大于上限明确报 `ImageTooLarge`。Unity 预览阶段读入的编码文件上限为 128 MiB，限制的是预览缓冲，不限制独立原文件导出。托管预览会完整解码上限内的源图，然后缩小，不承诺与移动端相同的峰值内存。预览和转码的 `MaxEdge` 范围为 1–8192，默认 2048；新增 `MaxPixels` 限制按 MaxEdge 缩放后的目标像素数，默认 `4 * 1024 * 1024`，允许显式设置到 `16 * 1024 * 1024`。超出预算报 `ImageTooLarge`，不会偷偷降低尺寸。需要更大结果时同时设置合适的 MaxEdge 和 MaxPixels；超过 16 MP 的需求使用原文件导出并由独立处理管线处理。
 
 系统照片选择器负责选图界面的缩略图；下述读取优化用于 Unity 自己展示的图片。iOS 相册预览按目标尺寸请求 PhotoKit 图片，不导出完整原图。Android / iOS 转码直接由原生缩放、合成透明背景并编码目标文件；桌面通过 Unity 下载纹理解码器异步解码，GPU 一次完成 EXIF 方向与缩放，JPEG 白底合成也不再创建全图浮点像素数组。桌面原有 16 MP 限制保留。
 
-“保留原图”指保留系统提供者交付的字节，不承诺是最初相机文件。JPEG 转码默认质量 90、透明区域白底；可通过 `ImageExportOptions` 显式修改。
+预览纹理默认 `Readable=false`，不保留 CPU 像素副本，也不生成 mipmap；RawImage / Sprite 显示不需要这些副本。业务确实需要 `GetPixels` / `GetPixels32` 时，显式设置 `ImagePreviewOptions.Readable=true`，并承担对应 CPU 副本。转码内部按编码需要申请可读结果。
+
+所有预览、缩略图和转码共用一个处理槽位，覆盖原生异步请求、Unity 解码及变换；运行时还会等待当前帧的临时纹理销毁后再放行下一次。这是限制在途图片工作集的固定规则，原字节导出不占用该槽位。等待槽位时可取消；Unity 本地纹理解码开始后，取消会等当前解码结束、取得纹理所有权并释放后才返回，避免已创建纹理遗失。它不限制调用者已持有的显示纹理、系统照片提供者缓存或进程总内存；列表仍应及时释放离屏预览。
+
+“保留原图”指保留系统提供者交付的字节，不承诺是最初相机文件。JPEG 转码默认质量 90、透明区域白底；可通过 `ImageExportOptions` 显式修改。保留字节模式不使用 MaxEdge、MaxPixels 和 JPEG 参数，也不受预览的编码文件限制。
 
 ## 相册权限与目录
 
@@ -90,6 +96,22 @@ var pictures = await handle.QueryAsync(recursive: true, cancellationToken: token
 string savedBookmark = handle.Bookmark; // 由业务保存，不能当作普通文件路径。
 var restoredHandle = ImageDirectoryHandle.FromBookmark(savedBookmark);
 ```
+
+大量文件的顺序处理可直接使用分页访问：
+
+```csharp
+bool completed = await GameImageDirectory.VisitAsync(absolutePath, async page =>
+{
+    foreach (var image in page)
+    {
+        using var file = await GameImageReader.ExportFileAsync(image, cancellationToken: token);
+        await UploadYourFileAsync(file.LocalPath, token); // 业务提供上传方法。
+    }
+    return true; // 返回 false 可结束本次遍历。
+}, recursive: true, cancellationToken: token);
+```
+
+iOS 目录书签按 SHA-256 标识保存一次，每个图片引用只包含短标识与相对路径。请保留应用的目录授权登记文件；自动扫描会在持久化边界统一识别旧版内嵌书签的回执和任务来源，已有服务端任务 key 不变。
 
 授权失效、书签过期或文件被删除会明确失败，业务可由用户主动重新选择目录。目录扫描与照片库查询都不修改或删除用户原图。
 
@@ -128,7 +150,7 @@ python3 Tools~/BackupServer/server.py serve --root /tmp/uiframe-backup-local
 
 推荐 `await ImageBackupService.CreateAsync(configuration, token)`：独占锁获取、历史读取和恢复在工作线程完成，返回后仍在 Unity 主线程使用服务。同步构造函数为兼容已有调用保留，会同步加载历史。取消打开过程会等待正在执行的文件工作释放仓库，不返回半初始化实例。示例已改用异步创建。
 
-服务器能力按服务实例（固定服务器和账号）保存在内存中。第一次真正需要提交新任务时查询一次，空队列、全部已完成或只唤醒已有原生任务不会查询。后续处理轮次复用；创建上传会话响应若附带 `capabilities`，会验证并更新缓存。旧协议服务可以不返回此可选字段。服务规则改变时可在空闲状态显式 `await backup.RefreshServerCapabilitiesAsync(token)`；失败会抛出，不自动重试任务。服务器仍逐次验证认证、大小和内容。批量清单建会话接口尚未实现。
+服务器能力按服务实例（固定服务器和账号）保存在内存中。第一次真正需要提交新任务时查询一次，空队列、全部已完成或只唤醒已有原生任务不会查询。后续处理轮次复用；创建上传会话响应若附带 `capabilities`，会验证并更新缓存。旧协议服务可以不返回此可选字段。服务规则改变时可在空闲状态显式 `await backup.RefreshServerCapabilitiesAsync(token)`；失败会抛出，不自动重试任务。服务器仍逐次验证认证、大小和内容。客户端控制接口与错误响应使用流式读取，编码正文上限统一为 64 KiB，包含未知 Content-Length 的响应；超出会失败，不先缓冲完整响应。图片下载正文仍按文件流读取，不受此限制。服务端需要对大清单分页，批量清单建会话接口尚未实现。
 
 ```csharp
 using Game.Media.Backup;
@@ -222,13 +244,13 @@ await automatic.RunAsync(applicationLifetimeToken);
 
 网络条件在扫描与提交分片前检查，不承诺网络切换瞬间零流量。更改策略前取消并等待旧循环；关闭自动策略不会删除已备份副本。首次选择不含历史照片时建立元数据基线，后续新增 / 版本变化入队；扫描通知或持久记录不能证明用户未授权照片也被备份。
 
-扫描按来源和版本保存增量回执。首次扫描在工作线程加载回执，之后复用内存索引；需要在首次扫描前显示错误列表时，使用 `await automatic.GetPreparationFailuresAsync(token)`。同步查询保留兼容性，但缓存尚未建立时会同步加载。服务持有仓库期间禁止外部编辑回执。
+自动扫描直接逐页处理来源，不创建整库 ImageSnapshot。扫描按来源和版本保存增量回执。首次扫描在工作线程加载回执，同一范围的并发读取合并为一次；单个等待者取消不终止共享读取，服务关闭会取消它。之后复用内存索引，失败查询只复制失败项，不复制全部历史；需要在首次扫描前显示错误列表时，使用 `await automatic.GetPreparationFailuresAsync(token)`。同步查询保留兼容性，但缓存尚未建立时会同步加载；若同一范围正在异步加载，同步查询明确拒绝，等待异步接口完成即可。服务持有仓库期间禁止外部编辑回执。索引和持久任务仍随历史条数增长，本轮降低重复副本与扫描峰值，并未将全部历史改成磁盘数据库。
 
 自动循环先上传已有待处理任务，再扫描新图片，避免已保存回执的排队文件占满预算却得不到上传。原生任务尚在传输导致准备额度不足时，扫描保留未处理来源并设置 `IsWaitingForCapacity`，下一轮先对账再继续；不将额度等待记为单图失败。其他磁盘错误或无可释放任务的额度不足仍会传播。
 
 单张图片不可读取、不可导出或超出单文件限制，会持久记录到 `GetPreparationFailures()`，并继续扫描其他图片；`LastError` 保留该范围尚未解决的准备错误。相同失败版本不会每轮自动重试；取消并等待自动循环后调用 `RetryPreparationFailures()`，下一轮再尝试。来源版本变化按新版本处理。除上述原生额度等待外，磁盘预算不足、仓库写入失败、整库权限 / 枚举失败和策略回调异常仍终止本轮，不伪装为单图问题。
 
-首次历史基线仍一次性提交；之后每张图片使用独立、原子写入的回执，不反复重写整个相册的历史记录。兼容旧版单一 JSON 基线，增量记录位于同名 `.entries` 目录。
+首次不含历史照片的基线逐页写入 `.baseline.new`，完整遍历、刷盘并替换 `.baseline` 后才原子提交基线标记；取消或中断不提交部分基线。重开时逐行读取，兼容旧版单一 JSON 基线。之后每张图片使用独立、原子写入的回执，增量记录位于同名 `.entries` 目录，不反复重写整个相册的历史记录。
 
 这是**应用运行期间的自动发现**；移动端启用原生传输后，已提交文件可以由系统继续上传。`SupportsBackgroundDiscovery` 仍为 false。整库权限查询错误会结束自动循环并保留错误，需要业务提示用户处理；不会后台反复请求权限。当前来源范围缩小尚无原生变更通知，业务应在授权变化时取消扫描、暂停队列并重新确认范围。
 

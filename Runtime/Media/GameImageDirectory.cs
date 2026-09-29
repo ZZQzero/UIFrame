@@ -17,30 +17,48 @@ namespace Game.Media
         public static async UniTask<ImageSnapshot> QueryAsync(string absoluteDirectory, bool recursive = false,
             CancellationToken cancellationToken = default)
         {
+            var images = new List<ImageReference>();
+            await VisitAsync(absoluteDirectory, page => { images.AddRange(page); return UniTask.FromResult(true); }, recursive, cancellationToken);
+            images.Sort((a, b) => StringComparer.Ordinal.Compare(a.Id, b.Id));
+            return new ImageSnapshot(images.ToArray());
+        }
+        public static async UniTask<bool> VisitAsync(string absoluteDirectory, Func<IReadOnlyList<ImageReference>, UniTask<bool>> consume,
+            bool recursive = false, CancellationToken cancellationToken = default)
+        {
+            MediaThread.Check();
+            if (consume == null) throw new ArgumentNullException(nameof(consume));
             if (string.IsNullOrWhiteSpace(absoluteDirectory) || !Path.IsPathRooted(absoluteDirectory))
                 throw new ArgumentException("An absolute directory is required.", nameof(absoluteDirectory));
-            var root = Path.GetFullPath(absoluteDirectory);
+            string root = Path.GetFullPath(absoluteDirectory);
             if (!Directory.Exists(root)) throw new DirectoryNotFoundException(root);
-            return await UniTask.RunOnThreadPool(() =>
+            using var iterator = Enumerate(root, recursive, cancellationToken).GetEnumerator();
+            bool more = true;
+            while (more)
             {
-                var images = new List<ImageReference>(); var pending = new Stack<string>(); pending.Push(root);
-                while (pending.Count != 0)
+                cancellationToken.ThrowIfCancellationRequested();
+                var page = await UniTask.RunOnThreadPool(() =>
                 {
-                    cancellationToken.ThrowIfCancellationRequested();
-                    string folder = pending.Pop();
-                    foreach (var path in Directory.EnumerateFileSystemEntries(folder))
-                    {
-                        cancellationToken.ThrowIfCancellationRequested();
-                        var attributes = File.GetAttributes(path);
-                        if ((attributes & FileAttributes.ReparsePoint) != 0) continue;
-                        if ((attributes & FileAttributes.Directory) != 0) { if (recursive) pending.Push(path); continue; }
-                        if (ImagePaths.Mime(Path.GetExtension(path)).StartsWith("image/", StringComparison.Ordinal))
-                            images.Add(ImageReference.FromFile(path));
-                    }
+                    var result = new List<ImageReference>(200);
+                    while (result.Count < 200 && (more = iterator.MoveNext())) result.Add(iterator.Current);
+                    return result.AsReadOnly();
+                });
+                cancellationToken.ThrowIfCancellationRequested();
+                if (page.Count != 0 && !await consume(page)) return false;
+            }
+            return true;
+        }
+        static IEnumerable<ImageReference> Enumerate(string root, bool recursive, CancellationToken token)
+        {
+            foreach (string path in Directory.EnumerateFileSystemEntries(root))
+            {
+                token.ThrowIfCancellationRequested(); var attributes = File.GetAttributes(path);
+                if ((attributes & FileAttributes.ReparsePoint) != 0) continue;
+                if ((attributes & FileAttributes.Directory) != 0)
+                {
+                    if (recursive) foreach (var image in Enumerate(path, true, token)) yield return image;
                 }
-                images.Sort((a, b) => StringComparer.Ordinal.Compare(a.Id, b.Id));
-                return new ImageSnapshot(images.ToArray());
-            }, cancellationToken: cancellationToken);
+                else if (ImagePaths.Mime(Path.GetExtension(path)).StartsWith("image/", StringComparison.Ordinal)) yield return ImageReference.FromFile(path);
+            }
         }
     }
 
@@ -56,19 +74,18 @@ namespace Game.Media
         }
         public async UniTask<ImageSnapshot> QueryAsync(bool recursive = false, CancellationToken cancellationToken = default)
         {
-            var response = await NativeMedia.Request(new MediaRequest { op = "directory", path = Bookmark, recursive = recursive }, cancellationToken);
-            var result = new List<ImageReference>();
-            long deadline = System.Diagnostics.Stopwatch.GetTimestamp() + System.Diagnostics.Stopwatch.Frequency / 500;
-            foreach (var item in response.items ?? Array.Empty<MediaItem>())
-            {
-                if (result.Count != 0 && result.Count % 200 == 0 && System.Diagnostics.Stopwatch.GetTimestamp() >= deadline)
-                {
-                    await UniTask.Yield(PlayerLoopTiming.Update, cancellationToken);
-                    deadline = System.Diagnostics.Stopwatch.GetTimestamp() + System.Diagnostics.Stopwatch.Frequency / 500;
-                }
-                result.Add(new ImageReference(item.source ?? "directory", item.id, item.name, item.mime, item.size, item.width, item.height, item.version));
-            }
-            return new ImageSnapshot(result.ToArray());
+            var images = new List<ImageReference>();
+            await VisitAsync(page => { images.AddRange(page); return UniTask.FromResult(true); }, recursive, cancellationToken);
+            return new ImageSnapshot(images.ToArray());
+        }
+        public async UniTask<bool> VisitAsync(Func<IReadOnlyList<ImageReference>, UniTask<bool>> consume, bool recursive = false,
+            CancellationToken cancellationToken = default)
+        {
+            if (consume == null) throw new ArgumentNullException(nameof(consume));
+            bool completed = true;
+            await NativeMedia.Request(new MediaRequest { op = "directory", path = Bookmark, recursive = recursive }, cancellationToken,
+                async items => completed = await GameGallery.ConsumePage(items, "directory", consume));
+            return completed;
         }
     }
 }
