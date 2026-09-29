@@ -22,8 +22,32 @@ public final class BackupBridge {
     private static final int JOB = 0x554642;
     private static final String KEY = "UIFrame.Backup.Token.v1";
     private static Run active;
+    private static Map<String,JSONObject> cache;
+    private static final LinkedHashSet<String> pendingIds=new LinkedHashSet<>();
+    private static int queuedWifi, queuedAny, scheduledNetwork = -1;
+    private static boolean queued(JSONObject j) throws Exception { return j!=null && (j.getInt("state")==0 || j.getInt("state")==1); }
+    private static void count(JSONObject j, int delta) throws Exception {
+        if (queued(j)) { if(j.getBoolean("wifiOnly")) queuedWifi+=delta; else queuedAny+=delta; if(delta>0) pendingIds.add(j.getString("id")); else pendingIds.remove(j.getString("id")); }
+    }
+    private static void load(Context c) throws Exception {
+        if (cache!=null) return;
+        Map<String,JSONObject> loaded=new HashMap<>();
+        File[] files=directory(c).listFiles((d,n)->n.endsWith(".json") || n.endsWith(".json.bak"));
+        if(files==null) throw new IOException("Cannot enumerate native backup store");
+        for(File file:files) {
+            String id=file.getName().substring(0,32);
+            if(!loaded.containsKey(id)) loaded.put(id,readDisk(c,id));
+        }
+        int wifi=0, any=0;
+        for(JSONObject j:loaded.values()) if(queued(j)) { if(j.getBoolean("wifiOnly")) wifi++; else any++; }
+        cache=loaded; queuedWifi=wifi; queuedAny=any;
+        for(JSONObject j:loaded.values()) if(queued(j)) pendingIds.add(j.getString("id"));
+    }
+    private static JSONObject read(Context c, String id) throws Exception {
+        load(c); JSONObject j=cache.get(id); return j==null?null:new JSONObject(j.toString());
+    }
     static final class Run {
-        volatile boolean stopped;
+        volatile boolean stopped, taskCanceled;
         String id;
         HttpURLConnection connection;
     }
@@ -36,16 +60,18 @@ public final class BackupBridge {
         if (!id.matches("[a-f0-9]{32}")) throw new IllegalArgumentException("Invalid backup task ID");
         return new File(directory(c), id + ".json");
     }
-    private static JSONObject read(Context c, String id) throws Exception {
+    private static JSONObject readDisk(Context c, String id) throws Exception {
         AtomicFile file = new AtomicFile(path(c,id));
         if (!file.getBaseFile().exists() && !new File(file.getBaseFile()+".bak").exists()) return null;
         return new JSONObject(new String(file.readFully(), StandardCharsets.UTF_8));
     }
     private static void save(Context c, JSONObject j) throws Exception {
+        load(c);
         AtomicFile f = new AtomicFile(path(c,j.getString("id")));
         FileOutputStream out = f.startWrite();
         try { out.write(j.toString().getBytes(StandardCharsets.UTF_8)); f.finishWrite(out); }
         catch (Exception e) { f.failWrite(out); throw e; }
+        String id=j.getString("id"); count(cache.get(id),-1); cache.put(id,new JSONObject(j.toString())); count(j,1);
     }
     private static SecretKey secret() throws Exception {
         KeyStore store = KeyStore.getInstance("AndroidKeyStore"); store.load(null);
@@ -99,13 +125,16 @@ public final class BackupBridge {
                         if (state==3 && op.equals("cancel")) throw new IllegalStateException("A committed backup cannot be canceled");
                         if (state!=3 && state!=8 && (op.equals("cancel") || state==0 || state==1)) {
                             j.put("state",op.equals("cancel")?8:4); j.remove("credential"); save(c,j);
-                            if (active!=null && id.equals(active.id) && active.connection!=null) active.connection.disconnect();
+                            if (active!=null && id.equals(active.id)) {
+                                active.taskCanceled=true;
+                                if (active.connection!=null) active.connection.disconnect();
+                            }
                         }
                     }
                 } else if (op.equals("forget")) {
                     if (j!=null && (!j.getBoolean("released") || j.getInt("state")==0 || j.getInt("state")==1))
                         throw new IllegalStateException("Transfer still owns its payload");
-                    new AtomicFile(path(c,id)).delete(); j=null;
+                    new AtomicFile(path(c,id)).delete(); count(cache.remove(id),-1); j=null;
                 } else if (!op.equals("status")) throw new IllegalArgumentException("Unknown backup command");
                 return status(j).toString();
             } catch (Exception e) {
@@ -113,26 +142,18 @@ public final class BackupBridge {
             }
         }
     }
-    private static List<JSONObject> records(Context c) throws Exception {
-        File[] files=directory(c).listFiles((d,n)->n.endsWith(".json") || n.endsWith(".json.bak"));
-        if (files==null) throw new IOException("Cannot enumerate native backup store");
-        List<JSONObject> result=new ArrayList<>();
-        Set<String> ids=new HashSet<>();
-        for (File file:files) ids.add(file.getName().substring(0,32));
-        for (String id:ids) result.add(read(c,id));
-        return result;
-    }
     private static void schedule(Context c) throws Exception {
         if (active!=null) return;
-        boolean any=false, wifi=true;
-        for (JSONObject j:records(c)) if (j.getInt("state")==0 || j.getInt("state")==1) { any=true; wifi &= j.getBoolean("wifiOnly"); }
-        if (!any) return;
+        load(c); if (queuedWifi+queuedAny==0) return;
+        int network=queuedAny==0?JobInfo.NETWORK_TYPE_UNMETERED:JobInfo.NETWORK_TYPE_ANY;
+        if (scheduledNetwork==network) return;
         JobInfo job=new JobInfo.Builder(JOB,new ComponentName(c,BackupJobService.class))
-            .setRequiredNetworkType(wifi?JobInfo.NETWORK_TYPE_UNMETERED:JobInfo.NETWORK_TYPE_ANY)
-            .setPersisted(true).setBackoffCriteria(30000,JobInfo.BACKOFF_POLICY_EXPONENTIAL).build();
+            .setRequiredNetworkType(network).setPersisted(true).setBackoffCriteria(30000,JobInfo.BACKOFF_POLICY_EXPONENTIAL).build();
         if (((JobScheduler)c.getSystemService(Context.JOB_SCHEDULER_SERVICE)).schedule(job)!=JobScheduler.RESULT_SUCCESS)
             throw new IOException("Android refused to schedule background backup");
+        scheduledNetwork=network;
     }
+
     private static boolean network(Context c, boolean wifi) {
         ConnectivityManager m=(ConnectivityManager)c.getSystemService(Context.CONNECTIVITY_SERVICE);
         NetworkCapabilities n=m.getNetworkCapabilities(m.getActiveNetwork());
@@ -141,17 +162,23 @@ public final class BackupBridge {
     }
     static Run start(BackupJobService service, JobParameters parameters) {
         final Run run;
-        synchronized (LOCK) { if (active!=null) return null; run=new Run(); active=run; }
+        synchronized (LOCK) { if (active!=null) return null; run=new Run(); active=run; scheduledNetwork=-1; }
         new Thread(()-> {
             boolean pending=false;
             try {
                 while (!run.stopped) {
                     JSONObject selected=null;
+                    boolean wifi=network(service,true), any=network(service,false);
                     synchronized (LOCK) {
-                        for (JSONObject j:records(service)) {
-                            if (j.getInt("state")!=0 && j.getInt("state")!=1) continue;
-                            if (!network(service,j.getBoolean("wifiOnly"))) continue;
-                            selected=j; run.id=j.getString("id"); j.put("state",1).put("released",false); save(service,j); break;
+                        load(service);
+                        for (String id:pendingIds) {
+                            JSONObject stored=cache.get(id);
+                            if (!(stored.getBoolean("wifiOnly")?wifi:any)) continue;
+                            selected=new JSONObject(stored.toString()); break;
+                        }
+                        if(selected!=null) {
+                            run.id=selected.getString("id"); run.taskCanceled=false;
+                            selected.put("state",1).put("released",false); save(service,selected);
                         }
                     }
                     if (selected==null) break;
@@ -163,7 +190,7 @@ public final class BackupBridge {
                 synchronized (LOCK) {
                     active=null;
                     try {
-                        for (JSONObject j:records(service)) if (j.getInt("state")==0 || j.getInt("state")==1) pending=true;
+                        pending=queuedWifi+queuedAny>0;
                         if (!run.stopped) service.jobFinished(parameters,pending);
                         else schedule(service);
                     } catch (Exception error) { android.util.Log.e("UIFrameBackup","Native scheduling failed",error); }
@@ -176,12 +203,25 @@ public final class BackupBridge {
         synchronized (LOCK) { if (run!=null) { run.stopped=true; if (run.connection!=null) run.connection.disconnect(); } }
     }
     private static void transfer(Context c, Run run, JSONObject original) throws Exception {
-        JSONObject response=null; Exception failure=null; int code=0;
+        JSONObject response=null; Exception failure=null; int code=0; boolean constraintLost=false;
+        ConnectivityManager connectivity=(ConnectivityManager)c.getSystemService(Context.CONNECTIVITY_SERVICE);
+        ConnectivityManager.NetworkCallback monitor=null;
+        java.util.concurrent.atomic.AtomicBoolean allowed=new java.util.concurrent.atomic.AtomicBoolean(false);
+        final boolean wifi=original.getBoolean("wifiOnly");
         try {
+            if (android.os.Build.VERSION.SDK_INT>=24) {
+                monitor=new ConnectivityManager.NetworkCallback() {
+                    private void refresh() { allowed.set(network(c,wifi)); }
+                    @Override public void onAvailable(android.net.Network n) { refresh(); }
+                    @Override public void onLost(android.net.Network n) { refresh(); }
+                    @Override public void onCapabilitiesChanged(android.net.Network n, NetworkCapabilities capabilities) { refresh(); }
+                };
+                connectivity.registerDefaultNetworkCallback(monitor); allowed.set(network(c,wifi));
+            }
             HttpURLConnection connection=(HttpURLConnection)new URL(original.getString("url")).openConnection();
             synchronized (LOCK) {
                 run.connection=connection;
-                if (run.stopped || read(c,run.id).getInt("state")!=1) throw new InterruptedIOException("Transfer stopped");
+                if (run.stopped || run.taskCanceled) throw new InterruptedIOException("Transfer stopped");
             }
             connection.setInstanceFollowRedirects(false); connection.setConnectTimeout(30000); connection.setReadTimeout(120000);
             connection.setRequestMethod("PUT"); connection.setDoOutput(true); connection.setFixedLengthStreamingMode(original.getLong("size"));
@@ -191,8 +231,10 @@ public final class BackupBridge {
             try (InputStream input=new FileInputStream(original.getString("payload")); OutputStream output=connection.getOutputStream()) {
                 byte[] buffer=new byte[131072]; int n;
                 while ((n=input.read(buffer))!=-1) {
-                    synchronized (LOCK) { if (run.stopped || read(c,run.id).getInt("state")!=1) throw new InterruptedIOException("Transfer stopped"); }
-                    if (!network(c,original.getBoolean("wifiOnly"))) throw new InterruptedIOException("Network constraint changed");
+                    if (run.stopped || run.taskCanceled) throw new InterruptedIOException("Transfer stopped");
+                    if (!(monitor==null ? network(c,wifi) : allowed.get())) {
+                        constraintLost=true; throw new InterruptedIOException("Network constraint changed");
+                    }
                     output.write(buffer,0,n);
                 }
             }
@@ -208,12 +250,16 @@ public final class BackupBridge {
                 || response.getLong("size")!=original.getLong("size") || response.getLong("offset")!=original.getLong("size"))
                 throw new IOException("Server did not confirm the expected verified backup");
         } catch (Exception e) { failure=e; }
-        finally { synchronized (LOCK) { if (run.connection!=null) run.connection.disconnect(); } }
+        finally {
+            if (monitor!=null) try { connectivity.unregisterNetworkCallback(monitor); }
+                catch (Exception cleanup) { if (failure==null) failure=cleanup; else android.util.Log.e("UIFrameBackup","Network monitor cleanup failed",cleanup); }
+            synchronized (LOCK) { if (run.connection!=null) run.connection.disconnect(); }
+        }
         synchronized (LOCK) {
             JSONObject j=read(c,run.id); j.put("released",true);
             if (j.getInt("state")==1) {
                 if (failure==null) j.put("state",3).put("backupId",response.getString("backupId")).put("confirmedBytes",j.getLong("size"));
-                else if (code==0 && (run.stopped || !network(c,j.getBoolean("wifiOnly")))) j.put("state",0);
+                else if (code==0 && (run.stopped || constraintLost || !network(c,j.getBoolean("wifiOnly")))) j.put("state",0);
                 else j.put("state",code==401 || code==403 || code==413 || code==507?6:7).put("error",failure.toString());
             }
             if (j.getInt("state")!=0) j.remove("credential");

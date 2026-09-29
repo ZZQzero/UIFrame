@@ -107,8 +107,14 @@ namespace Game.Media
         {
             var result = await NativeMedia.Request(new MediaRequest { op = "images", album = albumId }, cancellationToken);
             var items = result.items ?? Array.Empty<MediaItem>(); var images = new ImageReference[items.Length];
+            long deadline = System.Diagnostics.Stopwatch.GetTimestamp() + System.Diagnostics.Stopwatch.Frequency / 500;
             for (int i = 0; i < images.Length; i++)
             {
+                if (i != 0 && i % 200 == 0 && System.Diagnostics.Stopwatch.GetTimestamp() >= deadline)
+                {
+                    await UniTask.Yield(PlayerLoopTiming.Update, cancellationToken);
+                    deadline = System.Diagnostics.Stopwatch.GetTimestamp() + System.Diagnostics.Stopwatch.Frequency / 500;
+                }
                 var item = items[i]; images[i] = new ImageReference("library", item.id, item.name, item.mime, item.size, item.width, item.height, item.version);
             }
             return new ImageSnapshot(images);

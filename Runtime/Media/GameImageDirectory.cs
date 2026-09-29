@@ -58,8 +58,16 @@ namespace Game.Media
         {
             var response = await NativeMedia.Request(new MediaRequest { op = "directory", path = Bookmark, recursive = recursive }, cancellationToken);
             var result = new List<ImageReference>();
+            long deadline = System.Diagnostics.Stopwatch.GetTimestamp() + System.Diagnostics.Stopwatch.Frequency / 500;
             foreach (var item in response.items ?? Array.Empty<MediaItem>())
+            {
+                if (result.Count != 0 && result.Count % 200 == 0 && System.Diagnostics.Stopwatch.GetTimestamp() >= deadline)
+                {
+                    await UniTask.Yield(PlayerLoopTiming.Update, cancellationToken);
+                    deadline = System.Diagnostics.Stopwatch.GetTimestamp() + System.Diagnostics.Stopwatch.Frequency / 500;
+                }
                 result.Add(new ImageReference(item.source ?? "directory", item.id, item.name, item.mime, item.size, item.width, item.height, item.version));
+            }
             return new ImageSnapshot(result.ToArray());
         }
     }

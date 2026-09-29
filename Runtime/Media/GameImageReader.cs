@@ -3,6 +3,7 @@ using System.IO;
 using System.Threading;
 using Cysharp.Threading.Tasks;
 using UnityEngine;
+using UnityEngine.Networking;
 
 namespace Game.Media
 {
@@ -27,21 +28,20 @@ namespace Game.Media
                     nativeDirectory = output; path = result.items[0].path;
                 }
                 else if (image.Source != "file") throw new PlatformNotSupportedException("Native source unavailable.");
-                var bytes = await UniTask.RunOnThreadPool(() =>
-                {
-                    if (new FileInfo(path).Length > 128L * 1024 * 1024)
-                        throw new GalleryException("ImageTooLarge", "Preview encoded input is limited to 128 MiB; use file export for larger originals.");
-                    return File.ReadAllBytes(path);
-                }, cancellationToken: cancellationToken);
-                cancellationToken.ThrowIfCancellationRequested();
-                ImageHeader header = ImageHeader.Read(bytes);
-                // Desktop managed decoding has a deliberate bound; mobile decodes downsampled pixels natively.
-                if ((long)header.Width * header.Height > 16 * 1024 * 1024)
+                var header = await UniTask.RunOnThreadPool(() => ImageHeader.ReadFile(path), cancellationToken: cancellationToken);
+                if (!NativeMedia.Available && (long)header.Width * header.Height > 16 * 1024 * 1024)
                     throw new GalleryException("ImageTooLarge", "Desktop preview is limited to 16 megapixels; mobile uses native downsampling.");
-                texture = new Texture2D(2, 2, TextureFormat.RGBA32, false);
-                if (!ImageConversion.LoadImage(texture, bytes)) throw new GalleryException("UnsupportedFormat", "Unity could not decode the image.");
-                if (header.Orientation > 1) texture = Orient(texture, header.Orientation);
-                if (Math.Max(texture.width, texture.height) > options.MaxEdge) texture = Resize(texture, options.MaxEdge);
+                // DownloadHandlerTexture performs image decoding on Unity's worker thread.
+                using (var request = UnityWebRequestTexture.GetTexture(new Uri(path).AbsoluteUri))
+                {
+                    await request.SendWebRequest().ToUniTask(cancellationToken: cancellationToken);
+                    texture = DownloadHandlerTexture.GetContent(request);
+                }
+                if (header.Orientation > 1 || Math.Max(texture.width, texture.height) > options.MaxEdge)
+                {
+                    var transformed = RenderImage(texture, header.Orientation, options.MaxEdge, false, default);
+                    ImageTexture.Destroy(texture); texture = transformed;
+                }
                 cancellationToken.ThrowIfCancellationRequested();
                 if (nativeDirectory != null) { Directory.Delete(nativeDirectory, true); nativeDirectory = null; }
                 var resource = new ImageTexture(texture); texture = null; return resource;
@@ -59,10 +59,13 @@ namespace Game.Media
             MediaThread.Check(); if (image == null) throw new ArgumentNullException(nameof(image));
             options ??= new ImageExportOptions(); options.Validate(); cancellationToken.ThrowIfCancellationRequested();
             using var lease = image.Acquire();
-            if (options.Mode == ImageExportMode.PreserveProvidedBytes && image.Source != "file")
+            if (NativeMedia.Available && (options.Mode != ImageExportMode.PreserveProvidedBytes || image.Source != "file"))
             {
                 var folder = ImagePaths.NewDirectory();
-                var result = await NativeMedia.Request(new MediaRequest { op = "export", source = image.Source, path = image.Id, output = folder }, cancellationToken);
+                var result = await NativeMedia.Request(new MediaRequest { op = options.Mode == ImageExportMode.PreserveProvidedBytes ? "export" : "preview",
+                    source = image.Source, path = image.Id, output = folder, edge = options.MaxEdge, quality = options.JpegQuality,
+                    format = options.Mode == ImageExportMode.Jpeg ? "jpg" : "png", backgroundR = options.JpegBackground.r,
+                    backgroundG = options.JpegBackground.g, backgroundB = options.JpegBackground.b }, cancellationToken);
                 try { return new ImageFile(result.items[0].path, new ImageStorage(folder)); }
                 catch { ImagePaths.CleanAfterFailure(folder); throw; }
             }
@@ -81,10 +84,10 @@ namespace Game.Media
                     byte[] bytes;
                     if (options.Mode == ImageExportMode.Jpeg)
                     {
-                        var pixels = preview.Texture.GetPixels(); var background = options.JpegBackground;
-                        for (int i = 0; i < pixels.Length; i++) { var c = pixels[i]; pixels[i] = new Color(c.r*c.a+background.r*(1-c.a), c.g*c.a+background.g*(1-c.a), c.b*c.a+background.b*(1-c.a), 1); }
-                        preview.Texture.SetPixels(pixels); preview.Texture.Apply(false);
-                        bytes = ImageConversion.EncodeToJPG(preview.Texture, options.JpegQuality); path = Path.Combine(directory, "image.jpg");
+                        var flattened = RenderImage(preview.Texture, 1, options.MaxEdge, true, options.JpegBackground);
+                        try { bytes = ImageConversion.EncodeToJPG(flattened, options.JpegQuality); }
+                        finally { ImageTexture.Destroy(flattened); }
+                        path = Path.Combine(directory, "image.jpg");
                     }
                     else { bytes = ImageConversion.EncodeToPNG(preview.Texture); path = Path.Combine(directory, "image.png"); }
                     await UniTask.RunOnThreadPool(() => File.WriteAllBytes(path, bytes), cancellationToken: cancellationToken);
@@ -95,46 +98,28 @@ namespace Game.Media
             catch { ImagePaths.CleanAfterFailure(directory); throw; }
         }
 
-        static Texture2D Resize(Texture2D source, int edge)
+        static Shader transformShader;
+        static Texture2D RenderImage(Texture2D source, int orientation, int edge, bool composite, Color background)
         {
-            float scale = edge / (float)Math.Max(source.width, source.height);
-            int width = Math.Max(1, (int)(source.width * scale)), height = Math.Max(1, (int)(source.height * scale));
-            var previous = RenderTexture.active; var target = RenderTexture.GetTemporary(width, height, 0, RenderTextureFormat.ARGB32);
-            Texture2D result = null;
+            int w = orientation >= 5 ? source.height : source.width, h = orientation >= 5 ? source.width : source.height;
+            float scale = Math.Min(1f, edge / (float)Math.Max(w, h));
+            int width = Math.Max(1, (int)(w * scale)), height = Math.Max(1, (int)(h * scale));
+            if (transformShader == null) transformShader = Resources.Load<Shader>("UIFrameImageTransform");
+            if (transformShader == null || !transformShader.isSupported) throw new PlatformNotSupportedException("UIFrame image transform shader unavailable.");
+            var previous = RenderTexture.active;
+            var target = RenderTexture.GetTemporary(width, height, 0, RenderTextureFormat.ARGB32);
+            Material material = null; Texture2D result = null;
             try
             {
-                Graphics.Blit(source, target); RenderTexture.active = target;
-                result = new Texture2D(width, height, TextureFormat.RGBA32, false); result.ReadPixels(new Rect(0, 0, width, height), 0, 0); result.Apply(false);
-                ImageTexture.Destroy(source); return result;
+                material = new Material(transformShader);
+                material.SetInt("_Orientation", orientation); material.SetInt("_Composite", composite ? 1 : 0);
+                material.SetVector("_Background", new Vector4(background.r, background.g, background.b, 1));
+                Graphics.Blit(source, target, material); RenderTexture.active = target;
+                result = new Texture2D(width, height, TextureFormat.RGBA32, false);
+                result.ReadPixels(new Rect(0, 0, width, height), 0, 0); result.Apply(false); return result;
             }
             catch { ImageTexture.Destroy(result); throw; }
-            finally { RenderTexture.active = previous; RenderTexture.ReleaseTemporary(target); }
-        }
-
-        static Texture2D Orient(Texture2D source, int orientation)
-        {
-            int w = source.width, h = source.height;
-            bool swap = orientation >= 5; int ow = swap ? h : w, oh = swap ? w : h;
-            var input = source.GetPixels32(); var output = new Color32[input.Length];
-            // Coordinates below use a top-left origin, unlike Texture2D pixel storage.
-            for (int y = 0; y < h; y++) for (int x = 0; x < w; x++)
-            {
-                int tx = x, ty = y;
-                switch (orientation)
-                {
-                    case 2: tx = w - 1 - x; break;
-                    case 3: tx = w - 1 - x; ty = h - 1 - y; break;
-                    case 4: ty = h - 1 - y; break;
-                    case 5: tx = y; ty = x; break;
-                    case 6: tx = h - 1 - y; ty = x; break;
-                    case 7: tx = h - 1 - y; ty = w - 1 - x; break;
-                    case 8: tx = y; ty = w - 1 - x; break;
-                }
-                output[(oh - 1 - ty) * ow + tx] = input[(h - 1 - y) * w + x];
-            }
-            var result = new Texture2D(ow, oh, TextureFormat.RGBA32, false);
-            try { result.SetPixels32(output); result.Apply(false); ImageTexture.Destroy(source); return result; }
-            catch { ImageTexture.Destroy(result); throw; }
+            finally { ImageTexture.Destroy(material); RenderTexture.active = previous; RenderTexture.ReleaseTemporary(target); }
         }
     }
 
@@ -142,6 +127,44 @@ namespace Game.Media
     {
         public readonly int Width, Height, Orientation;
         ImageHeader(int width, int height, int orientation) { Width = width; Height = height; Orientation = orientation; }
+        internal static ImageHeader ReadFile(string path)
+        {
+            using var input = File.OpenRead(path);
+            if (input.Length > 128L * 1024 * 1024)
+                throw new GalleryException("ImageTooLarge", "Preview encoded input is limited to 128 MiB; use file export for larger originals.");
+            using var header = new MemoryStream();
+            int first = input.ReadByte(), second = input.ReadByte();
+            if (first == 137 && second == 80)
+            {
+                input.Position = 0; var png = new byte[24]; int count = input.Read(png, 0, png.Length);
+                if (count != png.Length) throw new GalleryException("InvalidImage", "Truncated PNG header.");
+                return Read(png);
+            }
+            if (first != 255 || second != 216) throw new GalleryException("UnsupportedFormat", "Managed preview supports JPEG and PNG.");
+            header.WriteByte(255); header.WriteByte(216);
+            // Keep only the header needed for dimensions/EXIF, never the compressed pixel payload.
+            while (input.Position < input.Length)
+            {
+                int prefix = input.ReadByte(), marker = input.ReadByte();
+                if (prefix != 255 || marker < 0) break;
+                while (marker == 255) marker = input.ReadByte();
+                if (marker < 0 || marker == 217 || marker == 218) break;
+                int high = input.ReadByte(), low = input.ReadByte();
+                if (high < 0 || low < 0) break;
+                int length = (high << 8) | low;
+                if (length < 2 || input.Position + length - 2 > input.Length) break;
+                // Other segments (e.g. ICC profiles) need no managed copy.
+                if (marker >= 192 && marker <= 195 || marker == 225)
+                {
+                    header.WriteByte(255); header.WriteByte((byte)marker); header.WriteByte((byte)high); header.WriteByte((byte)low);
+                    var segment = new byte[length - 2]; int read = 0;
+                    while (read < segment.Length) { int n = input.Read(segment, read, segment.Length - read); if (n == 0) break; read += n; }
+                    header.Write(segment, 0, read);
+                }
+                else input.Seek(length - 2, SeekOrigin.Current);
+            }
+            return Read(header.ToArray());
+        }
         internal static ImageHeader Read(byte[] bytes)
         {
             if (bytes.Length >= 24 && bytes[0] == 137 && bytes[1] == 80 && bytes[2] == 78 && bytes[3] == 71)

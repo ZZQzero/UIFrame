@@ -27,9 +27,20 @@ extern "C" bool UFMIsUnmeteredWifi() {
 @property(nonatomic,strong) NSDictionary *request;
 @property(nonatomic,copy) NSString *identifier;
 @property(nonatomic,copy) NSString *result;
+@property(nonatomic,strong) NSArray *pages;
+@property(nonatomic) NSUInteger offset;
+@property(nonatomic) PHImageRequestID imageRequest;
+@property(nonatomic) BOOL imagePending;
 @property(atomic) BOOL canceled;
 @property(nonatomic) BOOL finished;
 @property(nonatomic,strong) NSURL *securityRoot;
+@property(nonatomic,strong) NSProgress *providerProgress;
+@property(nonatomic,strong) NSOutputStream *resourceOutput;
+@property(nonatomic) PHAssetResourceDataRequestID resourceRequest;
+@property(nonatomic) BOOL resourcePending;
+@property(nonatomic) BOOL copying;
+@property(nonatomic) NSUInteger providerGeneration;
+@property(nonatomic,strong) NSDictionary *resourceFailure;
 @end
 @implementation UFMJob
 @end
@@ -59,6 +70,7 @@ static void UFMComplete(UFMJob *job, NSDictionary *result) {
         if(job.securityRoot) { [job.securityRoot stopAccessingSecurityScopedResource]; job.securityRoot=nil; }
         if(job.canceled || ![result[@"status"] isEqual:@"ok"]) UFMClean(job);
         if(job.canceled) [UFMJobs removeObjectForKey:job.identifier];
+        else if ([result[@"status"] isEqual:@"ok"] && [@[@"images",@"albums",@"directory"] containsObject:job.request[@"op"]]) job.pages=result[@"items"];
         else { NSData *data=[NSJSONSerialization dataWithJSONObject:result options:0 error:nil]; job.result=[[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding]; }
     }
 }
@@ -157,28 +169,60 @@ static NSString *UFMSource(UFMJob *job, NSError **error) {
         if(![resolved hasPrefix:[[root.path stringByResolvingSymlinksInPath] stringByAppendingString:@"/"]]) { *error=UFMFailure(@"Image lies outside the granted directory."); return nil; }
         return path;
     }
-    PHAsset *asset=[PHAsset fetchAssetsWithLocalIdentifiers:@[job.request[@"path"]] options:nil].firstObject;
-    if(!asset) { *error=UFMFailure(@"Source is unavailable or permission was revoked."); return nil; }
-    PHAssetResource *resource=nil;
-    for(PHAssetResource *candidate in [PHAssetResource assetResourcesForAsset:asset]) {
-        if(candidate.type==PHAssetResourceTypeFullSizePhoto) { resource=candidate; break; }
-        if(candidate.type==PHAssetResourceTypePhoto) resource=candidate;
-    }
-    if(!resource) { *error=UFMFailure(@"No static photo representation available."); return nil; }
-    NSString *path=[job.request[@"output"] stringByAppendingPathComponent:[@"source." stringByAppendingString:resource.originalFilename.pathExtension]];
-    PHAssetResourceRequestOptions *options=[PHAssetResourceRequestOptions new]; options.networkAccessAllowed=YES;
-    dispatch_semaphore_t semaphore=dispatch_semaphore_create(0); __block NSError *failure=nil;
-    [[PHAssetResourceManager defaultManager] writeDataForAssetResource:resource toFile:[NSURL fileURLWithPath:path] options:options completionHandler:^(NSError *problem) { failure=problem; dispatch_semaphore_signal(semaphore); }];
-    dispatch_semaphore_wait(semaphore,DISPATCH_TIME_FOREVER); *error=failure;
-    return failure ? nil : path;
+    *error=UFMFailure(@"Unsupported local image source."); return nil;
 }
-static NSDictionary *UFMRead(UFMJob *job) {
-    NSError *error=nil; NSString *source=UFMSource(job,&error);
-    if(!source) return UFMError(@"SourceUnavailable",error.description);
+static NSDictionary *UFMCopyImage(UFMJob *job, NSString *source, NSString *destination) {
+    NSInputStream *input=[NSInputStream inputStreamWithFileAtPath:source];
+    NSOutputStream *output=[NSOutputStream outputStreamToFileAtPath:destination append:NO];
+    [input open]; [output open];
+    @try {
+        if (input.streamError) return UFMError(@"SourceUnavailable",input.streamError.description);
+        if (output.streamError) return UFMError(@"WriteFailed",output.streamError.description);
+        uint8_t buffer[131072]; long long total=0, limit=[job.request[@"maxBytes"] longLongValue];
+        for (;;) {
+            if (job.canceled) return @{@"status":@"canceled"};
+            NSInteger count=[input read:buffer maxLength:sizeof(buffer)];
+            if (count<0) return UFMError(@"SourceUnavailable",input.streamError.description);
+            if (count==0) return nil;
+            if (limit>0 && count>limit-total) return UFMError(@"SizeLimitExceeded",@"Image exceeds export byte limit.");
+            for (NSInteger offset=0;offset<count;) {
+                NSInteger written=[output write:buffer+offset maxLength:count-offset];
+                if (written<=0) return UFMError(@"WriteFailed",output.streamError.description);
+                offset+=written;
+            }
+            total+=count;
+        }
+    } @finally { [input close]; [output close]; }
+}
+static NSDictionary *UFMEncodeImage(UFMJob *job, CGImageRef image) {
+    if (job.canceled) return @{@"status":@"canceled"};
+    BOOL jpeg=[job.request[@"format"] isEqual:@"jpg"];
+    CGImageRef flattened=NULL;
+    if(jpeg) {
+        size_t w=CGImageGetWidth(image), h=CGImageGetHeight(image);
+        CGColorSpaceRef space=CGColorSpaceCreateWithName(kCGColorSpaceSRGB);
+        CGContextRef context=CGBitmapContextCreate(NULL,w,h,8,0,space,kCGImageAlphaNoneSkipLast|kCGBitmapByteOrder32Big); CGColorSpaceRelease(space);
+        if(!context) return UFMError(@"MemoryLimitExceeded",@"Cannot allocate JPEG composition buffer.");
+        CGContextSetRGBFillColor(context,[job.request[@"backgroundR"] doubleValue],[job.request[@"backgroundG"] doubleValue],[job.request[@"backgroundB"] doubleValue],1);
+        CGContextFillRect(context,CGRectMake(0,0,w,h)); CGContextDrawImage(context,CGRectMake(0,0,w,h),image);
+        flattened=CGBitmapContextCreateImage(context); CGContextRelease(context);
+        if(!flattened) return UFMError(@"MemoryLimitExceeded",@"Cannot compose JPEG image.");
+        image=flattened;
+    }
+    NSString *path=[job.request[@"output"] stringByAppendingPathComponent:jpeg?@"image.jpg":@"preview.png"];
+    CGImageDestinationRef destination=CGImageDestinationCreateWithURL((__bridge CFURLRef)[NSURL fileURLWithPath:path],(__bridge CFStringRef)(jpeg?UTTypeJPEG.identifier:UTTypePNG.identifier),1,NULL);
+    NSDictionary *options=jpeg?@{(id)kCGImageDestinationLossyCompressionQuality:@([job.request[@"quality"] doubleValue]/100.0)}:nil;
+    BOOL ok=NO; if(destination) { CGImageDestinationAddImage(destination,image,(__bridge CFDictionaryRef)options); ok=CGImageDestinationFinalize(destination); CFRelease(destination); }
+    if(flattened) CGImageRelease(flattened);
+    return ok ? @{@"status":@"ok",@"items":@[UFMFile(path,nil)]} : UFMError(@"WriteFailed",@"Image encoding failed.");
+}
+static NSDictionary *UFMReadSource(UFMJob *job, NSString *source) {
     if(job.canceled) return @{ @"status":@"canceled" };
     if([job.request[@"op"] isEqual:@"export"]) {
         NSString *path=[job.request[@"output"] stringByAppendingPathComponent:[@"image." stringByAppendingString:source.pathExtension]];
-        if(![[NSFileManager defaultManager] copyItemAtPath:source toPath:path error:&error]) return UFMError(@"WriteFailed",error.description);
+        if (![source isEqual:path]) {
+            NSDictionary *failure=UFMCopyImage(job,source,path); if (failure) return failure;
+        }
         return @{ @"status":@"ok", @"items":@[UFMFile(path,source.lastPathComponent)] };
     }
     CGImageSourceRef imageSource=CGImageSourceCreateWithURL((__bridge CFURLRef)[NSURL fileURLWithPath:source],NULL);
@@ -187,11 +231,100 @@ static NSDictionary *UFMRead(UFMJob *job) {
         (id)kCGImageSourceThumbnailMaxPixelSize:job.request[@"edge"], (id)kCGImageSourceShouldCacheImmediately:@YES };
     CGImageRef image=CGImageSourceCreateThumbnailAtIndex(imageSource,0,(__bridge CFDictionaryRef)options); CFRelease(imageSource);
     if(!image) return UFMError(@"UnsupportedFormat",@"ImageIO thumbnail decoding failed.");
-    NSString *path=[job.request[@"output"] stringByAppendingPathComponent:@"preview.png"];
-    CGImageDestinationRef destination=CGImageDestinationCreateWithURL((__bridge CFURLRef)[NSURL fileURLWithPath:path],(__bridge CFStringRef)UTTypePNG.identifier,1,NULL);
-    BOOL ok=NO; if(destination) { CGImageDestinationAddImage(destination,image,NULL); ok=CGImageDestinationFinalize(destination); CFRelease(destination); }
-    CGImageRelease(image);
-    return ok ? @{ @"status":@"ok", @"items":@[UFMFile(path,nil)] } : UFMError(@"WriteFailed",@"PNG encode failed.");
+    NSDictionary *result=UFMEncodeImage(job,image); CGImageRelease(image); return result;
+}
+
+// PhotoKit selects an appropriately sized representation; previews never export the original resource.
+static void UFMReadThumbnail(UFMJob *job) {
+    PHAsset *asset=[PHAsset fetchAssetsWithLocalIdentifiers:@[job.request[@"path"]] options:nil].firstObject;
+    if(!asset) { UFMComplete(job,UFMError(@"SourceUnavailable",@"Photo is no longer accessible.")); return; }
+    PHImageRequestOptions *options=[PHImageRequestOptions new]; options.networkAccessAllowed=YES;
+    options.deliveryMode=PHImageRequestOptionsDeliveryModeHighQualityFormat; options.resizeMode=PHImageRequestOptionsResizeModeExact;
+    CGFloat edge=[job.request[@"edge"] doubleValue];
+    @synchronized(job) { if(job.canceled) { UFMComplete(job,@{@"status":@"canceled"}); return; } job.imagePending=YES; }
+    PHImageRequestID request=[[PHImageManager defaultManager] requestImageForAsset:asset targetSize:CGSizeMake(edge,edge) contentMode:PHImageContentModeAspectFit options:options resultHandler:^(UIImage *image,NSDictionary *info) {
+        if([info[PHImageResultIsDegradedKey] boolValue]) return;
+        @synchronized(job) { job.imagePending=NO; job.copying=YES; }
+        if(job.canceled) { UFMComplete(job,@{@"status":@"canceled"}); return; }
+        if(!image || info[PHImageErrorKey]) { UFMComplete(job,UFMError(@"SourceUnavailable",[info[PHImageErrorKey] description] ?: @"No photo preview returned.")); return; }
+        [UFMQueue addOperationWithBlock:^{ @autoreleasepool {
+            if(job.canceled) { UFMComplete(job,@{@"status":@"canceled"}); return; }
+            CGFloat w=image.size.width, h=image.size.height, scale=MIN(1,edge/MAX(w,h));
+            CGSize size=CGSizeMake(MAX(1,floor(w*scale)),MAX(1,floor(h*scale)));
+            UIGraphicsImageRendererFormat *format=[UIGraphicsImageRendererFormat defaultFormat]; format.scale=1; format.opaque=NO;
+            UIGraphicsImageRenderer *renderer=[[UIGraphicsImageRenderer alloc] initWithSize:size format:format];
+            UIImage *normalized=[renderer imageWithActions:^(UIGraphicsImageRendererContext *context) { [image drawInRect:CGRectMake(0,0,size.width,size.height)]; }];
+            UFMComplete(job,UFMEncodeImage(job,normalized.CGImage));
+        }}];
+    }];
+    @synchronized(job) { job.imageRequest=request; if(job.canceled) [[PHImageManager defaultManager] cancelImageRequest:request]; }
+}
+// Cloud/provider waits hold no worker slot. Cancellation detaches their output before returning ownership.
+static void UFMReadAsset(UFMJob *job) {
+    PHAsset *asset=[PHAsset fetchAssetsWithLocalIdentifiers:@[job.request[@"path"]] options:nil].firstObject;
+    if (!asset) { UFMComplete(job,UFMError(@"SourceUnavailable",@"Source is unavailable or permission was revoked.")); return; }
+    PHAssetResource *resource=nil;
+    for (PHAssetResource *candidate in [PHAssetResource assetResourcesForAsset:asset]) {
+        if (candidate.type==PHAssetResourceTypeFullSizePhoto) { resource=candidate; break; }
+        if (candidate.type==PHAssetResourceTypePhoto) resource=candidate;
+    }
+    if (!resource) { UFMComplete(job,UFMError(@"UnsupportedFormat",@"No static photo representation available.")); return; }
+    NSString *path=[job.request[@"output"] stringByAppendingPathComponent:[@"image." stringByAppendingString:resource.originalFilename.pathExtension]];
+    @synchronized(job) {
+        if (job.canceled) { UFMComplete(job,@{@"status":@"canceled"}); return; }
+        job.resourceOutput=[NSOutputStream outputStreamToFileAtPath:path append:NO]; [job.resourceOutput open];
+        job.resourcePending=YES;
+    }
+    PHAssetResourceRequestOptions *options=[PHAssetResourceRequestOptions new]; options.networkAccessAllowed=YES;
+    __block long long total=0; long long limit=[job.request[@"maxBytes"] longLongValue];
+    PHAssetResourceDataRequestID request=[[PHAssetResourceManager defaultManager] requestDataForAssetResource:resource options:options dataReceivedHandler:^(NSData *data) {
+        @synchronized(job) {
+            if (job.canceled || job.resourceFailure) return;
+            if (limit>0 && (long long)data.length>limit-total) job.resourceFailure=UFMError(@"SizeLimitExceeded",@"Image exceeds export byte limit.");
+            else {
+                const uint8_t *bytes=(const uint8_t*)data.bytes;
+                for (NSUInteger offset=0;offset<data.length;) {
+                    NSInteger count=[job.resourceOutput write:bytes+offset maxLength:data.length-offset];
+                    if (count<=0) { job.resourceFailure=UFMError(@"WriteFailed",job.resourceOutput.streamError.description); break; }
+                    offset+=count;
+                }
+                total+=data.length;
+            }
+        }
+        if (job.resourceFailure) [[PHAssetResourceManager defaultManager] cancelDataRequest:job.resourceRequest];
+    } completionHandler:^(NSError *error) {
+        NSDictionary *failure;
+        @synchronized(job) { [job.resourceOutput close]; job.resourceOutput=nil; job.resourcePending=NO; failure=job.resourceFailure; }
+        if (job.canceled) { UFMComplete(job,@{@"status":@"canceled"}); return; }
+        if (failure || error) { UFMComplete(job,failure ?: UFMError(@"SourceUnavailable",error.description)); return; }
+        [UFMQueue addOperationWithBlock:^{ @autoreleasepool { UFMComplete(job,UFMReadSource(job,path)); } }];
+    }];
+    @synchronized(job) {
+        job.resourceRequest=request;
+        if (job.canceled || job.resourceFailure) [[PHAssetResourceManager defaultManager] cancelDataRequest:request];
+    }
+}
+static void UFMImport(UFMJob *job, NSArray<PHPickerResult*> *results, NSUInteger index, NSMutableArray *items) {
+    if (job.canceled) { UFMComplete(job,@{@"status":@"canceled"}); return; }
+    if (index==results.count) { UFMComplete(job,@{@"status":@"ok",@"items":items}); return; }
+    NSItemProvider *provider=results[index].itemProvider; NSString *type=nil;
+    for (NSString *identifier in provider.registeredTypeIdentifiers)
+        if ([[UTType typeWithIdentifier:identifier] conformsToType:UTTypeImage]) { type=identifier; break; }
+    if (!type) { UFMComplete(job,UFMError(@"UnsupportedFormat",@"Provider has no static image representation.")); return; }
+    NSUInteger generation;
+    @synchronized(job) { generation=++job.providerGeneration; }
+    NSProgress *progress=[provider loadFileRepresentationForTypeIdentifier:type completionHandler:^(NSURL *url,NSError *error) {
+        @synchronized(job) { job.providerProgress=nil; job.copying=YES; }
+        if (job.canceled) { UFMComplete(job,@{@"status":@"canceled"}); return; }
+        if (!url || error) { UFMComplete(job,UFMError(@"SourceUnavailable",error.description ?: @"No provider file.")); return; }
+        NSString *path=[job.request[@"output"] stringByAppendingPathComponent:[NSString stringWithFormat:@"%lu.%@",(unsigned long)index,url.pathExtension]];
+        NSDictionary *failure=UFMCopyImage(job,url.path,path);
+        @synchronized(job) { job.copying=NO; }
+        if (failure) { UFMComplete(job,failure); return; }
+        [items addObject:UFMFile(path,url.lastPathComponent)]; UFMImport(job,results,index+1,items);
+    }];
+    @synchronized(job) { if (!job.finished && !job.copying && job.providerGeneration==generation) job.providerProgress=progress; }
+    if (job.canceled) [progress cancel];
 }
 
 @interface UFMPicker : NSObject<PHPickerViewControllerDelegate,UIAdaptivePresentationControllerDelegate>
@@ -208,29 +341,7 @@ static NSDictionary *UFMRead(UFMJob *job) {
     [picker dismissViewControllerAnimated:YES completion:^{ if([UFMWindow isEqual:job.identifier]) { UFMWindow=nil; UFMPresented=nil; UFMPickerDelegate=nil; } }];
     if(results.count==0) { UFMComplete(job,@{@"status":@"canceled"}); return; }
     if(results.count>[job.request[@"count"] unsignedIntegerValue]) { UFMComplete(job,UFMError(@"SelectionLimitExceeded",@"Selection exceeds requested limit.")); return; }
-    [UFMQueue addOperationWithBlock:^{ @autoreleasepool {
-        NSMutableArray *items=[NSMutableArray new];
-        for(PHPickerResult *result in results) {
-            if(job.canceled) { UFMComplete(job,@{@"status":@"canceled"}); return; }
-            NSItemProvider *provider=result.itemProvider; NSString *type=nil;
-            for(NSString *identifier in provider.registeredTypeIdentifiers) if([[UTType typeWithIdentifier:identifier] conformsToType:UTTypeImage]) { type=identifier; break; }
-            if(!type) { UFMComplete(job,UFMError(@"UnsupportedFormat",@"Provider has no static image representation.")); return; }
-            dispatch_semaphore_t semaphore=dispatch_semaphore_create(0); __block NSError *failure=nil; __block NSString *path=nil; __block NSString *name=nil;
-            [provider loadFileRepresentationForTypeIdentifier:type completionHandler:^(NSURL *url,NSError *error) {
-                failure=error;
-                if(url && !error) {
-                    name=url.lastPathComponent;
-                    path=[job.request[@"output"] stringByAppendingPathComponent:[NSString stringWithFormat:@"%lu.%@",(unsigned long)items.count,url.pathExtension]];
-                    [[NSFileManager defaultManager] copyItemAtURL:url toURL:[NSURL fileURLWithPath:path] error:&failure];
-                }
-                dispatch_semaphore_signal(semaphore);
-            }];
-            dispatch_semaphore_wait(semaphore,DISPATCH_TIME_FOREVER);
-            if(failure || !path) { UFMComplete(job,UFMError(@"ReadFailed",failure.description ?: @"No provider file.")); return; }
-            [items addObject:UFMFile(path,name)];
-        }
-        UFMComplete(job,@{@"status":@"ok",@"items":items});
-    }}];
+    UFMImport(job,results,0,[NSMutableArray new]);
 }
 @end
 
@@ -299,19 +410,44 @@ extern "C" void UFMStart(const char *json) {
         } else [UFMQueue addOperationWithBlock:^{ @autoreleasepool {
             if([op isEqual:@"albums"] || [op isEqual:@"images"]) UFMComplete(job,UFMLibrary(job));
             else if([op isEqual:@"directory"]) UFMComplete(job,UFMDirectory(job));
-            else if([op isEqual:@"export"] || [op isEqual:@"preview"]) UFMComplete(job,UFMRead(job));
+            else if([op isEqual:@"export"] || [op isEqual:@"preview"]) {
+                if ([job.request[@"source"] isEqual:@"file"] || [job.request[@"source"] isEqual:@"directory"]) {
+                    NSError *error=nil; NSString *source=UFMSource(job,&error);
+                    UFMComplete(job,source ? UFMReadSource(job,source) : UFMError(@"SourceUnavailable",error.description));
+                } else if([op isEqual:@"preview"]) UFMReadThumbnail(job);
+                else UFMReadAsset(job);
+            }
             else UFMComplete(job,UFMError(@"UnsupportedOperation",op));
         }}];
     });
 }
 extern "C" char *UFMPoll(const char *identifier) {
     UFMInitialize(); NSString *key=[NSString stringWithUTF8String:identifier];
-    @synchronized(UFMJobs) { UFMJob *job=UFMJobs[key]; if(!job.finished) return NULL; char *result=strdup(job.result.UTF8String); [UFMJobs removeObjectForKey:key]; return result; }
+    @synchronized(UFMJobs) {
+        UFMJob *job=UFMJobs[key]; if(!job.finished) return NULL;
+        if(job.pages) {
+            NSUInteger end=MIN(job.pages.count,job.offset+200); BOOL more=end<job.pages.count;
+            NSDictionary *page=@{@"status":@"ok",@"items":[job.pages subarrayWithRange:NSMakeRange(job.offset,end-job.offset)],@"more":@(more)};
+            job.offset=end; if(!more) [UFMJobs removeObjectForKey:key];
+            NSData *data=[NSJSONSerialization dataWithJSONObject:page options:0 error:nil]; return strdup([[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding].UTF8String);
+        }
+        char *result=strdup(job.result.UTF8String); [UFMJobs removeObjectForKey:key]; return result;
+    }
 }
 extern "C" void UFMFree(void *value) { free(value); }
 extern "C" void UFMCancel(const char *identifier) {
     UFMInitialize(); NSString *key=[NSString stringWithUTF8String:identifier]; __block UFMJob *job;
     @synchronized(UFMJobs) { job=UFMJobs[key]; job.canceled=YES; if(job.finished) { UFMClean(job); [UFMJobs removeObjectForKey:key]; } }
+    BOOL detached=NO;
+    @synchronized(job) {
+        if(job.imagePending) { [[PHImageManager defaultManager] cancelImageRequest:job.imageRequest]; job.imagePending=NO; detached=YES; }
+        if (job.resourcePending) {
+            [[PHAssetResourceManager defaultManager] cancelDataRequest:job.resourceRequest];
+            [job.resourceOutput close]; job.resourceOutput=nil; detached=YES;
+        }
+        if (job.providerProgress && !job.copying) { [job.providerProgress cancel]; job.providerProgress=nil; detached=YES; }
+    }
+    if (detached) UFMComplete(job,@{@"status":@"canceled"});
     dispatch_async(dispatch_get_main_queue(), ^{
         if([UFMWindow isEqual:key] && UFMPresented) {
             UFMPicker *delegate=UFMPickerDelegate;
@@ -319,4 +455,8 @@ extern "C" void UFMCancel(const char *identifier) {
             [UFMPresented dismissViewControllerAnimated:YES completion:^{ if([UFMWindow isEqual:key]) { UFMWindow=nil; UFMPresented=nil; UFMPickerDelegate=nil; } if(!importing) UFMComplete(job,@{@"status":@"canceled"}); }];
         }
     });
+}
+
+extern "C" bool UFMPending(const char *identifier) {
+    UFMInitialize(); @synchronized(UFMJobs) { return UFMJobs[[NSString stringWithUTF8String:identifier]]!=nil; }
 }

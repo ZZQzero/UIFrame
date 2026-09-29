@@ -4,6 +4,7 @@ using System.IO;
 using System.Linq;
 using System.Net;
 using System.Net.Http;
+using System.Runtime.ExceptionServices;
 using System.Security.Cryptography;
 using System.Text;
 using System.Threading;
@@ -14,6 +15,15 @@ namespace Game.Media.Backup
 {
     public enum BackupState { Queued, Uploading, Verifying, Completed, Paused, RetryScheduled, NeedsAttention, Failed, Canceled }
     internal sealed class BackupPolicyWaitException : Exception { }
+    internal sealed class BackupSourceFailure : Exception
+    {
+        internal readonly ExceptionDispatchInfo Original;
+        internal BackupSourceFailure(Exception error) : base(error.Message, error) { Original = ExceptionDispatchInfo.Capture(error); }
+    }
+    public sealed class BackupBudgetExceededException : IOException
+    {
+        internal BackupBudgetExceededException() : base("Backup staging budget exceeded. Free space in the queue before continuing.") { }
+    }
 
     public sealed class BackupConfiguration
     {
@@ -37,15 +47,20 @@ namespace Game.Media.Backup
         public long size, confirmedBytes, nextAttemptUtcTicks;
         public int retries;
         public BackupState state;
-        public bool nativeOwned;
+        public bool nativeOwned, cleanupPending;
+        public string cleanupError;
         internal BackupTaskInfo Snapshot() => (BackupTaskInfo)MemberwiseClone();
     }
 
     [Serializable] internal sealed class BackupIdentity { public string server, account; }
     [Serializable] internal sealed class UploadRequest { public string key, sha256, name, mime, source; public long size; }
-    [Serializable] internal sealed class UploadResponse { public string uploadId, sha256, backupId; public long offset, size; public bool completed; }
+    [Serializable] internal sealed class UploadResponse { public string uploadId, sha256, backupId; public long offset, size; public bool completed; public ServerCapabilities capabilities; }
     [Serializable] internal sealed class ServerCapabilities { public int protocolVersion, chunkBytes; public long maxFileBytes; public string account; public bool backgroundUpload; }
-    [Serializable] internal sealed class BackupReceipt { public string fingerprint, key, backupId; }
+    [Serializable] internal sealed class BackupReceipt
+    {
+        public string fingerprint, key, backupId, source, name, error;
+        public bool retryRequested;
+    }
     [Serializable] internal sealed class BackupScanState { public bool baselineEstablished; public List<BackupReceipt> entries = new List<BackupReceipt>(); }
 
     public sealed class BackupHttpException : Exception
@@ -67,6 +82,20 @@ namespace Game.Media.Backup
         readonly bool nativeAvailable;
         readonly HttpClient client;
         readonly FileStream ownerLock;
+        readonly Dictionary<string, BackupTaskInfo> tasks = new Dictionary<string, BackupTaskInfo>();
+        long stagedBytes;
+        long nextNativeRefresh;
+        ServerCapabilities capabilities;
+        readonly Dictionary<string, ScanIndex> scans = new Dictionary<string, ScanIndex>();
+        int metadataReads;
+        sealed class ScanIndex
+        {
+            internal bool baseline;
+            internal readonly Dictionary<string, BackupReceipt> entries = new Dictionary<string, BackupReceipt>();
+            internal BackupScanState Snapshot() => new BackupScanState { baselineEstablished = baseline, entries = entries.Values.Select(CloneReceipt).ToList() };
+        }
+        static BackupReceipt CloneReceipt(BackupReceipt x) => new BackupReceipt { fingerprint=x.fingerprint, key=x.key, backupId=x.backupId, source=x.source, name=x.name, error=x.error, retryRequested=x.retryRequested };
+        Exception callbackFailure, persistenceFailure, capabilityFailure;
         readonly CancellationTokenSource lifetime = new CancellationTokenSource();
         CancellationTokenSource processing;
         bool disposed, running, accepting, pausing;
@@ -80,10 +109,30 @@ namespace Game.Media.Backup
 
         public ImageBackupService(BackupConfiguration configuration) : this(configuration, NativeBackup.Call, NativeBackup.Available) { }
 
+        /// <summary>Loads the persistent store on a worker. The returned service is owned by the calling main thread.</summary>
+        public static async UniTask<ImageBackupService> CreateAsync(BackupConfiguration configuration, CancellationToken cancellationToken = default)
+        {
+            MediaThread.Check(); cancellationToken.ThrowIfCancellationRequested();
+            if (configuration == null) throw new ArgumentNullException(nameof(configuration));
+            var copy = new BackupConfiguration { ServerUrl=configuration.ServerUrl, Account=configuration.Account,
+                StorageDirectory=configuration.StorageDirectory, AccessToken=configuration.AccessToken,
+                AllowDevelopmentHttp=configuration.AllowDevelopmentHttp, EnableNativeBackgroundTransfer=configuration.EnableNativeBackgroundTransfer,
+                NativeWifiOnly=configuration.NativeWifiOnly, DiskBudgetBytes=configuration.DiskBudgetBytes, MaxFileBytes=configuration.MaxFileBytes,
+                EnableTransientRetries=configuration.EnableTransientRetries, MaxRetries=configuration.MaxRetries };
+            bool available = NativeBackup.Available;
+            // Await worker ownership even after cancellation, so a successfully opened store cannot leak its lock.
+            var service = await UniTask.RunOnThreadPool(() => new ImageBackupService(copy, NativeBackup.Call, available, false, cancellationToken));
+            try { cancellationToken.ThrowIfCancellationRequested(); return service; }
+            catch { try { service.Dispose(); } catch (Exception cleanup) { Debug.LogException(cleanup); } throw; }
+        }
+
         internal ImageBackupService(BackupConfiguration configuration, Func<NativeBackupRequest, NativeBackupStatus> nativeCall, bool nativeAvailable)
+            : this(configuration, nativeCall, nativeAvailable, true, default) { }
+
+        ImageBackupService(BackupConfiguration configuration, Func<NativeBackupRequest, NativeBackupStatus> nativeCall, bool nativeAvailable, bool checkThread, CancellationToken initializationToken)
         {
             this.nativeCall = nativeCall ?? throw new ArgumentNullException(nameof(nativeCall)); this.nativeAvailable = nativeAvailable;
-            MediaThread.Check();
+            if (checkThread) MediaThread.Check();
             if (configuration == null) throw new ArgumentNullException(nameof(configuration));
             if (!Uri.TryCreate(configuration.ServerUrl, UriKind.Absolute, out var uri) || !string.IsNullOrEmpty(uri.UserInfo) || !string.IsNullOrEmpty(uri.Query) || !string.IsNullOrEmpty(uri.Fragment))
                 throw new ArgumentException("A server base URL without credentials, query or fragment is required.");
@@ -100,6 +149,7 @@ namespace Game.Media.Backup
             root = Path.GetFullPath(configuration.StorageDirectory); server = uri.AbsoluteUri.TrimEnd('/'); account = configuration.Account;
             budget = configuration.DiskBudgetBytes; maximum = configuration.MaxFileBytes; accessToken = configuration.AccessToken;
             retryEnabled = configuration.EnableTransientRetries; retryLimit = configuration.MaxRetries;
+            initializationToken.ThrowIfCancellationRequested();
             Directory.CreateDirectory(root);
             ownerLock = new FileStream(Path.Combine(root, "owner.lock"), FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None);
             try
@@ -115,23 +165,33 @@ namespace Game.Media.Backup
                 string staging = Path.Combine(root, "staging");
                 if (Directory.Exists(staging)) Directory.Delete(staging, true);
                 Directory.CreateDirectory(staging);
+                foreach (var record in ReadTasks()) { initializationToken.ThrowIfCancellationRequested(); tasks.Add(record.id, record); }
+                stagedBytes = Directory.EnumerateFiles(Path.Combine(root, "batches"), "*.payload", SearchOption.AllDirectories).Sum(x => new FileInfo(x).Length);
                 foreach (var record in LoadTasks())
                 {
+                    initializationToken.ThrowIfCancellationRequested();
                     if (!record.nativeOwned && (record.state == BackupState.Uploading || record.state == BackupState.Verifying))
                     { record.state = BackupState.Queued; Save(record); }
-                    if (!record.nativeOwned && (record.state == BackupState.Completed || record.state == BackupState.Canceled)) DeletePayload(record);
+                    if (!record.nativeOwned && !record.cleanupPending && (record.state == BackupState.Completed || record.state == BackupState.Canceled) && File.Exists(Payload(record)))
+                    { record.cleanupPending = true; Save(record); }
                 }
                 client = new HttpClient(new HttpClientHandler { AllowAutoRedirect = false }) { Timeout = TimeSpan.FromMinutes(2) };
             }
-            catch { ownerLock.Dispose(); throw; }
+            catch { try { ownerLock.Dispose(); } catch (Exception cleanup) { Debug.LogException(cleanup); } throw; }
         }
 
         public IReadOnlyList<BackupTaskInfo> GetTasks()
         {
-            Check(); ReconcileNative(); return LoadTasks().Select(x => x.Snapshot()).ToList().AsReadOnly();
+            Check(); ReconcileNative(); return LoadTasks().AsReadOnly();
         }
 
         public async UniTask<IReadOnlyList<string>> EnqueueAsync(IReadOnlyList<ImageReference> images, CancellationToken cancellationToken = default)
+        {
+            try { return await EnqueueBatchAsync(images, cancellationToken); }
+            catch (BackupSourceFailure failure) { failure.Original.Throw(); throw; }
+        }
+
+        internal async UniTask<IReadOnlyList<string>> EnqueueBatchAsync(IReadOnlyList<ImageReference> images, CancellationToken cancellationToken)
         {
             Check(); if (images == null) throw new ArgumentNullException(nameof(images));
             if (images.Count == 0) throw new ArgumentException("At least one image is required.");
@@ -144,50 +204,120 @@ namespace Game.Media.Backup
             try
             {
                 Directory.CreateDirectory(folder); var records = new List<BackupTaskInfo>();
-                long bytes = Directory.EnumerateFiles(Path.Combine(root, "batches"), "*.payload", SearchOption.AllDirectories).Sum(x => new FileInfo(x).Length);
+                long bytes = 0;
                 foreach (var source in sources)
                 {
                     linked.Token.ThrowIfCancellationRequested();
-                    using var file = await GameImageReader.ExportFileAsync(source, cancellationToken: linked.Token);
-                    if (file.ByteCount > maximum || file.ByteCount > budget - bytes) throw new IOException("Backup staging budget or per-file limit exceeded.");
+                    if (source.ByteCount > maximum) throw new BackupSourceFailure(new IOException("Image exceeds the per-file backup limit."));
+                    if (source.ByteCount > budget - stagedBytes - bytes && tasks.Values.Any(x => x.nativeOwned)) ReconcileNative();
+                    if (source.ByteCount > budget - stagedBytes - bytes) throw new BackupBudgetExceededException();
                     string id = Guid.NewGuid().ToString("N"), destination = Path.Combine(folder, id + ".payload");
-                    string path = file.LocalPath;
-                    string hash = await UniTask.RunOnThreadPool(() =>
-                    {
-                        GameGallery.CopyFile(path, destination, linked.Token);
-                        using var stream = File.OpenRead(destination); using var sha = SHA256.Create(); return Hex(sha.ComputeHash(stream));
-                    }, cancellationToken: linked.Token);
+                    var prepared = await PreparePayload(source, destination, budget - stagedBytes - bytes, linked.Token);
                     string sourceIdentity = source.Source + ":" + source.OriginId;
                     var record = new BackupTaskInfo { id = id, batchId = batch, source = sourceIdentity, version = source.Version,
-                        name = source.FileName, mime = file.MimeType, sha256 = hash, size = file.ByteCount,
-                        key = Hash(sourceIdentity + "\n" + hash), state = BackupState.Queued };
-                    AtomicJson(Path.Combine(folder, id + ".json"), record); records.Add(record); bytes += file.ByteCount;
+                        name = source.FileName, mime = prepared.mime, sha256 = prepared.hash, size = prepared.size,
+                        key = Hash(sourceIdentity + "\n" + prepared.hash), state = BackupState.Queued };
+                    AtomicJson(Path.Combine(folder, id + ".json"), record); records.Add(record); bytes += prepared.size;
                 }
                 linked.Token.ThrowIfCancellationRequested();
                 Directory.Move(folder, Path.Combine(root, "batches", batch));
+                foreach (var record in records) tasks.Add(record.id, record.Snapshot());
+                stagedBytes += bytes;
                 return records.Select(x => x.id).ToList().AsReadOnly();
             }
             catch { ImagePaths.CleanAfterFailure(folder); throw; }
             finally { accepting = false; }
         }
 
+        async UniTask<(long size, string mime, string hash)> PreparePayload(ImageReference source, string destination, long available, CancellationToken token)
+        {
+            using var lease = source.Acquire();
+            void CheckSize(long size)
+            {
+                if (size > maximum) throw new BackupSourceFailure(new IOException("Image exceeds the per-file backup limit."));
+                if (size > available) throw new BackupBudgetExceededException();
+            }
+            if (source.Source == "file")
+            {
+                return await UniTask.RunOnThreadPool(() =>
+                {
+                    FileStream input;
+                    try { input = File.OpenRead(source.Id); }
+                    catch (IOException error) { throw new BackupSourceFailure(error); }
+                    catch (UnauthorizedAccessException error) { throw new BackupSourceFailure(error); }
+                    using (input)
+                    using (var output = new FileStream(destination, FileMode.CreateNew, FileAccess.Write, FileShare.None))
+                    using (var sha = SHA256.Create())
+                    {
+                        var buffer = new byte[128 * 1024]; long size = 0;
+                        for (;;)
+                        {
+                            token.ThrowIfCancellationRequested(); int count;
+                            try { count = input.Read(buffer, 0, buffer.Length); }
+                            catch (IOException error) { throw new BackupSourceFailure(error); }
+                            if (count == 0) break;
+                            CheckSize(size + count); output.Write(buffer, 0, count);
+                            sha.TransformBlock(buffer, 0, count, null, 0); size += count;
+                        }
+                        sha.TransformFinalBlock(Array.Empty<byte>(), 0, 0); output.Flush(true);
+                        return (size, source.MimeType, Hex(sha.Hash));
+                    }
+                }, cancellationToken: token);
+            }
+            if (available <= 0) throw new BackupBudgetExceededException();
+            string folder = destination + ".source"; Directory.CreateDirectory(folder);
+            MediaResponse response;
+            try
+            {
+                response = await NativeMedia.Request(new MediaRequest { op = "export", source = source.Source, path = source.Id,
+                    output = folder, maxBytes = Math.Min(maximum, available) }, token);
+            }
+            catch (GalleryException error) when (error.Code == "SizeLimitExceeded")
+            {
+                if (maximum <= available) throw new BackupSourceFailure(error);
+                throw new BackupBudgetExceededException();
+            }
+            catch (GalleryException error) when (error.Code == "SourceUnavailable" || error.Code == "PermissionDenied" || error.Code == "ReadFailed" || error.Code == "UnsupportedFormat")
+            { throw new BackupSourceFailure(error); }
+            string path = response.items[0].path;
+            long length = new FileInfo(path).Length; CheckSize(length);
+            File.Move(path, destination); Directory.Delete(folder, true);
+            string hash = await UniTask.RunOnThreadPool(() =>
+            {
+                using var input = File.OpenRead(destination); return HashFile(input, token);
+            }, cancellationToken: token);
+            return (length, ImagePaths.Mime(Path.GetExtension(path)), hash);
+        }
+
+        static string HashFile(Stream input, CancellationToken token)
+        {
+            using var sha = SHA256.Create(); var buffer = new byte[128 * 1024]; int length;
+            while ((length = input.Read(buffer, 0, buffer.Length)) != 0)
+            { token.ThrowIfCancellationRequested(); sha.TransformBlock(buffer, 0, length, null, 0); }
+            token.ThrowIfCancellationRequested(); sha.TransformFinalBlock(Array.Empty<byte>(), 0, 0); return Hex(sha.Hash);
+        }
+
         /// <summary>Processes eligible jobs once. In native mode returns after durable OS submission, not upload completion. Cancellation stops submission only.</summary>
-        public async UniTask ProcessAsync(CancellationToken cancellationToken = default, Func<bool> canTransfer = null)
+        public UniTask ProcessAsync(CancellationToken cancellationToken = default, Func<bool> canTransfer = null)
+            => ProcessTasksAsync(null, cancellationToken, canTransfer);
+
+        internal async UniTask ProcessTasksAsync(IReadOnlyList<string> taskIds, CancellationToken cancellationToken, Func<bool> canTransfer = null)
         {
             Check(); if (running || pausing) throw new InvalidOperationException("A backup pass is already running or the queue is pausing.");
             if (nativeEnabled && canTransfer != null) throw new ArgumentException("A managed callback cannot enforce a background network policy. Configure NativeWifiOnly instead.");
-            cancellationToken.ThrowIfCancellationRequested(); running = true;
+            cancellationToken.ThrowIfCancellationRequested(); running = true; callbackFailure = null; persistenceFailure = null; capabilityFailure = null;
             processing = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, lifetime.Token);
             var token = processing.Token;
             try
             {
-                ReconcileNative();
-                if (canTransfer != null && !canTransfer()) return;
-                var capabilities = await JsonRequest<ServerCapabilities>(HttpMethod.Get, "/v1/capabilities", null, token);
-                if (capabilities.protocolVersion != 1 || capabilities.account != account || capabilities.chunkBytes < 1 || capabilities.chunkBytes > 4 * 1024 * 1024)
-                    throw new InvalidOperationException("Server protocol or authenticated account does not match configuration.");
-                if (nativeEnabled && !capabilities.backgroundUpload) throw new InvalidOperationException("Server does not advertise backgroundUpload support.");
-                foreach (var record in LoadTasks())
+                ReconcileNative(nativeEnabled && DateTime.UtcNow.Ticks >= nextNativeRefresh ? null : taskIds);
+                if (!CanTransfer(canTransfer)) return;
+                var candidates = taskIds == null ? LoadTasks() : taskIds.Select(Find).ToList();
+                // Waking an existing OS job or an empty/completed queue needs no server handshake.
+                if (candidates.Any(x => (x.state == BackupState.Queued || x.state == BackupState.RetryScheduled) &&
+                    x.nextAttemptUtcTicks <= DateTime.UtcNow.Ticks && (!x.nativeOwned || !NativeStatus(x).exists)))
+                    await EnsureCapabilities(token);
+                foreach (var record in candidates)
                 {
                     token.ThrowIfCancellationRequested();
                     if (record.nativeOwned && NativeStatus(record).exists)
@@ -203,7 +333,7 @@ namespace Game.Media.Backup
                         if (record.size > capabilities.maxFileBytes) throw new IOException("Image exceeds server file limit.");
                         if (nativeEnabled) await SubmitNative(record, token);
                         else if (record.nativeOwned) throw new InvalidOperationException("Resume this store with native background transfer enabled.");
-                        else await Upload(record, capabilities.chunkBytes, token, canTransfer);
+                        else await Upload(record, token, canTransfer);
                     }
                     catch (BackupPolicyWaitException) { record.state = BackupState.Queued; Save(record); break; }
                     catch (OperationCanceledException) when (token.IsCancellationRequested)
@@ -212,6 +342,13 @@ namespace Game.Media.Backup
                     }
                     catch (Exception error)
                     {
+                        if (ReferenceEquals(error, persistenceFailure)) throw;
+                        if (ReferenceEquals(error, callbackFailure) || ReferenceEquals(error, capabilityFailure))
+                        {
+                            record.error = error.Message; record.state = BackupState.Failed;
+                            try { Save(record); } catch (Exception persistence) { Debug.LogException(persistence); }
+                            throw;
+                        }
                         // A native handoff may have succeeded before a bridge error. Never steal its payload.
                         if (record.nativeOwned) throw;
                         // A committed backup is not changed to Failed because local cleanup failed.
@@ -230,7 +367,7 @@ namespace Game.Media.Backup
                     }
                 }
             }
-            finally { processing.Dispose(); processing = null; running = false; }
+            finally { processing.Dispose(); processing = null; running = false; callbackFailure = null; capabilityFailure = null; }
         }
 
         async UniTask SubmitNative(BackupTaskInfo record, CancellationToken token)
@@ -238,13 +375,14 @@ namespace Game.Media.Backup
             var session = await JsonRequest<UploadResponse>(HttpMethod.Post, "/v1/uploads", new UploadRequest
             { key = record.key, sha256 = record.sha256, size = record.size, name = record.name, mime = record.mime, source = record.source }, token);
             ValidateResponse(record, session);
+            if (session.capabilities != null) SetCapabilities(session.capabilities);
             if (session.completed)
             {
                 if (string.IsNullOrEmpty(session.backupId)) throw new InvalidOperationException("Missing committed backup ID.");
                 record.state = BackupState.Completed; record.backupId = session.backupId; record.confirmedBytes = record.size;
-                record.nativeOwned = false; Save(record); DeletePayload(record); return;
+                record.nativeOwned = false; record.cleanupPending = true; Save(record); FinishCleanup(record); return;
             }
-            string credential = accessToken();
+            string credential = GetAccessToken();
             if (string.IsNullOrWhiteSpace(credential)) throw new InvalidOperationException("No access token available.");
             token.ThrowIfCancellationRequested();
             record.nativeOwned = true; record.state = BackupState.Queued; record.error = null; Save(record);
@@ -254,20 +392,56 @@ namespace Game.Media.Backup
         }
 
         NativeBackupStatus NativeStatus(BackupTaskInfo record) => nativeCall(new NativeBackupRequest { op = "status", id = record.id });
-        void ReconcileNative()
+        void ReconcileNative(IReadOnlyList<string> taskIds = null)
         {
-            foreach (var record in LoadTasks().Where(x => x.nativeOwned))
+            var records = (taskIds == null ? tasks.Values.AsEnumerable() : taskIds.Select(Find))
+                .Where(x => x.nativeOwned || x.cleanupPending).Select(x => x.Snapshot()).ToList();
+            foreach (var record in records)
             {
+                if (record.cleanupPending)
+                {
+                    if (string.IsNullOrEmpty(record.cleanupError)) FinishCleanup(record);
+                    continue;
+                }
                 var status = NativeStatus(record);
                 if (!status.exists) continue; // Durable handoff intent; next ProcessAsync submits it.
+                bool changed = record.state != status.state || (record.error ?? "") != (status.error ?? "") ||
+                    (record.backupId ?? "") != (status.backupId ?? "") || record.confirmedBytes != status.confirmedBytes;
                 record.state = status.state; record.error = status.error; record.backupId = status.backupId;
-                record.confirmedBytes = status.confirmedBytes; Save(record);
+                record.confirmedBytes = status.confirmedBytes;
                 if (status.released && (status.state == BackupState.Completed || status.state == BackupState.Canceled))
                 {
-                    record.nativeOwned = false; Save(record); DeletePayload(record);
-                    nativeCall(new NativeBackupRequest { op = "forget", id = record.id });
+                    record.cleanupPending = true; Save(record); FinishCleanup(record);
                 }
+                else if (changed) Save(record);
             }
+            if (taskIds == null) nextNativeRefresh = DateTime.UtcNow.AddSeconds(1).Ticks;
+        }
+        void FinishCleanup(BackupTaskInfo record)
+        {
+            try
+            {
+                if (record.nativeOwned)
+                {
+                    nativeCall(new NativeBackupRequest { op = "forget", id = record.id });
+                    record.nativeOwned = false; Save(record);
+                }
+                DeletePayload(record);
+                record.cleanupPending = false; record.cleanupError = null; Save(record);
+            }
+            catch (Exception error)
+            {
+                record.cleanupError = error.ToString();
+                try { Save(record); } catch (Exception persistence) { Debug.LogException(persistence); }
+                throw;
+            }
+        }
+        /// <summary>Explicitly retries failed local/native cleanup without retrying an upload.</summary>
+        public void RetryCleanup(string taskId)
+        {
+            CheckIdle(); var record = Find(taskId);
+            if (!record.cleanupPending) throw new InvalidOperationException("Task has no pending cleanup.");
+            record.cleanupError = null; Save(record); FinishCleanup(record);
         }
         void ReleaseNativeForRetry(BackupTaskInfo record)
         {
@@ -278,24 +452,22 @@ namespace Game.Media.Backup
             record.nativeOwned = false;
         }
 
-        async UniTask Upload(BackupTaskInfo record, int chunkSize, CancellationToken token, Func<bool> canTransfer)
+        async UniTask Upload(BackupTaskInfo record, CancellationToken token, Func<bool> canTransfer)
         {
-            void CheckPolicy() { if (canTransfer != null && !canTransfer()) throw new BackupPolicyWaitException(); }
+            void CheckPolicy() { if (!CanTransfer(canTransfer)) throw new BackupPolicyWaitException(); }
             CheckPolicy();
             record.state = BackupState.Uploading; record.error = null; Save(record);
             var session = await JsonRequest<UploadResponse>(HttpMethod.Post, "/v1/uploads", new UploadRequest
             { key = record.key, sha256 = record.sha256, size = record.size, name = record.name, mime = record.mime, source = record.source }, token);
             ValidateResponse(record, session);
+            if (session.capabilities != null) SetCapabilities(session.capabilities);
             if (!session.completed)
             {
                 using var input = File.OpenRead(Payload(record));
                 if (input.Length != record.size) throw new IOException("Staged backup file size changed.");
-                using (var hash = SHA256.Create())
-                {
-                    string actual = await UniTask.RunOnThreadPool(() => Hex(hash.ComputeHash(input)), cancellationToken: token);
-                    if (actual != record.sha256) throw new IOException("Staged backup checksum changed.");
-                }
-                input.Position = session.offset; var buffer = new byte[chunkSize];
+                string actual = await UniTask.RunOnThreadPool(() => HashFile(input, token), cancellationToken: token);
+                if (actual != record.sha256) throw new IOException("Staged backup checksum changed.");
+                input.Position = session.offset; var buffer = new byte[capabilities.chunkBytes];
                 while (input.Position < input.Length)
                 {
                     CheckPolicy();
@@ -312,8 +484,8 @@ namespace Game.Media.Backup
                 ValidateResponse(record, session);
             }
             if (!session.completed || string.IsNullOrEmpty(session.backupId)) throw new InvalidOperationException("Server did not confirm a committed backup.");
-            record.backupId = session.backupId; record.confirmedBytes = record.size; record.state = BackupState.Completed; Save(record);
-            DeletePayload(record);
+            record.backupId = session.backupId; record.confirmedBytes = record.size; record.state = BackupState.Completed;
+            record.cleanupPending = true; Save(record); FinishCleanup(record);
         }
 
         static void ValidateResponse(BackupTaskInfo record, UploadResponse response)
@@ -341,8 +513,12 @@ namespace Game.Media.Backup
                     else if (record.state == BackupState.Queued || record.state == BackupState.RetryScheduled)
                     { record.state = BackupState.Paused; Save(record); }
                 }
-                while (LoadTasks().Any(x => x.nativeOwned && NativeStatus(x).exists && !NativeStatus(x).released))
-                    await UniTask.Yield(PlayerLoopTiming.Update, cancellationToken);
+                var pending = LoadTasks().Where(x => x.nativeOwned).ToList();
+                while (pending.Count != 0)
+                {
+                    pending.RemoveAll(x => { var status = NativeStatus(x); return !status.exists || status.released; });
+                    if (pending.Count != 0) await UniTask.Delay(100, ignoreTimeScale: true, cancellationToken: cancellationToken);
+                }
                 ReconcileNative();
             }
             finally { pausing = false; }
@@ -369,7 +545,7 @@ namespace Game.Media.Backup
                 if (status.exists) { ReconcileNative(); return; }
                 record.nativeOwned = false;
             }
-            record.state = BackupState.Canceled; Save(record); DeletePayload(record);
+            record.state = BackupState.Canceled; record.cleanupPending = true; Save(record); FinishCleanup(record);
         }
 
         public async UniTask DownloadAndVerifyAsync(string taskId, string destination, CancellationToken cancellationToken = default)
@@ -388,22 +564,93 @@ namespace Game.Media.Backup
                 using (var input = await response.Content.ReadAsStreamAsync())
                 using (var output = new FileStream(temporary, FileMode.CreateNew, FileAccess.Write, FileShare.None))
                 { await input.CopyToAsync(output, 128 * 1024, cancellationToken); output.Flush(true); }
-                using (var file = File.OpenRead(temporary)) using (var sha = SHA256.Create())
+                await UniTask.RunOnThreadPool(() =>
                 {
-                    if (file.Length != record.size || Hex(sha.ComputeHash(file)) != record.sha256) throw new IOException("Downloaded backup checksum mismatch.");
-                }
+                    using var file = File.OpenRead(temporary);
+                    if (file.Length != record.size || HashFile(file, cancellationToken) != record.sha256) throw new IOException("Downloaded backup checksum mismatch.");
+                }, cancellationToken: cancellationToken);
                 cancellationToken.ThrowIfCancellationRequested(); File.Move(temporary, destination);
             }
             catch { try { File.Delete(temporary); } catch (Exception cleanup) { Debug.LogException(cleanup); } throw; }
             finally { downloads--; }
         }
 
+        void SetCapabilities(ServerCapabilities value)
+        {
+            try
+            {
+                if (value == null || value.protocolVersion != 1 || value.account != account || value.chunkBytes < 1 || value.chunkBytes > 4 * 1024 * 1024 || value.maxFileBytes < 0)
+                    throw new InvalidOperationException("Server protocol or authenticated account does not match configuration.");
+                if (nativeEnabled && !value.backgroundUpload) throw new InvalidOperationException("Server does not advertise backgroundUpload support.");
+                capabilities = value;
+            }
+            catch (Exception error) { capabilities = null; capabilityFailure = error; throw; }
+        }
+        async UniTask EnsureCapabilities(CancellationToken token)
+        { if (capabilities == null) SetCapabilities(await JsonRequest<ServerCapabilities>(HttpMethod.Get, "/v1/capabilities", null, token)); }
+        public async UniTask RefreshServerCapabilitiesAsync(CancellationToken cancellationToken = default)
+        {
+            CheckIdle(); cancellationToken.ThrowIfCancellationRequested(); metadataReads++;
+            using var linked = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, lifetime.Token);
+            try { SetCapabilities(await JsonRequest<ServerCapabilities>(HttpMethod.Get, "/v1/capabilities", null, linked.Token)); }
+            finally { metadataReads--; }
+        }
+        internal bool HasPendingNativeTransfers => tasks.Values.Any(x => x.nativeOwned && (x.state == BackupState.Queued || x.state == BackupState.Uploading));
+        internal IReadOnlyList<BackupPreparationFailure> GetScanFailures(string key)
+        {
+            Check(); if (!scans.ContainsKey(key)) LoadScan(key);
+            return scans[key].entries.Values.Where(x => !string.IsNullOrEmpty(x.error)).Select(x => new BackupPreparationFailure
+            { Fingerprint = x.fingerprint, Source = x.source, Name = x.name, Error = x.error }).ToList().AsReadOnly();
+        }
         internal BackupScanState LoadScan(string key)
         {
-            Check(); string path = Path.Combine(root, "scan-" + Hash(key) + ".json");
-            return File.Exists(path) ? JsonUtility.FromJson<BackupScanState>(File.ReadAllText(path)) : new BackupScanState();
+            Check();
+            if (!scans.TryGetValue(key, out var index)) { index = ReadScan(key, default); scans.Add(key, index); }
+            return index.Snapshot();
         }
-        internal void SaveScan(string key, BackupScanState state) { Check(); AtomicJson(Path.Combine(root, "scan-" + Hash(key) + ".json"), state); }
+        internal async UniTask<BackupScanState> LoadScanAsync(string key, CancellationToken token)
+        {
+            Check(); token.ThrowIfCancellationRequested();
+            if (scans.TryGetValue(key, out var cached)) return cached.Snapshot();
+            using var linked = CancellationTokenSource.CreateLinkedTokenSource(token, lifetime.Token);
+            metadataReads++;
+            try
+            {
+                var loaded = await UniTask.RunOnThreadPool(() => ReadScan(key, linked.Token));
+                linked.Token.ThrowIfCancellationRequested();
+                if (!scans.TryGetValue(key, out cached)) { cached = loaded; scans.Add(key, cached); }
+                return cached.Snapshot();
+            }
+            finally { metadataReads--; }
+        }
+        ScanIndex ReadScan(string key, CancellationToken token)
+        {
+            string path = Path.Combine(root, "scan-" + Hash(key) + ".json");
+            var state = File.Exists(path) ? JsonUtility.FromJson<BackupScanState>(File.ReadAllText(path)) : new BackupScanState();
+            var index = new ScanIndex { baseline = state.baselineEstablished };
+            foreach (var entry in state.entries) index.entries.Add(entry.fingerprint, entry);
+            string directory = path + ".entries";
+            if (Directory.Exists(directory)) foreach (var file in Directory.EnumerateFiles(directory, "*.json"))
+            {
+                token.ThrowIfCancellationRequested();
+                var entry = JsonUtility.FromJson<BackupReceipt>(File.ReadAllText(file)); index.entries[entry.fingerprint] = entry;
+            }
+            return index;
+        }
+        internal void SaveScan(string key, BackupScanState state)
+        {
+            Check(); AtomicJson(Path.Combine(root, "scan-" + Hash(key) + ".json"), state);
+            if (!scans.TryGetValue(key, out var index)) { index = new ScanIndex(); scans.Add(key, index); }
+            index.baseline = state.baselineEstablished;
+            foreach (var entry in state.entries) if (!index.entries.ContainsKey(entry.fingerprint)) index.entries.Add(entry.fingerprint, CloneReceipt(entry));
+        }
+        internal void SaveScanEntry(string key, BackupReceipt entry)
+        {
+            Check(); if (!scans.ContainsKey(key)) LoadScan(key);
+            string directory = Path.Combine(root, "scan-" + Hash(key) + ".json.entries"); Directory.CreateDirectory(directory);
+            AtomicJson(Path.Combine(directory, Hash(entry.fingerprint) + ".json"), entry);
+            scans[key].entries[entry.fingerprint] = CloneReceipt(entry);
+        }
         internal string PolicyPath => Path.Combine(root, "automatic.json");
         internal static void AtomicJson<T>(string path, T value)
         {
@@ -434,7 +681,7 @@ namespace Game.Media.Backup
         }
         HttpRequestMessage Request(HttpMethod method, string path)
         {
-            string token = accessToken(); if (string.IsNullOrWhiteSpace(token)) throw new InvalidOperationException("No access token available.");
+            string token = GetAccessToken(); if (string.IsNullOrWhiteSpace(token)) throw new InvalidOperationException("No access token available.");
             var request = new HttpRequestMessage(method, server + path); request.Headers.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", token); return request;
         }
         static async UniTask CheckResponse(HttpResponseMessage response)
@@ -446,24 +693,45 @@ namespace Game.Media.Backup
         }
         static bool Transient(Exception error) => error is HttpRequestException || error is System.Threading.Tasks.TaskCanceledException || error is BackupHttpException http &&
             (http.StatusCode == 408 || http.StatusCode == 429 || http.StatusCode == 500 || http.StatusCode == 502 || http.StatusCode == 503 || http.StatusCode == 504);
-        List<BackupTaskInfo> LoadTasks() => Directory.EnumerateFiles(Path.Combine(root, "batches"), "*.json", SearchOption.AllDirectories)
-            .OrderBy(x => x, StringComparer.Ordinal).Select(x => JsonUtility.FromJson<BackupTaskInfo>(File.ReadAllText(x))).ToList();
-        BackupTaskInfo Find(string id) => LoadTasks().Find(x => x.id == id) ?? throw new ArgumentException("Task not found.", nameof(id));
+        bool CanTransfer(Func<bool> policy)
+        {
+            try { return policy == null || policy(); }
+            catch (Exception error) { callbackFailure = error; throw; }
+        }
+        string GetAccessToken()
+        {
+            try { return accessToken(); }
+            catch (Exception error) { callbackFailure = error; throw; }
+        }
+        List<BackupTaskInfo> LoadTasks() => tasks.Values.Select(x => x.Snapshot()).ToList();
+        IEnumerable<BackupTaskInfo> ReadTasks() => Directory.EnumerateFiles(Path.Combine(root, "batches"), "*.json", SearchOption.AllDirectories)
+            .OrderBy(x => x, StringComparer.Ordinal).Select(x => JsonUtility.FromJson<BackupTaskInfo>(File.ReadAllText(x)));
+        BackupTaskInfo Find(string id) => id != null && tasks.TryGetValue(id, out var record) ? record.Snapshot() : throw new ArgumentException("Task not found.", nameof(id));
         string Payload(BackupTaskInfo task) => Path.Combine(root, "batches", task.batchId, task.id + ".payload");
-        void DeletePayload(BackupTaskInfo task) { File.Delete(Payload(task)); }
-        void Save(BackupTaskInfo task) => AtomicJson(Path.Combine(root, "batches", task.batchId, task.id + ".json"), task);
+        void DeletePayload(BackupTaskInfo task)
+        {
+            string path = Payload(task); long length = File.Exists(path) ? new FileInfo(path).Length : 0;
+            File.Delete(path); stagedBytes -= length;
+        }
+        void Save(BackupTaskInfo task)
+        {
+            try { AtomicJson(Path.Combine(root, "batches", task.batchId, task.id + ".json"), task); }
+            catch (Exception error) { persistenceFailure = error; throw; }
+            tasks[task.id] = task.Snapshot();
+        }
         internal static string Hash(string text) { using var sha = SHA256.Create(); return Hex(sha.ComputeHash(Encoding.UTF8.GetBytes(text))); }
         static string Hex(byte[] bytes) => BitConverter.ToString(bytes).Replace("-", "").ToLowerInvariant();
         void Check() { MediaThread.Check(); if (disposed) throw new ObjectDisposedException(nameof(ImageBackupService)); }
-        void CheckIdle() { Check(); if (running || accepting || pausing || downloads != 0) throw new InvalidOperationException("Pause and await the active operation first."); }
+        void CheckIdle() { Check(); if (running || accepting || pausing || downloads != 0 || metadataReads != 0) throw new InvalidOperationException("Pause and await the active operation first."); }
         public async UniTask ShutdownAsync()
         {
-            Check(); lifetime.Cancel(); while (running || accepting || pausing || downloads != 0) await UniTask.Yield(); Dispose();
+            Check(); lifetime.Cancel(); while (running || accepting || pausing || downloads != 0 || metadataReads != 0) await UniTask.Yield(); Dispose();
         }
         public void Dispose()
         {
             if (disposed) return; CheckIdle(); disposed = true;
-            client.Dispose(); ownerLock.Dispose(); lifetime.Dispose();
+            var cleanup = new UIFrame.CleanupFailure();
+            cleanup.Run(client.Dispose); cleanup.Run(ownerLock.Dispose); cleanup.Run(lifetime.Dispose); cleanup.Throw();
         }
     }
 }

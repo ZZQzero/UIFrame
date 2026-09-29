@@ -9,8 +9,10 @@ namespace Game.Media
 {
     [Serializable] internal sealed class MediaRequest
     {
-        public string id, op, source, path, output, album;
+        public string id, op, source, path, output, album, format;
+        public float backgroundR = 1, backgroundG = 1, backgroundB = 1;
         public int count = 1, edge = 2048, quality = 90;
+        public long maxBytes;
         public bool recursive;
     }
     [Serializable] internal sealed class MediaItem
@@ -22,6 +24,7 @@ namespace Game.Media
     [Serializable] internal sealed class MediaResponse
     {
         public string status, code, error, access;
+        public bool more;
         public MediaItem[] items;
     }
 
@@ -45,6 +48,8 @@ namespace Game.Media
         [DllImport("__Internal")] static extern IntPtr UFMPoll(string id);
         [DllImport("__Internal")] static extern void UFMFree(IntPtr value);
         [DllImport("__Internal")] static extern void UFMCancel(string id);
+        [DllImport("__Internal")]
+        [return: MarshalAs(UnmanagedType.I1)] static extern bool UFMPending(string id);
 #endif
         internal static async UniTask<MediaResponse> Request(MediaRequest request, CancellationToken token)
         {
@@ -57,7 +62,8 @@ namespace Game.Media
                 Start(JsonUtility.ToJson(request)); active.Add(request.id);
             }
             catch { if (!string.IsNullOrEmpty(request.output)) ImagePaths.CleanAfterFailure(request.output); throw; }
-            bool finished = false;
+            bool finished = false; List<MediaItem> pages = null;
+            long deadline = System.Diagnostics.Stopwatch.GetTimestamp() + System.Diagnostics.Stopwatch.Frequency / 500;
             try
             {
                 while (true)
@@ -66,16 +72,34 @@ namespace Game.Media
                     string json = Poll(request.id);
                     if (!string.IsNullOrEmpty(json))
                     {
-                        finished = true;
                         var result = JsonUtility.FromJson<MediaResponse>(json);
+                        finished = !result.more;
                         if (result.status == "canceled") throw new OperationCanceledException();
                         if (result.status != "ok") throw new GalleryException(result.code ?? "NativeFailure", result.error);
-                        return result;
+                        if (result.more || pages != null)
+                        {
+                            if (pages == null) pages = new List<MediaItem>();
+                            if (result.items != null) pages.AddRange(result.items);
+                            if (!result.more) { result.items = pages.ToArray(); return result; }
+                            if (System.Diagnostics.Stopwatch.GetTimestamp() < deadline) continue;
+                        }
+                        else return result;
                     }
                     await UniTask.Yield(PlayerLoopTiming.Update, token);
+                    deadline = System.Diagnostics.Stopwatch.GetTimestamp() + System.Diagnostics.Stopwatch.Frequency / 500;
                 }
             }
-            finally { active.Remove(request.id); if (!finished) Cancel(request.id); }
+            finally
+            {
+                active.Remove(request.id);
+                if (!finished)
+                {
+                    Cancel(request.id);
+                    // A caller may own the parent of output. Do not release that parent while native code can still write.
+                    if (!string.IsNullOrEmpty(request.output))
+                        while (Pending(request.id)) await UniTask.Yield(PlayerLoopTiming.Update);
+                }
+            }
         }
         static void CancelAll()
         {
@@ -119,6 +143,17 @@ namespace Game.Media
             bridge.CallStatic("cancel", id);
 #elif UNITY_IOS && !UNITY_EDITOR
             UFMCancel(id);
+#endif
+        }
+        static bool Pending(string id)
+        {
+#if UNITY_ANDROID && !UNITY_EDITOR
+            using var bridge = new AndroidJavaClass("com.zzq.uiframe.media.GalleryBridge");
+            return bridge.CallStatic<bool>("pending", id);
+#elif UNITY_IOS && !UNITY_EDITOR
+            return UFMPending(id);
+#else
+            return false;
 #endif
         }
     }

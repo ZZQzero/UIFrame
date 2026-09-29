@@ -20,14 +20,15 @@ namespace UIFrame.Editor
         ImageBackupService backup;
         CancellationTokenSource lifetime;
         Vector2 scroll;
-        bool busy;
+        bool busy, opening;
+        int page;
         [MenuItem("Tools/UIFrame/图片与备份")]
         public static void Open() => GetWindow<GalleryTestWindow>("图片与备份");
         void OnEnable() { lifetime = new CancellationTokenSource(); }
         async void OnDisable()
         {
             lifetime?.Cancel();
-            try { if (backup != null) await backup.ShutdownAsync(); }
+            try { while (opening) await UniTask.Yield(); if (backup != null) await backup.ShutdownAsync(); }
             catch (Exception error) { Debug.LogException(error); }
             finally { preview?.Dispose(); selection?.Dispose(); lifetime?.Dispose(); backup = null; preview = null; selection = null; token = ""; }
         }
@@ -43,14 +44,22 @@ namespace UIFrame.Editor
                     selection?.Dispose(); selection = next; await Preview(next.Items[0], ct);
                 });
                 folder = EditorGUILayout.TextField("图片目录", folder);
-                if (GUILayout.Button("浏览目录")) Run(async ct => { snapshot = await GameImageDirectory.QueryAsync(folder, cancellationToken: ct); status = $"找到 {snapshot.Count} 张候选图片。"; });
+                if (GUILayout.Button("浏览目录")) Run(async ct => { snapshot = await GameImageDirectory.QueryAsync(folder, cancellationToken: ct); page = 0; status = $"找到 {snapshot.Count} 张候选图片。"; });
             }
             scroll = EditorGUILayout.BeginScrollView(scroll, GUILayout.Height(160));
-            if (snapshot != null) for (int i = 0; i < snapshot.Count; i += 60)
-                foreach (var item in snapshot.GetPage(i))
+            if (snapshot != null)
+                foreach (var item in snapshot.GetPage(Math.Min(page * 60, snapshot.Count)))
                     using (new EditorGUI.DisabledScope(busy))
                         if (GUILayout.Button(item.FileName)) Run(ct => Preview(item, ct));
             EditorGUILayout.EndScrollView();
+            if (snapshot != null && snapshot.Count > 60)
+            {
+                EditorGUILayout.BeginHorizontal();
+                using (new EditorGUI.DisabledScope(page == 0)) if (GUILayout.Button("上一页")) { page--; scroll = Vector2.zero; }
+                EditorGUILayout.LabelField($"{page + 1} / {(snapshot.Count + 59) / 60}");
+                using (new EditorGUI.DisabledScope((page + 1) * 60 >= snapshot.Count)) if (GUILayout.Button("下一页")) { page++; scroll = Vector2.zero; }
+                EditorGUILayout.EndHorizontal();
+            }
             if (preview != null) GUI.DrawTexture(GUILayoutUtility.GetRect(160, 160), preview.Texture, ScaleMode.ScaleToFit);
             EditorGUILayout.Space(); EditorGUILayout.LabelField("本机备份", EditorStyles.boldLabel);
             using (new EditorGUI.DisabledScope(backup != null || busy))
@@ -61,7 +70,7 @@ namespace UIFrame.Editor
             {
                 if (GUILayout.Button("备份当前图片")) Run(async ct =>
                 {
-                    EnsureBackup(); await backup.EnqueueAsync(new[] { selected }, ct); await backup.ProcessAsync(ct);
+                    await EnsureBackup(ct); await backup.EnqueueAsync(new[] { selected }, ct); await backup.ProcessAsync(ct);
                     var tasks = backup.GetTasks(); status = $"已备份 {tasks.Count(x => x.state == BackupState.Completed)}；失败或需处理 {tasks.Count(x => x.state == BackupState.Failed || x.state == BackupState.NeedsAttention)}。";
                 });
             }
@@ -86,14 +95,16 @@ namespace UIFrame.Editor
             if (EditorGUI.EndChangeCheck()) { settings.enableLibraryRead = library; settings.photoLibraryUsageDescription = description; settings.SaveSettings(); }
             EditorGUILayout.HelpBox("系统选图无需开启照片库权限。移动端原生选择器需在设备上验证。Editor 用于前台上传测试。移动端可显式启用原生后台传输；自动发现新照片仍需应用运行。", MessageType.None);
         }
-        void EnsureBackup()
+        async UniTask EnsureBackup(CancellationToken ct)
         {
             if (backup != null) return;
-            backup = new ImageBackupService(new BackupConfiguration
+            opening = true;
+            try { backup = await ImageBackupService.CreateAsync(new BackupConfiguration
             {
                 ServerUrl = server, Account = account, AccessToken = () => token, AllowDevelopmentHttp = true,
                 StorageDirectory = Path.Combine(Application.persistentDataPath, "UIFrameBackupDemo", Hash128.Compute(server + "|" + account).ToString())
-            });
+            }, ct); }
+            finally { opening = false; }
         }
         async UniTask Preview(ImageReference image, CancellationToken ct)
         {

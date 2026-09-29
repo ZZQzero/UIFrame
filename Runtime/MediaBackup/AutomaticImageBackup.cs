@@ -9,6 +9,13 @@ using UnityEngine;
 namespace Game.Media.Backup
 {
     public enum BackupSourceKind { Directory, PhotoLibrary, GrantedDirectory }
+    public sealed class BackupPreparationFailure
+    {
+        public string Fingerprint { get; internal set; }
+        public string Source { get; internal set; }
+        public string Name { get; internal set; }
+        public string Error { get; internal set; }
+    }
     [Serializable]
     public sealed class AutomaticBackupPolicy
     {
@@ -30,8 +37,31 @@ namespace Game.Media.Backup
         bool running, looping;
         public string LastError { get; private set; }
         public DateTime? LastScanUtc { get; private set; }
+        public bool IsWaitingForCapacity { get; private set; }
         public bool SupportsBackgroundDiscovery => false;
         public AutomaticBackupPolicy Policy => JsonUtility.FromJson<AutomaticBackupPolicy>(JsonUtility.ToJson(policy));
+        string Scope => policy.sourceKind + ":" + policy.source + ":" + policy.recursive;
+
+        public IReadOnlyList<BackupPreparationFailure> GetPreparationFailures()
+        {
+            MediaThread.Check();
+            return service.GetScanFailures(Scope);
+        }
+
+        public async UniTask<IReadOnlyList<BackupPreparationFailure>> GetPreparationFailuresAsync(CancellationToken cancellationToken = default)
+        {
+            MediaThread.Check(); await service.LoadScanAsync(Scope, cancellationToken);
+            return GetPreparationFailures();
+        }
+
+        /// <summary>Explicitly makes failed source versions eligible for the next scan.</summary>
+        public void RetryPreparationFailures()
+        {
+            MediaThread.Check();
+            if (running || looping) throw new InvalidOperationException("Cancel and await the automatic loop before retrying preparation.");
+            foreach (var entry in service.LoadScan(Scope).entries.Where(x => !string.IsNullOrEmpty(x.error)))
+            { entry.retryRequested = true; service.SaveScanEntry(Scope, entry); }
+        }
 
         /// <param name="wifiAvailable">Required for Wi-Fi-only mode. Supply a platform-verified network policy check; Unity reachability is not a Wi-Fi guarantee.</param>
         public AutomaticImageBackup(ImageBackupService service, Func<bool> wifiAvailable = null)
@@ -62,7 +92,7 @@ namespace Game.Media.Backup
                 throw new InvalidOperationException("Persisted automatic and native background network policies differ. Reconfigure before scanning.");
             if (policy.wifiOnly && wifiAvailable == null) throw new InvalidOperationException("No verified Wi-Fi policy provider is available.");
             if (policy.wifiOnly && (wifiAvailable == null || !wifiAvailable())) return;
-            running = true;
+            running = true; IsWaitingForCapacity = false;
             try
             {
                 ImageSnapshot snapshot;
@@ -75,8 +105,8 @@ namespace Game.Media.Backup
                 else if (policy.sourceKind == BackupSourceKind.GrantedDirectory)
                     snapshot = await ImageDirectoryHandle.FromBookmark(policy.source).QueryAsync(policy.recursive, cancellationToken);
                 else snapshot = await GameImageDirectory.QueryAsync(policy.source, policy.recursive, cancellationToken);
-                string scope = policy.sourceKind + ":" + policy.source + ":" + policy.recursive;
-                var state = service.LoadScan(scope); var known = new HashSet<string>(state.entries.Select(x => x.fingerprint));
+                string scope = Scope;
+                var state = await service.LoadScanAsync(scope, cancellationToken); var known = new HashSet<string>(state.entries.Where(x => !x.retryRequested).Select(x => x.fingerprint));
                 if (!state.baselineEstablished && !policy.includeExisting)
                 {
                     // Commit one complete baseline. A canceled partial walk must not silently absorb later photos.
@@ -90,7 +120,9 @@ namespace Game.Media.Backup
                     cancellationToken.ThrowIfCancellationRequested(); service.SaveScan(scope, baseline);
                     LastScanUtc = DateTime.UtcNow; LastError = null; return;
                 }
-                var existing = service.GetTasks();
+                var existing = new Dictionary<(string source, string version), string>();
+                foreach (var task in service.GetTasks().Where(x => x.state != BackupState.Canceled)) existing[(task.source, task.version)] = task.id;
+                var failures = state.entries.Where(x => !string.IsNullOrEmpty(x.error)).ToDictionary(x => x.fingerprint, x => x.error);
                 for (int offset = 0; offset < snapshot.Count; offset += 60)
                 {
                     foreach (var image in snapshot.GetPage(offset))
@@ -99,20 +131,37 @@ namespace Game.Media.Backup
                         if (policy.wifiOnly && !wifiAvailable()) return;
                         string fingerprint = image.Source + ":" + image.Id + "\n" + image.Version;
                         if (known.Contains(fingerprint)) continue;
+                        var receipt = new BackupReceipt { fingerprint = fingerprint, source = image.Source + ":" + image.OriginId, name = image.FileName };
+                        IReadOnlyList<string> accepted = null;
                         if (state.baselineEstablished || policy.includeExisting)
                         {
                             // Recover an accepted job before writing its scan receipt after a crash.
-                            var previous = existing.FirstOrDefault(x => x.source == image.Source + ":" + image.OriginId && x.version == image.Version && x.state != BackupState.Canceled);
-                            if (previous == null) await service.EnqueueAsync(new[] { image }, cancellationToken);
+                            if (existing.TryGetValue((receipt.source, image.Version), out var previous)) accepted = new[] { previous };
+                            else
+                            {
+                                try
+                                {
+                                    accepted = await service.EnqueueBatchAsync(new[] { image }, cancellationToken);
+                                    existing[(receipt.source, image.Version)] = accepted[0];
+                                }
+                                catch (BackupBudgetExceededException) when (uploadDuringScan && service.HasPendingNativeTransfers)
+                                { IsWaitingForCapacity = true; return; }
+                                catch (BackupSourceFailure failure)
+                                {
+                                    receipt.error = failure.Original.SourceException.ToString();
+                                    failures[fingerprint] = receipt.error;
+                                }
+                            }
                         }
-                        state.entries.Add(new BackupReceipt { fingerprint = fingerprint }); known.Add(fingerprint);
-                        service.SaveScan(scope, state);
+                        if (receipt.error == null) failures.Remove(fingerprint);
+                        known.Add(fingerprint); service.SaveScanEntry(scope, receipt);
                         // Drain prepared files between discoveries instead of copying the entire library first.
-                        if (uploadDuringScan) await service.ProcessAsync(cancellationToken, service.UsesNativeBackgroundTransfer ? null : policy.wifiOnly ? wifiAvailable : null);
+                        if (uploadDuringScan && accepted != null)
+                            await service.ProcessTasksAsync(accepted, cancellationToken, service.UsesNativeBackgroundTransfer ? null : policy.wifiOnly ? wifiAvailable : null);
                     }
                 }
-                state.baselineEstablished = true; service.SaveScan(scope, state);
-                LastScanUtc = DateTime.UtcNow; LastError = null;
+                if (!state.baselineEstablished) { state.baselineEstablished = true; service.SaveScan(scope, state); }
+                LastScanUtc = DateTime.UtcNow; LastError = failures.Values.FirstOrDefault();
             }
             catch (Exception error) { LastError = error.Message; throw; }
             finally { running = false; }
@@ -130,8 +179,9 @@ namespace Game.Media.Backup
                     cancellationToken.ThrowIfCancellationRequested();
                     if (!policy.wifiOnly || wifiAvailable != null && wifiAvailable())
                     {
-                        await ScanOnceAsync(cancellationToken, uploadDuringScan: true);
+                        // Existing receipts can hide queued payloads from discovery; drain those before reserving more space.
                         await service.ProcessAsync(cancellationToken, service.UsesNativeBackgroundTransfer ? null : policy.wifiOnly ? wifiAvailable : null);
+                        await ScanOnceAsync(cancellationToken, uploadDuringScan: true);
                     }
                     await UniTask.Delay(TimeSpan.FromSeconds(policy.scanIntervalSeconds), ignoreTimeScale: true, cancellationToken: cancellationToken);
                 }

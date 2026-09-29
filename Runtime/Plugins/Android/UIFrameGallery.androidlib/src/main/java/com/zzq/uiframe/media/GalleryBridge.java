@@ -11,6 +11,9 @@ import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
 import android.graphics.ImageDecoder;
 import android.graphics.Matrix;
+import android.graphics.Canvas;
+import android.graphics.Color;
+import android.os.CancellationSignal;
 import android.media.ExifInterface;
 import android.net.Uri;
 import android.os.Build;
@@ -39,14 +42,25 @@ public final class GalleryBridge {
     static final ConcurrentHashMap<String, Job> jobs = new ConcurrentHashMap<>();
     static final AtomicReference<String> window = new AtomicReference<>();
     static Context context;
+    static final class MediaFailure extends IOException {
+        final String code;
+        MediaFailure(String code, String message) { super(message); this.code=code; }
+    }
     static final class Job {
         final JSONObject request;
         final String id;
         volatile boolean canceled;
         boolean finished;
         String result;
+        JSONArray pages; int offset;
+        final CancellationSignal signal = new CancellationSignal();
+        Closeable input;
         volatile GalleryActivity activity;
         Job(JSONObject request) throws Exception { this.request = request; id = request.getString("id"); }
+        synchronized InputStream track(InputStream stream) throws IOException {
+            if(canceled) { if(stream!=null) stream.close(); throw new InterruptedIOException("Canceled"); }
+            input=stream; return stream;
+        }
         void check() throws InterruptedIOException { if (canceled) throw new InterruptedIOException("Canceled"); }
     }
     public static void start(Activity parent, String json) {
@@ -77,6 +91,7 @@ public final class GalleryBridge {
                 }
                 complete(job, result);
             } catch (OutOfMemoryError e) { fail(job, "MemoryLimitExceeded", "Native image allocation failed."); }
+              catch (MediaFailure e) { fail(job, e.code, e.toString()); }
               catch (SecurityException e) { fail(job, "PermissionDenied", e.toString()); }
               catch (Exception e) { fail(job, "ReadFailed", e.toString()); }
         });
@@ -85,6 +100,14 @@ public final class GalleryBridge {
         Job job = jobs.get(id); if (job == null) return null;
         synchronized(job) {
             if (!job.finished) return null;
+            if(job.pages!=null) {
+                try {
+                    JSONArray page=new JSONArray(); int end=Math.min(job.pages.length(),job.offset+200);
+                    for(;job.offset<end;job.offset++) page.put(job.pages.get(job.offset));
+                    boolean more=end<job.pages.length(); if(!more) jobs.remove(id,job);
+                    return response("ok").put("items",page).put("more",more).toString();
+                } catch(Exception error) { throw new IllegalStateException(error); }
+            }
             jobs.remove(id, job); return job.result;
         }
     }
@@ -94,9 +117,13 @@ public final class GalleryBridge {
             job.canceled = true;
             if (job.finished) { clean(job); jobs.remove(id, job); }
         }
+        job.signal.cancel();
+        Closeable input; synchronized(job) { input=job.input; job.input=null; }
+        if(input!=null) try { input.close(); } catch(IOException error) { android.util.Log.e("UIFrameGallery","Cancel stream close failed",error); }
         GalleryActivity activity = job.activity;
         if (activity != null) activity.runOnUiThread(activity::finish);
     }
+    public static boolean pending(String id) { return jobs.containsKey(id); }
     static JSONObject response(String status) {
         JSONObject value = new JSONObject(); try { value.put("status", status); } catch(Exception e) { throw new IllegalStateException(e); }
         return value;
@@ -110,7 +137,10 @@ public final class GalleryBridge {
             if (job.finished) return;
             job.finished = true;
             if (job.canceled || !response.optString("status").equals("ok")) clean(job);
-            if (job.canceled) jobs.remove(job.id, job); else job.result = response.toString();
+            if (job.canceled) jobs.remove(job.id, job);
+            else if(response.optString("status").equals("ok") && Arrays.asList("images","albums","directory").contains(job.request.optString("op")))
+                job.pages=response.optJSONArray("items");
+            else job.result = response.toString();
         }
     }
     static void clean(Job job) {
@@ -134,31 +164,47 @@ public final class GalleryBridge {
                 JSONArray images = new JSONArray();
                 for (Uri uri : uris) { job.check(); images.put(copy(job, uri, images.length())); }
                 complete(job, response("ok").put("items", images));
-            } catch(Exception e) { fail(job, "ReadFailed", e.toString()); }
+            } catch(MediaFailure e) { fail(job, e.code, e.toString()); }
+              catch(Exception e) { fail(job, "ReadFailed", e.toString()); }
         });
     }
     static InputStream open(Job job) throws Exception {
-        return "file".equals(job.request.optString("source"))
+        return job.track("file".equals(job.request.optString("source"))
             ? new FileInputStream(job.request.getString("path"))
-            : context.getContentResolver().openInputStream(Uri.parse(job.request.getString("path")));
+            : openUri(job,Uri.parse(job.request.getString("path"))));
+    }
+    static InputStream openUri(Job job, Uri uri) throws Exception {
+        android.content.res.AssetFileDescriptor descriptor=context.getContentResolver().openAssetFileDescriptor(uri,"r",job.signal);
+        if(descriptor==null) throw new FileNotFoundException("No readable image descriptor.");
+        try { return job.track(descriptor.createInputStream()); }
+        catch(Exception error) { try { descriptor.close(); } catch(Exception cleanup) { error.addSuppressed(cleanup); } throw error; }
     }
     static JSONObject copy(Job job, Uri uri, int index) throws Exception {
         ContentResolver resolver = context.getContentResolver(); String mime = resolver.getType(uri);
-        String name = "image"; try (Cursor cursor = resolver.query(uri, new String[] {OpenableColumns.DISPLAY_NAME}, null, null, null)) {
+        String name = "image"; try (Cursor cursor = resolver.query(uri, new String[] {OpenableColumns.DISPLAY_NAME}, null, null, null, job.signal)) {
             if (cursor != null && cursor.moveToFirst()) name = cursor.getString(0);
         }
         if (mime == null || !mime.startsWith("image/")) throw new IOException("Provider returned a non-image type.");
         String extension = MimeTypeMap.getSingleton().getExtensionFromMimeType(mime);
         File file = new File(job.request.getString("output"), index + "." + (extension == null ? "bin" : extension));
-        try(InputStream input = resolver.openInputStream(uri)) { write(job, input, file); }
+        try(InputStream input = openUri(job, uri)) { write(job, input, file); }
         return new JSONObject().put("path", file.getAbsolutePath()).put("id", uri.toString()).put("name", name).put("mime", mime).put("size", file.length());
     }
     static void write(Job job, InputStream input, File file) throws Exception {
         if (input == null) throw new FileNotFoundException("No readable image stream.");
-        try (FileOutputStream out = new FileOutputStream(file)) {
-            byte[] buffer = new byte[131072]; int n;
-            while ((n = input.read(buffer)) != -1) { job.check(); out.write(buffer, 0, n); }
-            out.getFD().sync(); job.check();
+        FileOutputStream output;
+        try { output=new FileOutputStream(file); }
+        catch (IOException e) { throw new MediaFailure("WriteFailed",e.toString()); }
+        try (FileOutputStream out = output) {
+            byte[] buffer = new byte[131072]; int n; long size=0, limit=job.request.optLong("maxBytes");
+            while ((n = input.read(buffer)) != -1) {
+                job.check();
+                if (limit>0 && n>limit-size) throw new MediaFailure("SizeLimitExceeded","Image exceeds export byte limit");
+                try { out.write(buffer, 0, n); } catch (IOException e) { throw new MediaFailure("WriteFailed",e.toString()); }
+                size+=n;
+            }
+            try { out.getFD().sync(); } catch (IOException e) { throw new MediaFailure("WriteFailed",e.toString()); }
+            job.check();
         }
     }
     static JSONObject export(Job job) throws Exception {
@@ -211,11 +257,23 @@ public final class GalleryBridge {
             Bitmap transformed = Bitmap.createBitmap(bitmap, 0, 0, bitmap.getWidth(), bitmap.getHeight(), matrix, true);
             if (transformed != bitmap) bitmap.recycle(); bitmap = transformed;
         }
-        File file = new File(job.request.getString("output"), "preview.png");
+        boolean jpeg="jpg".equals(job.request.optString("format"));
+        if(jpeg) {
+            Bitmap flattened=Bitmap.createBitmap(bitmap.getWidth(),bitmap.getHeight(),Bitmap.Config.ARGB_8888);
+            try {
+                Canvas canvas=new Canvas(flattened);
+                int r=(int)Math.round(Math.max(0,Math.min(1,job.request.optDouble("backgroundR",1)))*255);
+                int g=(int)Math.round(Math.max(0,Math.min(1,job.request.optDouble("backgroundG",1)))*255);
+                int b=(int)Math.round(Math.max(0,Math.min(1,job.request.optDouble("backgroundB",1)))*255);
+                canvas.drawColor(Color.rgb(r,g,b)); canvas.drawBitmap(bitmap,0,0,null);
+            } catch(Exception error) { flattened.recycle(); bitmap.recycle(); throw error; }
+            bitmap.recycle(); bitmap=flattened;
+        }
+        File file = new File(job.request.getString("output"), jpeg ? "image.jpg" : "preview.png");
         try {
             job.check();
             try(FileOutputStream out = new FileOutputStream(file)) {
-                if (!bitmap.compress(Bitmap.CompressFormat.PNG, 100, out)) throw new IOException("PNG encode failed.");
+                if (!bitmap.compress(jpeg?Bitmap.CompressFormat.JPEG:Bitmap.CompressFormat.PNG, jpeg?job.request.optInt("quality",90):100, out)) throw new IOException("PNG encode failed.");
             }
             return response("ok").put("items", new JSONArray().put(new JSONObject().put("path", file.getAbsolutePath()).put("width", bitmap.getWidth()).put("height", bitmap.getHeight())));
         } finally { bitmap.recycle(); }
@@ -226,7 +284,7 @@ public final class GalleryBridge {
         String album = job.request.optString("album"); JSONArray result = new JSONArray();
         LinkedHashMap<String, JSONObject> groups = new LinkedHashMap<>();
         try(Cursor cursor = context.getContentResolver().query(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, columns,
-            album.isEmpty() ? null : "bucket_id = ?", album.isEmpty() ? null : new String[] {album}, "date_added DESC, _id DESC")) {
+            album.isEmpty() ? null : "bucket_id = ?", album.isEmpty() ? null : new String[] {album}, "date_added DESC, _id DESC", job.signal)) {
             if (cursor == null) throw new IOException("MediaStore query returned no cursor.");
             while(cursor.moveToNext()) {
                 job.check(); String bucket = cursor.getString(7);
@@ -252,7 +310,7 @@ public final class GalleryBridge {
         while (!pending.isEmpty()) {
             job.check(); String parent = pending.remove(); if(!visited.add(parent)) continue;
             Uri children = DocumentsContract.buildChildDocumentsUriUsingTree(tree, parent);
-            try(Cursor cursor = context.getContentResolver().query(children, columns, null, null, null)) {
+            try(Cursor cursor = context.getContentResolver().query(children, columns, null, null, null, job.signal)) {
                 if(cursor == null) throw new IOException("Directory provider returned no cursor.");
                 while(cursor.moveToNext()) {
                     job.check(); String id=cursor.getString(0), mime=cursor.getString(2);

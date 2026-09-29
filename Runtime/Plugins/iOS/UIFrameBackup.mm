@@ -8,6 +8,10 @@ static void UFBRequire(BOOL ok, NSString *message) {
 }
 static void UFBError(NSError *error) { if (error) UFBRequire(NO,error.localizedDescription); }
 static BOOL UFBTerminal(NSInteger state) { return state==3 || state==4 || state==6 || state==7 || state==8; }
+static NSString *UFBTaskName(NSDictionary *job) {
+    return job[@"generation"] ? [NSString stringWithFormat:@"%@:%@",job[@"id"],job[@"generation"]] : job[@"id"];
+}
+static NSString *UFBTaskID(NSURLSessionTask *task) { return [task.taskDescription componentsSeparatedByString:@":"].firstObject; }
 
 @interface UFBEngine : NSObject <NSURLSessionDataDelegate, NSURLSessionTaskDelegate, AppDelegateListener>
 @property NSMutableDictionary<NSString*, NSMutableDictionary*> *jobs;
@@ -99,10 +103,13 @@ static BOOL UFBTerminal(NSInteger state) { return state==3 || state==4 || state=
             @try {
                 for (NSURLSessionUploadTask *task in tasks) {
                     if (!task.taskDescription || task.state==NSURLSessionTaskStateCompleted) { [task cancel]; continue; }
-                    NSMutableDictionary *j=self.jobs[task.taskDescription];
+                    NSString *identifier=UFBTaskID(task);
+                    NSMutableDictionary *j=self.jobs[identifier];
+                    if (j && ![task.taskDescription isEqual:UFBTaskName(j)]) { [task cancel]; continue; }
                     if (!j || UFBTerminal([j[@"state"] integerValue])) { [task cancel]; if (!j) continue; }
-                    self.tasks[task.taskDescription]=task;
+                    self.tasks[identifier]=task;
                     j[@"released"]=@NO; [self save:j];
+                    if (!UFBTerminal([j[@"state"] integerValue]) && task.state==NSURLSessionTaskStateSuspended) [task resume];
                 }
                 self.recovered++;
                 if (self.recovered==2) {
@@ -129,9 +136,9 @@ static BOOL UFBTerminal(NSInteger state) { return state==3 || state==4 || state=
         [request setValue:@"application/octet-stream" forHTTPHeaderField:@"Content-Type"];
         NSURLSession *session=[j[@"wifiOnly"] boolValue]?_wifi:_any;
         // Intent is durable before the OS task exists; recovery matches taskDescription.
-        j[@"state"]=@1; j[@"released"]=@NO; [self save:j];
+        j[@"state"]=@1; j[@"released"]=@NO; j[@"generation"]=NSUUID.UUID.UUIDString; [self save:j];
         NSURLSessionUploadTask *task=[session uploadTaskWithRequest:request fromFile:[NSURL fileURLWithPath:payload]];
-        task.taskDescription=j[@"id"]; _tasks[j[@"id"]]=task; [task resume];
+        task.taskDescription=UFBTaskName(j); _tasks[j[@"id"]]=task; [task resume];
     } @catch (NSException *exception) {
         j[@"state"]=@6; j[@"released"]=@YES; j[@"error"]=exception.reason; [self save:j];
     }
@@ -188,10 +195,15 @@ static BOOL UFBTerminal(NSInteger state) { return state==3 || state==4 || state=
 }
 - (void)URLSession:(NSURLSession*)session task:(NSURLSessionTask*)task didCompleteWithError:(NSError*)error {
     if (!task.taskDescription) return;
-    NSMutableDictionary *j=_jobs[task.taskDescription];
+    NSString *identifier=UFBTaskID(task);
+    NSMutableDictionary *j=_jobs[identifier];
     NSMutableDictionary *bodies=[self bodies:session]; NSData *body=bodies[@(task.taskIdentifier)];
-    [bodies removeObjectForKey:@(task.taskIdentifier)]; [_tasks removeObjectForKey:task.taskDescription];
-    if (!j) return;
+    [bodies removeObjectForKey:@(task.taskIdentifier)];
+    // An old completion cannot release a replacement task or remove its credential.
+    if (!j || ![task.taskDescription isEqual:UFBTaskName(j)]) return;
+    NSURLSessionTask *current=_tasks[identifier];
+    if (current && current.taskIdentifier!=task.taskIdentifier) return;
+    [_tasks removeObjectForKey:identifier];
     @try {
         j[@"released"]=@YES;
         if (!UFBTerminal([j[@"state"] integerValue])) {
