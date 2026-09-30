@@ -20,6 +20,7 @@
 !/Runtime/MediaBackup/Native~/**
 !/Runtime/MediaStorage/Schema~/
 !/Runtime/MediaStorage/Schema~/**
+.DS_Store
 **/__pycache__/
 **/*.pyc
 **/credentials.json
