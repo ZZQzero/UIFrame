@@ -1,0 +1,10 @@
+{
+  "abi": 2,
+  "sanitized": false,
+  "binary": "uiframe_sqlite.dll",
+  "sha256": "62fb79807c74af9cf6b77dd5320a3dc90bed1f20e652ecb71cab7988b5af6235",
+  "build_id": "3421b9e050554da6236a3213450ea25671402a7fabab8aa88727c0324dce015d",
+  "core_sha256": "a33b352ac109d50cd2474ff80775401812ebfb47600e16dfa68bb5a7d86fb8a4",
+  "header_sha256": "7cb270bca2cf603081ce4d8f235aff348d8d2802de95f1fe04132673b3543ba1",
+  "cmake_sha256": "232d9826083b886a0084a7dda993c42792a2d02d993a58d1056c0234f0ad5f05"
+}

@@ -1,0 +1,71 @@
+{
+  "target": "windows-x64",
+  "sqlite": "3.53.4",
+  "source_id": "2026-07-24 19:02:57 bf7c7f30031888f4e796e429ab3978879485813aaca6f641c7b33e4e09459bcc",
+  "abi": 2,
+  "build_id": "3421b9e050554da6236a3213450ea25671402a7fabab8aa88727c0324dce015d",
+  "sanitized": false,
+  "native_tests": "built-not-run",
+  "sources": {
+    "src/core.cpp": "a33b352ac109d50cd2474ff80775401812ebfb47600e16dfa68bb5a7d86fb8a4",
+    "include/ufsqlite.h": "7cb270bca2cf603081ce4d8f235aff348d8d2802de95f1fe04132673b3543ba1",
+    "CMakeLists.txt": "232d9826083b886a0084a7dda993c42792a2d02d993a58d1056c0234f0ad5f05",
+    "build/build.py": "95fb3a7fad38e638b50c66f044ddb7fd909a0d54e3c7077f3371cd29d79dbf12",
+    "build/verify_windows.py": "7e081fa64351732e5517d5287c2013ab9e55410a963b323641469a29a35185f0",
+    "build/windows-llvm-mingw.cmake": "e9eee0bda8096e716a9b35f80c30008919e5744f722de8064f692740f293cb83"
+  },
+  "artifacts": {
+    "uiframe_sqlite.dll": "62fb79807c74af9cf6b77dd5320a3dc90bed1f20e652ecb71cab7988b5af6235",
+    "uiframe_sqlite.pdb": "c8516ef77b4806c36decf91abbab1f9e675993861f94eee59bab46635ed993fd",
+    "libuiframe_sqlite.dll.a": "5ad3db251b999a79040f56dbb4af5b7b8158f82b900d7a8f14bd449c78dc4929"
+  },
+  "flags": [
+    "-DCMAKE_BUILD_TYPE=RelWithDebInfo",
+    "-DUFSQLITE_TESTS=ON",
+    "-DUFSQLITE_SANITIZE=OFF",
+    "-G",
+    "Unix Makefiles",
+    "-DCMAKE_TOOLCHAIN_FILE=/Users/zzq/UIFrameTest/Packages/UIFrame/Runtime/Sqlite/Native~/build/windows-llvm-mingw.cmake",
+    "-DUFSQLITE_LLVM_MINGW=/private/tmp/uiframe-windows-toolchain/llvm-mingw-20260922-ucrt-macos-universal"
+  ],
+  "compiler_info": [
+    "C: Clang 23.1.2",
+    "CXX: Clang 23.1.2",
+    "System: Windows x86_64"
+  ],
+  "cmake": "cmake version 3.22.1-g37088a8",
+  "compiler_cache": [],
+  "windows_binary": {
+    "machine": "x86_64",
+    "exports": [
+      "ufsqlite_abi",
+      "ufsqlite_build_id",
+      "ufsqlite_cancel",
+      "ufsqlite_client_create",
+      "ufsqlite_client_release",
+      "ufsqlite_commit_request",
+      "ufsqlite_discard_request",
+      "ufsqlite_get_diagnostics",
+      "ufsqlite_release_result",
+      "ufsqlite_reserve",
+      "ufsqlite_source_id",
+      "ufsqlite_submit",
+      "ufsqlite_wait"
+    ],
+    "imports": [
+      "KERNEL32.dll",
+      "api-ms-win-crt-convert-l1-1-0.dll",
+      "api-ms-win-crt-environment-l1-1-0.dll",
+      "api-ms-win-crt-filesystem-l1-1-0.dll",
+      "api-ms-win-crt-heap-l1-1-0.dll",
+      "api-ms-win-crt-locale-l1-1-0.dll",
+      "api-ms-win-crt-math-l1-1-0.dll",
+      "api-ms-win-crt-multibyte-l1-1-0.dll",
+      "api-ms-win-crt-private-l1-1-0.dll",
+      "api-ms-win-crt-runtime-l1-1-0.dll",
+      "api-ms-win-crt-stdio-l1-1-0.dll",
+      "api-ms-win-crt-string-l1-1-0.dll",
+      "api-ms-win-crt-time-l1-1-0.dll"
+    ]
+  }
+}

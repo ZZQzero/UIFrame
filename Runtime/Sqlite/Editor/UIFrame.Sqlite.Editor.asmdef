@@ -1,0 +1,6 @@
+{
+  "name": "UIFrame.Sqlite.Editor",
+  "references": ["UIFrame.Sqlite"],
+  "includePlatforms": ["Editor"],
+  "autoReferenced": true
+}

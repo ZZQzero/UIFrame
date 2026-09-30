@@ -1,0 +1,8 @@
+{
+  "name": "UIFrame.Sqlite",
+  "rootNamespace": "UIFrame.Sqlite",
+  "references": [],
+  "autoReferenced": true,
+  "allowUnsafeCode": false,
+  "noEngineReferences": true
+}

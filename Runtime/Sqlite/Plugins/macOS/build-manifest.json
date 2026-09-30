@@ -1,0 +1,36 @@
+{
+  "target": "macos",
+  "sqlite": "3.53.4",
+  "source_id": "2026-07-24 19:02:57 bf7c7f30031888f4e796e429ab3978879485813aaca6f641c7b33e4e09459bcc",
+  "abi": 2,
+  "build_id": "3421b9e050554da6236a3213450ea25671402a7fabab8aa88727c0324dce015d",
+  "sanitized": false,
+  "native_tests": "passed",
+  "sources": {
+    "src/core.cpp": "a33b352ac109d50cd2474ff80775401812ebfb47600e16dfa68bb5a7d86fb8a4",
+    "include/ufsqlite.h": "7cb270bca2cf603081ce4d8f235aff348d8d2802de95f1fe04132673b3543ba1",
+    "CMakeLists.txt": "232d9826083b886a0084a7dda993c42792a2d02d993a58d1056c0234f0ad5f05",
+    "build/build.py": "95fb3a7fad38e638b50c66f044ddb7fd909a0d54e3c7077f3371cd29d79dbf12"
+  },
+  "artifacts": {
+    "libuiframe_sqlite.dylib": "0a0f60a7985154815a98f0921562b35c31d619d034333630c449a6bb6276bcaf"
+  },
+  "flags": [
+    "-DCMAKE_BUILD_TYPE=RelWithDebInfo",
+    "-DUFSQLITE_TESTS=ON",
+    "-DUFSQLITE_SANITIZE=OFF",
+    "-DCMAKE_OSX_ARCHITECTURES=arm64;x86_64",
+    "-DCMAKE_OSX_DEPLOYMENT_TARGET=11.0"
+  ],
+  "compiler_info": [
+    "C: AppleClang 21.0.0.21000334",
+    "CXX: AppleClang 21.0.0.21000334",
+    "System: Darwin arm64"
+  ],
+  "cmake": "cmake version 3.22.1-g37088a8",
+  "compiler_cache": [
+    "CMAKE_CXX_COMPILER:FILEPATH=/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/c++",
+    "CMAKE_C_COMPILER:FILEPATH=/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/cc",
+    "CMAKE_OSX_SYSROOT:PATH=/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk"
+  ]
+}

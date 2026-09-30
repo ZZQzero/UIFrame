@@ -1,0 +1,7 @@
+{
+  "name": "UIFrame.Sqlite.Tests.Editor",
+  "references": ["UIFrame.Sqlite"],
+  "optionalUnityReferences": ["TestAssemblies"],
+  "includePlatforms": ["Editor"],
+  "autoReferenced": false
+}

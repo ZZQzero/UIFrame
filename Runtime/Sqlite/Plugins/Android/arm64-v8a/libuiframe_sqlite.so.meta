@@ -1,0 +1,22 @@
+fileFormatVersion: 2
+guid: 3b8d6618bf594c82b1035993e49587a9
+PluginImporter:
+  externalObjects: {}
+  serializedVersion: 3
+  iconMap: {}
+  executionOrder: {}
+  defineConstraints: []
+  isPreloaded: 0
+  isOverridable: 0
+  isExplicitlyReferenced: 0
+  validateReferences: 1
+  platformData:
+    Any:
+      enabled: 0
+      settings: {}
+    Android:
+      enabled: 1
+      settings: {CPU: ARM64}
+  userData: 
+  assetBundleName: 
+  assetBundleVariant: 

@@ -45,6 +45,8 @@ https://github.com/ZZQzero/UIFrame.git
 
 图片选择、照片库查询、普通 / 授权目录、图片预览与持久备份见 [Gallery.md](Docs/Gallery.md)。编辑器入口为 **Tools → UIFrame → 图片与备份**；包内附本机备份参考服务。支持显式启用 Android / iOS 原生后台上传；新照片发现仍在应用运行期间执行，具体范围与验证结果见文档。
 
+通用 SQLite 存储模块位于 [Runtime/Sqlite](Runtime/Sqlite/README.md)，已提供共享原生核心、独立 C# 异步接口、事务、预算、快照与游戏存储示例。桌面验证及移动端构建已完成；照片业务接入、真机与商业发布验收仍在实施计划中，具体范围见模块验证记录。
+
 ## 快速开始
 
 ```csharp

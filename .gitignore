@@ -12,6 +12,14 @@
 !/Tools~/**
 !/Tests/Native~/
 !/Tests/Native~/**
+!/Runtime/Sqlite/Native~/
+!/Runtime/Sqlite/Native~/**
+!/Runtime/Sqlite/Samples~/
+!/Runtime/Sqlite/Samples~/**
+!/Runtime/MediaBackup/Native~/
+!/Runtime/MediaBackup/Native~/**
+!/Runtime/MediaStorage/Schema~/
+!/Runtime/MediaStorage/Schema~/**
 **/__pycache__/
 **/*.pyc
 **/credentials.json
