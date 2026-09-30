@@ -9,7 +9,8 @@ import re
 import secrets
 import sqlite3
 import threading
-import tempfile
+import time
+import sys
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import urlsplit, parse_qs
@@ -39,6 +40,7 @@ class Store:
         self.root = Path(root).resolve()
         self.root.mkdir(parents=True, exist_ok=True)
         self.credentials = credentials
+        self.active_uploads = {}
         self.lock = threading.RLock()
         # Fixed stripes bound lock memory even when old task history grows.
         self.upload_locks = [threading.RLock() for _ in range(64)]
@@ -50,7 +52,12 @@ class Store:
             account TEXT NOT NULL, id TEXT NOT NULL, sha256 TEXT NOT NULL,
             size INTEGER NOT NULL, name TEXT NOT NULL, mime TEXT NOT NULL,
             source TEXT NOT NULL, completed INTEGER NOT NULL DEFAULT 0,
+            epoch TEXT NOT NULL, last_activity REAL NOT NULL,
+            cleanup_state INTEGER NOT NULL DEFAULT 0 CHECK(cleanup_state BETWEEN 0 AND 3),
+            cleanup_error TEXT,
             PRIMARY KEY(account,id))''')
+        self.db.execute('CREATE INDEX IF NOT EXISTS uploads_expiry ON uploads(completed,cleanup_state,last_activity)')
+        self.db.execute('CREATE TABLE IF NOT EXISTS incoming(account TEXT NOT NULL, upload_id TEXT NOT NULL, filename TEXT PRIMARY KEY)')
         self.db.commit()
 
     def upload_lock(self, account, key):
@@ -85,6 +92,75 @@ class Store:
         offset = row['size'] if row['completed'] else (part.stat().st_size if part.exists() else 0)
         return dict(uploadId=row['id'], offset=offset, sha256=row['sha256'], size=row['size'],
                     backupId=row['id'] if row['completed'] else '', completed=bool(row['completed']))
+
+    def begin_activity(self, account, key):
+        with self.lock, self.db:
+            row = self.get(account, key)
+            if row and row['cleanup_state'] != 0:
+                return False
+            self.active_uploads[(account, key)] = self.active_uploads.get((account, key), 0) + 1
+            self.db.execute('UPDATE uploads SET last_activity=? WHERE account=? AND id=?', (time.time(), account, key))
+            return True
+
+    def end_activity(self, account, key):
+        with self.lock:
+            count = self.active_uploads[(account, key)] - 1
+            if count:
+                self.active_uploads[(account, key)] = count
+            else:
+                del self.active_uploads[(account, key)]
+
+    def cleanup_expired(self, ttl_seconds, maximum=200, retry_failed=False):
+        if ttl_seconds <= 0 or not 1 <= maximum <= 200:
+            raise ValueError('Positive TTL and 1-200 cleanup page size required')
+        cutoff = time.time() - ttl_seconds
+        with self.lock:
+            candidates = self.db.execute('SELECT account,id FROM uploads WHERE completed=0 AND '
+                '(cleanup_state=1 OR (cleanup_state=0 AND last_activity<?) OR (cleanup_state=3 AND ?)) '
+                'ORDER BY last_activity,account,id LIMIT ?', (cutoff, retry_failed, maximum)).fetchall()
+        deleted = freed = skipped = 0
+        for candidate in candidates:
+            account, key = candidate['account'], candidate['id']
+            with self.upload_lock(account, key):
+                with self.lock, self.db:
+                    row = self.get(account, key)
+                    if not row or row['completed'] or self.active_uploads.get((account, key)) or (row['cleanup_state'] == 0 and row['last_activity'] >= cutoff):
+                        skipped += 1
+                        continue
+                    self.db.execute('UPDATE uploads SET cleanup_state=1,cleanup_error=NULL WHERE account=? AND id=?', (account, key))
+                try:
+                    # Incoming records are written before files. Page abandoned
+                    # transfers too; a crash resumes this same durable claim.
+                    while True:
+                        with self.lock:
+                            incoming = self.db.execute('SELECT filename FROM incoming WHERE account=? AND upload_id=? LIMIT 32', (account, key)).fetchall()
+                        if not incoming:
+                            break
+                        for item in incoming:
+                            file = self.directory(account) / item['filename']
+                            if file.exists():
+                                size = file.stat().st_size
+                                file.unlink()
+                                freed += size
+                            with self.lock, self.db:
+                                self.db.execute('DELETE FROM incoming WHERE filename=?', (item['filename'],))
+                    file = self.part(account, key)
+                    if file.exists():
+                        size = file.stat().st_size
+                        file.unlink()
+                        freed += size
+                    sync_directory(self.directory(account))
+                    with self.lock, self.db:
+                        self.db.execute('UPDATE uploads SET cleanup_state=2 WHERE account=? AND id=? AND cleanup_state=1', (account, key))
+                    deleted += 1
+                except Exception as primary:
+                    try:
+                        with self.lock, self.db:
+                            self.db.execute('UPDATE uploads SET cleanup_state=3,cleanup_error=? WHERE account=? AND id=?', (str(primary), account, key))
+                    except Exception as secondary:
+                        print('Recording cleanup failure also failed: ' + repr(secondary), file=sys.stderr)
+                    raise
+        return dict(expired=deleted, freedBytes=freed, skipped=skipped)
 
     def close(self):
         self.db.close()
@@ -151,8 +227,11 @@ def handler_for(store):
             digest = hashlib.sha256()
             temporary = None
             try:
-                with tempfile.NamedTemporaryFile(dir=directory, suffix='.incoming', delete=False) as output:
-                    temporary = Path(output.name)
+                filename = secrets.token_hex(16) + '.incoming'
+                temporary = directory / filename
+                with store.lock, store.db:
+                    store.db.execute('INSERT INTO incoming VALUES(?,?,?)', (account, key, filename))
+                with temporary.open('xb') as output:
                     remaining = length
                     while remaining:
                         data = self.rfile.read(min(131072, remaining))
@@ -168,7 +247,7 @@ def handler_for(store):
                     return
                 with store.upload_lock(account, key), store.lock:
                     current = store.get(account, key)
-                    if not current or any(current[field] != row[field] for field in ('sha256', 'size', 'source')):
+                    if not current or current['cleanup_state'] != 0 or any(current[field] != row[field] for field in ('sha256', 'size', 'source', 'epoch')):
                         self.reply(409, {'error': 'Upload abandoned or identity changed during transfer'})
                         return
                     os.replace(temporary, store.blob(row))
@@ -180,7 +259,15 @@ def handler_for(store):
                 self.reply(200, receipt)
             finally:
                 if temporary is not None:
-                    temporary.unlink(missing_ok=True)
+                    primary = sys.exc_info()[1]
+                    try:
+                        temporary.unlink(missing_ok=True)
+                        with store.lock, store.db:
+                            store.db.execute('DELETE FROM incoming WHERE filename=?', (temporary.name,))
+                    except Exception as cleanup:
+                        if primary is None:
+                            raise
+                        print('Incoming file cleanup also failed: ' + repr(cleanup), file=sys.stderr)
 
         def download(self, account, key):
             # Pin an open immutable object while checking its identity, then let slow readers
@@ -208,7 +295,13 @@ def handler_for(store):
                 return
             parsed = urlsplit(self.path)
             parts = parsed.path.strip('/').split('/')
+            activity_key = None
             try:
+                if method in ('PUT', 'POST', 'DELETE') and len(parts) >= 3 and parts[:2] == ['v1', 'uploads'] and HEX.fullmatch(parts[2]):
+                    if not store.begin_activity(account, parts[2]):
+                        self.reply(410, {'error': 'Upload session expired; explicitly register this identity again to resume'})
+                        return
+                    activity_key = parts[2]
                 if method == 'PUT' and len(parts) == 4 and parts[:2] == ['v1', 'uploads'] and parts[3] == 'background' and HEX.fullmatch(parts[2]):
                     self.background_upload(account, parts[2])
                     return
@@ -244,10 +337,17 @@ def handler_for(store):
                         if row and (row['sha256'] != digest or row['size'] != size or row['source'] != source):
                             self.reply(409, {'error': 'Idempotency identity mismatch'})
                             return
+                        if row and row['cleanup_state'] in (1, 3):
+                            self.reply(409, {'error': 'Upload cleanup has not completed'})
+                            return
+                        if row and row['cleanup_state'] == 2:
+                            with store.db:
+                                store.db.execute('UPDATE uploads SET cleanup_state=0,cleanup_error=NULL,epoch=?,last_activity=? WHERE account=? AND id=?', (secrets.token_hex(16), time.time(), account, key))
+                            row = store.get(account, key)
                         if not row:
                             with store.db:
-                                store.db.execute('INSERT INTO uploads(account,id,sha256,size,name,mime,source) VALUES(?,?,?,?,?,?,?)',
-                                                 (account, key, digest, size, name, mime, source))
+                                store.db.execute('INSERT INTO uploads(account,id,sha256,size,name,mime,source,epoch,last_activity) VALUES(?,?,?,?,?,?,?,?,?)',
+                                                 (account, key, digest, size, name, mime, source, secrets.token_hex(16), time.time()))
                             row = store.get(account, key)
                         receipt = store.describe(row)
                     receipt['capabilities'] = store.capabilities(account)
@@ -261,6 +361,9 @@ def handler_for(store):
                             row = store.get(account, key)
                         if not row:
                             self.reply(404, {'error': 'Upload not found'})
+                            return
+                        if row['cleanup_state'] != 0:
+                            self.reply(410, {'error': 'Upload session expired'})
                             return
                         part = store.part(account, key)
                         if method == 'GET' and len(parts) == 3:
@@ -330,6 +433,9 @@ def handler_for(store):
                 self.reply(400, {'error': 'Invalid request'})
             except (OSError, sqlite3.Error):
                 self.reply(500, {'error': 'Storage operation failed'})
+            finally:
+                if activity_key is not None:
+                    store.end_activity(account, activity_key)
     return Handler
 
 
@@ -339,6 +445,8 @@ def main():
     parser.add_argument('--root', type=Path, required=True)
     parser.add_argument('--host', default='127.0.0.1')
     parser.add_argument('--port', type=int, default=8787)
+    parser.add_argument('--upload-ttl-days', type=float, help='Explicitly enable incomplete-session expiration (recommended: 7 days)')
+    parser.add_argument('--retry-failed-cleanup', action='store_true', help='Explicitly retry recorded cleanup failures on startup')
     args = parser.parse_args()
     config = args.root / 'credentials.json'
     if args.command == 'init':
@@ -348,15 +456,33 @@ def main():
             json.dump([{'account': 'local-user', 'token': secrets.token_urlsafe(32)}], output, indent=2)
         print('Created credentials.json. Configure the client with this local account and token; do not commit it.')
         return
+    if args.upload_ttl_days is not None and args.upload_ttl_days <= 0:
+        parser.error('--upload-ttl-days must be positive')
     credentials = json.loads(config.read_text())
     store = Store(args.root, credentials)
     server = ThreadingHTTPServer((args.host, args.port), handler_for(store))
+    stop_cleanup = threading.Event()
+    cleaner = None
+    if args.upload_ttl_days is not None:
+        store.cleanup_expired(args.upload_ttl_days * 86400, retry_failed=args.retry_failed_cleanup)
+        def maintenance():
+            while not stop_cleanup.wait(60):
+                try:
+                    store.cleanup_expired(args.upload_ttl_days * 86400)
+                except Exception as error:
+                    print('Session cleanup stopped: ' + repr(error), file=sys.stderr)
+                    return
+        cleaner = threading.Thread(target=maintenance, name='BackupCleanup')
+        cleaner.start()
     print(f'Backup service listening at http://{args.host}:{args.port}; authenticated protocol v1')
     try:
         server.serve_forever()
     except KeyboardInterrupt:
         pass
     finally:
+        stop_cleanup.set()
+        if cleaner is not None:
+            cleaner.join()
         server.server_close()
         store.close()
 

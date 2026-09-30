@@ -2,18 +2,18 @@
   "target": "ios",
   "sqlite": "3.53.4",
   "source_id": "2026-07-24 19:02:57 bf7c7f30031888f4e796e429ab3978879485813aaca6f641c7b33e4e09459bcc",
-  "abi": 2,
-  "build_id": "3421b9e050554da6236a3213450ea25671402a7fabab8aa88727c0324dce015d",
+  "abi": 3,
+  "build_id": "cc2af4a34676c4a76a07358b30d6c4351d4b22a8bdba0f2c9c2e0954fdbbc305",
   "sanitized": false,
   "native_tests": "not-built",
   "sources": {
-    "src/core.cpp": "a33b352ac109d50cd2474ff80775401812ebfb47600e16dfa68bb5a7d86fb8a4",
-    "include/ufsqlite.h": "7cb270bca2cf603081ce4d8f235aff348d8d2802de95f1fe04132673b3543ba1",
-    "CMakeLists.txt": "232d9826083b886a0084a7dda993c42792a2d02d993a58d1056c0234f0ad5f05",
-    "build/build.py": "95fb3a7fad38e638b50c66f044ddb7fd909a0d54e3c7077f3371cd29d79dbf12"
+    "src/core.cpp": "8f6ca5afe72060605d3f7f8fada4b5ef717a857f28bb4fc8fc50d66ab3507e8f",
+    "include/ufsqlite.h": "49b6cc0a230f5a9ba120a7e0cb70dfd0dd434e564eeea7bc6a9ac9b37fc000f4",
+    "CMakeLists.txt": "fc9dae35ef47419f79f04883949776a94ea13ccdb4424ecae704f014e9d6c607",
+    "build/build.py": "33ed85d3f45663b5f302037091a2d55c30166c633fe38698ec1f119ddcec8ed4"
   },
   "artifacts": {
-    "libuiframe_sqlite.a": "dbf69f90808c242ede56e221b02c2081b29135cea5085311317600540dddf809"
+    "libuiframe_sqlite.a": "e1688e3de76d842016552dd177685902e71434a4d832d27c6a655a25c84c3d88"
   },
   "flags": [
     "-DCMAKE_BUILD_TYPE=RelWithDebInfo",

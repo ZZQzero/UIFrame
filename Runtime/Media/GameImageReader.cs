@@ -18,10 +18,18 @@ namespace Game.Media
         {
             MediaThread.Check(); if (image == null) throw new ArgumentNullException(nameof(image));
             options ??= new ImagePreviewOptions(); options.Validate(); cancellationToken.ThrowIfCancellationRequested();
+            using var admission=ImageWorkBudget.Acquire(image,true,true);
             int edge = options.MaxEdge, pixels = options.MaxPixels; bool readable = options.Readable;
             using var lease = image.Acquire();
             await processingGate.WaitAsync(cancellationToken);
             try { return await LoadPreviewCore(image, edge, pixels, readable, cancellationToken); }
+            finally { await ReleaseProcessing(); }
+        }
+
+        internal static async UniTask<ImageTexture> LoadAdmittedPreviewAsync(ImageReference image,ImagePreviewOptions options,CancellationToken token)
+        {
+            await processingGate.WaitAsync(token);
+            try { return await LoadPreviewCore(image,options.MaxEdge,options.MaxPixels,options.Readable,token); }
             finally { await ReleaseProcessing(); }
         }
 
@@ -83,6 +91,7 @@ namespace Game.Media
         {
             MediaThread.Check(); if (image == null) throw new ArgumentNullException(nameof(image));
             options ??= new ImageExportOptions(); options.Validate(); cancellationToken.ThrowIfCancellationRequested();
+            using var admission=ImageWorkBudget.Acquire(image,true,true);
             var copy = new ImageExportOptions { Mode = options.Mode, MaxEdge = options.MaxEdge, MaxPixels = options.MaxPixels,
                 JpegQuality = options.JpegQuality, JpegBackground = options.JpegBackground };
             using var lease = image.Acquire();

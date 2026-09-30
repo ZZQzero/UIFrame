@@ -26,6 +26,10 @@ namespace UIFrame.Sqlite
         ResultLimit,
         Faulted
     }
+    public enum SqliteExecutionPhase
+    {
+        Admission, Queue, Open, Prepare, Execute, Commit, Snapshot, Maintenance, Close
+    }
     public sealed class SqliteException : Exception
     {
         public SqliteError Error { get; }
@@ -34,8 +38,9 @@ namespace UIFrame.Sqlite
         public bool CommitOutcomeUnknown { get; }
         public bool HasCommittedChanges { get; }
         public int CleanupCode { get; }
+        public SqliteExecutionPhase Phase { get; }
         internal SqliteException(SqliteError error, string message, int code = 0, ulong operation = 0,
-                                 int committed = 0, int cleanupCode = 0)
+                                 int committed = 0, int cleanupCode = 0, SqliteExecutionPhase phase = SqliteExecutionPhase.Admission)
             : base(message)
         {
             Error = error;
@@ -44,6 +49,7 @@ namespace UIFrame.Sqlite
             CommitOutcomeUnknown = committed < 0;
             HasCommittedChanges = committed > 0;
             CleanupCode = cleanupCode;
+            Phase = phase;
         }
     }
     public sealed class SqliteOpenOptions
@@ -144,6 +150,22 @@ namespace UIFrame.Sqlite
         public ulong ReservedBytes { get; }
         public ulong CompletedOperations { get; }
         public ulong EngineBytes { get; }
+        public ulong QueuedOperations { get; }
+        public ulong ActiveOperations { get; }
+        public ulong ParameterBytes { get; }
+        public ulong ReservedResultBytes { get; }
+        public ulong HeldResultBytes { get; }
+        public ulong QueueWaitNanoseconds { get; }
+        public ulong MaxQueueWaitNanoseconds { get; }
+        public ulong ExecutionNanoseconds { get; }
+        public ulong MaxExecutionNanoseconds { get; }
+        public ulong CommitNanoseconds { get; }
+        public ulong CommittedTransactions { get; }
+        public ulong StatementCacheHits { get; }
+        public ulong StatementCacheMisses { get; }
+        public ulong FailedOperations { get; }
+        public ulong CanceledOperations { get; }
+        public ulong TimedOutOperations { get; }
         internal SqliteDiagnostics(Internal.NativeMethods.Diagnostics v)
         {
             OpenDatabases = v.Databases;
@@ -151,6 +173,22 @@ namespace UIFrame.Sqlite
             ReservedBytes = v.ReservedBytes;
             CompletedOperations = v.Completed;
             EngineBytes = v.SqliteBytes;
+            QueuedOperations = v.Queued;
+            ActiveOperations = v.Active;
+            ParameterBytes = v.ParameterBytes;
+            ReservedResultBytes = v.ResultReservedBytes;
+            HeldResultBytes = v.HeldResultBytes;
+            QueueWaitNanoseconds = v.QueueWaitNs;
+            MaxQueueWaitNanoseconds = v.MaxQueueWaitNs;
+            ExecutionNanoseconds = v.ExecutionNs;
+            MaxExecutionNanoseconds = v.MaxExecutionNs;
+            CommitNanoseconds = v.CommitNs;
+            CommittedTransactions = v.Commits;
+            StatementCacheHits = v.CacheHits;
+            StatementCacheMisses = v.CacheMisses;
+            FailedOperations = v.Errors;
+            CanceledOperations = v.Canceled;
+            TimedOutOperations = v.Timeouts;
         }
     }
 }

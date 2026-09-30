@@ -53,7 +53,7 @@ namespace UIFrame.Sqlite.Editor
             string directory = Path.Combine(root, "Plugins", platform);
             var manifest =
                 JsonUtility.FromJson<Artifact>(File.ReadAllText(Path.Combine(directory, "artifact.json")));
-            if (manifest == null || manifest.abi != 2 || manifest.sanitized ||
+            if (manifest == null || manifest.abi != Internal.NativeMethods.Abi || manifest.sanitized ||
                 string.IsNullOrEmpty(manifest.binary) ||
                 Path.GetFileName(manifest.binary) != manifest.binary ||
                 string.IsNullOrEmpty(manifest.build_id))

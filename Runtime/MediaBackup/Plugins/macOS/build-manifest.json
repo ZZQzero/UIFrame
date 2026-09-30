@@ -1,0 +1,36 @@
+{
+  "target": "macos",
+  "abi": 1,
+  "sqlite_abi": 3,
+  "sqlite_build_id": "cc2af4a34676c4a76a07358b30d6c4351d4b22a8bdba0f2c9c2e0954fdbbc305",
+  "build_id": "2905c1f20acfb01edc49f20dd49d56a49bbf8a1b38d8ff25a25f75ff2e161bf5",
+  "sources": {
+    "CMakeLists.txt": "545444ac2e8a48c3e9764a89ddfb8c0e93fd21c083c242d2467b7049c7c6d57c",
+    "src/android.cpp": "43e44798e24ea99c390a01a408e818415cd194abf975c08459ac2610b43e4ca6",
+    "src/repository.cpp": "e7217f6ffdc9978b145d2d6e08a7d32239b0ea5be4fa8d535388d4097faa6baa",
+    "include/ufbackup.h": "9a4db8ffd30f095d402e67e59a8ebe7a91a82383f031a50b6c7f1458e577e8be",
+    "schema/catalog.sql": "bef08bfb4e7ce8cfb9aaa114af8ec6dd2ca9af7c96273eb762c533ed79cc59c2",
+    "build/build.py": "eb016a74737f1315a3a34b4fe08cf8d1f0bf614b10e9eac9093f7961cb59725b",
+    "build/install.py": "80eeb24d0a3a5fea18772273b9157be1e2d42c4fe8f7a539e08bfa8d73ce16ef",
+    "build/schema.py": "4c0ef46652545b4d4a8045c15b5122eac81d0fefa1b102fb3e255081843e19e4",
+    "../../Sqlite/Native~/include/ufsqlite_client.hpp": "bd00e120d2724cf9c7a70a4a8454618887e9fc5e10531b1d24562887ad292171",
+    "../../Sqlite/Native~/include/ufsqlite.h": "49b6cc0a230f5a9ba120a7e0cb70dfd0dd434e564eeea7bc6a9ac9b37fc000f4"
+  },
+  "sanitized": false,
+  "artifacts": {
+    "libuiframe_backup.dylib": "6ef405b04d74a68356f69a809561cc7789bebb7ebadf21e8463d583f80b379b0"
+  },
+  "flags": [
+    "-DCMAKE_BUILD_TYPE=RelWithDebInfo",
+    "-DUFSQLITE_LIBRARY=/private/tmp/uiframe-sqlite-macos/libuiframe_sqlite.dylib",
+    "-DUFBACKUP_TESTS=ON",
+    "-DUFBACKUP_SANITIZE=OFF",
+    "-DCMAKE_OSX_ARCHITECTURES=arm64;x86_64",
+    "-DCMAKE_OSX_DEPLOYMENT_TARGET=11.0"
+  ],
+  "native_tests": "passed",
+  "compiler_cache": [
+    "CMAKE_CXX_COMPILER:FILEPATH=/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/c++",
+    "CMAKE_OSX_SYSROOT:PATH=/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk"
+  ]
+}

@@ -1,0 +1,22 @@
+fileFormatVersion: 2
+guid: ecb7e2a212ea4b499be0cfbad9a06615
+PluginImporter:
+  externalObjects: {}
+  serializedVersion: 3
+  iconMap: {}
+  executionOrder: {}
+  defineConstraints: []
+  isPreloaded: 0
+  isOverridable: 0
+  isExplicitlyReferenced: 0
+  validateReferences: 1
+  platformData:
+    Any:
+      enabled: 0
+      settings: {}
+    iOS:
+      enabled: 1
+      settings: {CPU: ARM64, AddToEmbeddedBinaries: false, CompileFlags: '', FrameworkDependencies: ''}
+  userData: 
+  assetBundleName: 
+  assetBundleVariant: 

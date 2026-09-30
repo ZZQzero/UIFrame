@@ -1,6 +1,6 @@
 # Sqlite 通用本地存储模块
 
-位于 `Runtime/Sqlite`，程序集与命名空间为 `UIFrame.Sqlite`。不依赖 Unity、UniTask、UIFrame.Runtime 或照片模块。使用官方 SQLite 3.53.4、一份共享 C++ 执行核心和 C ABI 2；数据库实际工作在原生线程池中执行。
+位于 `Runtime/Sqlite`，程序集与命名空间为 `UIFrame.Sqlite`。不依赖 Unity、UniTask、UIFrame.Runtime 或照片模块。使用官方 SQLite 3.53.4、一份共享 C++ 执行核心和 C ABI 3；数据库实际工作在原生线程池中执行。
 
 目前已实现通用核心、托管接口和桌面行为验证。已构建 macOS universal、Android ARM64、iOS ARM64 和 Windows x86_64 原生产物；Windows DLL 已通过交叉编译、架构、接口导出与依赖检查，Windows Editor / Player 的实际运行尚待验证。移动端已有独立 IL2CPP 构建记录，真机后台运行及商业性能门槛尚未验收；iOS Simulator 未提供已验收产物。照片备份尚未切换到本模块，新增照片 schema 目前用于独立验证。完整状态见 [Validation.md](Validation.md) 和 [实施计划](ImplementationPlan.md)。
 
@@ -41,7 +41,7 @@ finally { await db.CloseAsync(); }
 | `CreateSnapshotAsync` | 固定来源快照、分步复制、校验并发布到新的目标路径；已有目标不覆盖 |
 | `GetStorageInfoAsync` | 主库、WAL 和可用磁盘字节；并发写入后数字可以变化 |
 | `CheckpointAsync` | Passive 或 Truncate；只尝试一次，读取者阻止回收时 `CheckpointBlocked=true`，不等待或重试 |
-| `GetDiagnostics` / `SqliteRuntime.GetDiagnostics` | **模块全局**连接数、未释放操作数、已预留缓冲、完成数和引擎内存 |
+| `GetDiagnostics` / `SqliteRuntime.GetDiagnostics` | **模块全局**连接、排队 / 执行数量、参数 / 结果缓冲、等待 / 执行 / 提交耗时、缓存命中、错误 / 取消 / 超时计数和引擎内存 |
 | `CloseAsync` | 停止新请求，等已受理工作及映射结束，释放连接；重复调用等待同一结果 |
 
 `SqliteCommand.ExpectAffectedRows(n)` 作为事务条件；不匹配时回滚整批。参数支持 null、string、byte[]、有符号64位范围的整数、bool、有限浮点数。SQL 一条命令一条语句，参数与 SQL 分开；禁止外部 BEGIN / COMMIT / ATTACH 和核心配置 PRAGMA。业务 application_id / user_version 可读写。
@@ -50,17 +50,21 @@ finally { await db.CloseAsync(); }
 
 ## 预算和持久化
 
-- 固定2个原生工作线程，每库一个写连接和一个只读连接；写事务串行。
+- 固定2个原生工作线程，每库一个写连接和一个只读连接；写事务按正式受理顺序串行，资源预留不决定执行次序。
 - 每库最多128个未释放请求；参数双份预留合计4 MiB，结果额度4 MiB；全模块原生与托管编码缓冲预留合计16 MiB。慢消费者持有的批次结果也占额度。
 - 一批最多200条SQL，结果合计最多200行 / 1 MiB；超限失败，**不截断结果**。单条SQL仍可能修改大量行，业务必须自行分批。
-- 请求默认截止时间5秒；不可中断文件系统 I/O 不保证立即返回。关闭不接受取消。
+- 请求默认截止时间5秒；ExecuteAsync 可通过 TimeSpan 重载设置本次截止时间，查询 / 批次使用 SqliteQueryBudget。不可中断文件系统 I/O 不保证立即返回。关闭不接受取消。原生关闭入口每库只允许一个未提交预留，且参数与结果预算必须为零，避免借清理通道绕过资源限额。
 - 每连接64条语句缓存，单缓存语句内存小于64 KiB；SQLite页缓存目标4 MiB。引擎临时数据、托管物化结果和调用方对象不等于模块缓冲预算。
 - 参数在受理期间复制；受理期间不能修改 byte[]。原生额度先预留再编码。业务长期保存的原始数组仍由业务拥有。
 - WAL + synchronous=FULL；同时开启 fullfsync / checkpoint_fullfsync，由目标 VFS 执行相应刷新。没有关闭可靠落盘以换取性能。
 - `SqliteOpenOptions` 默认写入前保留32 MiB可用磁盘、WAL高水位128 MiB。可显式配置；检查在写事务开始前执行，不预测任意SQL的全部未来磁盘增长，也不能代替实际磁盘满错误。高水位阻止写入，查询、维护、关闭仍可执行。释放空间或checkpoint后可显式提交新工作；不会重放原失败操作。
 - 自动checkpoint采用SQLite的1000页阈值。显式Truncate适合空闲窗口，不在写事务中执行VACUUM；本版没有自动压缩。
 
-成功以COMMIT完成为准。提交后迟到取消不改写成功；不确定提交通过 `SqliteException.CommitOutcomeUnknown` 表达，故障库停止后续工作并仍允许关闭。业务通过同事务内的OperationId回执核对。次级清理错误保留在 `CleanupCode` 或 `SqliteRuntime.LastCleanupError`，不替换已有主异常。没有自动重试、损坏重建、JSON兼容、导入或双写。
+成功以COMMIT完成为准。提交后迟到取消不改写成功；不确定提交通过 `SqliteException.CommitOutcomeUnknown` 表达，故障库停止后续工作并仍允许关闭。业务通过同事务内的OperationId回执核对。次级清理错误保留在 `CleanupCode` 或 `SqliteRuntime.LastCleanupError`，不替换已有主异常。没有自动重试、损坏重建、JSON兼容、导入或双写。SqliteException.Phase 标识主错误所处阶段。
+
+完成分发故障会停止该托管客户端：由原生核心结束在途工作并关闭所属数据库，未交付等待保留同一主异常，已交付批次结果保持有效。CloseAsync / ShutdownAsync 在资源收尾后仍传播故障，不能把清理完成当成业务成功。其他原生客户端不受影响。Editor 域收尾同时回收弱引用已清除而终结器尚未执行的结果，延后的终结器不会重复释放。只有在旧客户端确已释放后才允许开始新寿命，历史异常仍保留为可观察的错误。
+
+诊断按需读取，不自动轮询或输出逐条成功日志。累计耗时以纳秒计，不能直接当作 p95 / p99；结果配额、已完成结果实际字节和引擎内存分别报告。完整口径见 ABI 文档；WAL 与 checkpoint 进度通过 GetStorageInfoAsync / CheckpointAsync 查询。
 
 快照默认临时文件512 MiB、来源WAL128 MiB、30秒期限，全模块同时一个。使用独立只读来源连接，每次复制128页并让出工作线程。仅成功发布完整、可独立打开的文件后返回成功；发布之后刷盘失败时可以存在目标，此时异常的 `HasCommittedChanges` 为 true，调用方不得把该文件当成已确认成功。失败仅清理本次临时文件。
 

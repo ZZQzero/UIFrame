@@ -1,0 +1,34 @@
+{
+  "target": "windows-x64",
+  "abi": 1,
+  "sqlite_abi": 3,
+  "sqlite_build_id": "cc2af4a34676c4a76a07358b30d6c4351d4b22a8bdba0f2c9c2e0954fdbbc305",
+  "build_id": "2905c1f20acfb01edc49f20dd49d56a49bbf8a1b38d8ff25a25f75ff2e161bf5",
+  "sources": {
+    "CMakeLists.txt": "545444ac2e8a48c3e9764a89ddfb8c0e93fd21c083c242d2467b7049c7c6d57c",
+    "src/android.cpp": "43e44798e24ea99c390a01a408e818415cd194abf975c08459ac2610b43e4ca6",
+    "src/repository.cpp": "e7217f6ffdc9978b145d2d6e08a7d32239b0ea5be4fa8d535388d4097faa6baa",
+    "include/ufbackup.h": "9a4db8ffd30f095d402e67e59a8ebe7a91a82383f031a50b6c7f1458e577e8be",
+    "schema/catalog.sql": "bef08bfb4e7ce8cfb9aaa114af8ec6dd2ca9af7c96273eb762c533ed79cc59c2",
+    "build/build.py": "eb016a74737f1315a3a34b4fe08cf8d1f0bf614b10e9eac9093f7961cb59725b",
+    "build/install.py": "80eeb24d0a3a5fea18772273b9157be1e2d42c4fe8f7a539e08bfa8d73ce16ef",
+    "build/schema.py": "4c0ef46652545b4d4a8045c15b5122eac81d0fefa1b102fb3e255081843e19e4",
+    "../../Sqlite/Native~/include/ufsqlite_client.hpp": "bd00e120d2724cf9c7a70a4a8454618887e9fc5e10531b1d24562887ad292171",
+    "../../Sqlite/Native~/include/ufsqlite.h": "49b6cc0a230f5a9ba120a7e0cb70dfd0dd434e564eeea7bc6a9ac9b37fc000f4"
+  },
+  "sanitized": false,
+  "artifacts": {
+    "libuiframe_backup.dll.a": "670881c815ecf4c69589fce04286124380a7ef11c6f9698ce776a0bbb90fd7e0",
+    "uiframe_backup.dll": "54037eb2ef4cf03dd1b2c850b85ba506eb6c63eb97e79b74a8353ea4ed3f2862"
+  },
+  "flags": [
+    "-DCMAKE_BUILD_TYPE=RelWithDebInfo",
+    "-DUFSQLITE_LIBRARY=/private/tmp/uiframe-sqlite-windows-x64/libuiframe_sqlite.dll.a",
+    "-DUFBACKUP_TESTS=OFF",
+    "-DUFBACKUP_SANITIZE=OFF",
+    "-DCMAKE_TOOLCHAIN_FILE=/Users/zzq/UIFrameTest/Packages/UIFrame/Runtime/Sqlite/Native~/build/windows-llvm-mingw.cmake",
+    "-DUFSQLITE_LLVM_MINGW=/private/tmp/uiframe-windows-toolchain/llvm-mingw-20260922-ucrt-macos-universal"
+  ],
+  "native_tests": "not-run",
+  "compiler_cache": []
+}

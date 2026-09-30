@@ -6,13 +6,13 @@ namespace Game.Media.Backup
 {
     [Serializable] internal sealed class NativeBackupRequest
     {
-        public string op, id, payload, url, account, token, key, sha256;
-        public long size;
+        public string op, repository, id, token;
+        public long generation;
         public bool wifiOnly;
     }
     [Serializable] internal sealed class NativeBackupStatus
     {
-        public string error, backupId;
+        public string error, backupId, root;
         public bool exists, released;
         public BackupState state;
         public long confirmedBytes;
@@ -30,10 +30,16 @@ namespace Game.Media.Backup
             string json = JsonUtility.ToJson(request), result;
 #endif
 #if UNITY_ANDROID && !UNITY_EDITOR
-            using var unity = new AndroidJavaClass("com.unity3d.player.UnityPlayer");
-            using var activity = unity.GetStatic<AndroidJavaObject>("currentActivity");
-            using var bridge = new AndroidJavaClass("com.zzq.uiframe.media.BackupBridge");
-            result = bridge.CallStatic<string>("call", activity, json);
+            bool attach = !Cysharp.Threading.Tasks.PlayerLoopHelper.IsMainThread;
+            if (attach && AndroidJNI.AttachCurrentThread() != 0) throw new InvalidOperationException("Cannot attach backup worker to Android runtime.");
+            try
+            {
+                using var unity = new AndroidJavaClass("com.unity3d.player.UnityPlayer");
+                using var activity = unity.GetStatic<AndroidJavaObject>("currentActivity");
+                using var bridge = new AndroidJavaClass("com.zzq.uiframe.media.BackupBridge");
+                result = bridge.CallStatic<string>("call", activity, json);
+            }
+            finally { if (attach) AndroidJNI.DetachCurrentThread(); }
 #elif UNITY_IOS && !UNITY_EDITOR
             var pointer = UFBCall(json);
             try { result = Marshal.PtrToStringAnsi(pointer); } finally { UFBFree(pointer); }

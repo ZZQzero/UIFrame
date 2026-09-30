@@ -73,12 +73,7 @@ namespace UIFrame.Sqlite
                     result.ReleaseAfter(primary);
                     try
                     {
-                        using (await dispatcher
-                                   .Submit(nativeHandle, 5, 0, () => Array.Empty<byte>(), 0, 0, 5000,
-                                           CancellationToken.None)
-                                   .ConfigureAwait(false))
-                        {
-                        }
+                        await dispatcher.CloseAsync(nativeHandle).ConfigureAwait(false);
                     }
                     catch (Exception cleanup)
                     {
@@ -106,13 +101,15 @@ namespace UIFrame.Sqlite
                                          (uint)budget.Timeout.TotalMilliseconds, token);
             }
         }
-        public async Task<int> ExecuteAsync(SqliteCommand command, CancellationToken token = default)
+        public Task<int> ExecuteAsync(SqliteCommand command, CancellationToken token = default) =>
+            ExecuteAsync(command, TimeSpan.FromSeconds(5), token);
+        public async Task<int> ExecuteAsync(SqliteCommand command, TimeSpan timeout, CancellationToken token = default)
         {
             if (command == null)
                 throw new ArgumentNullException(nameof(command));
             using (Enter())
             {
-                var result = await Submit(2, new[] { command }, new SqliteQueryBudget(1, 64), token)
+                var result = await Submit(2, new[] { command }, new SqliteQueryBudget(1, 64, timeout), token)
                                  .ConfigureAwait(false);
                 Exception primary = null;
                 try
@@ -253,19 +250,8 @@ namespace UIFrame.Sqlite
                                          .Task;
             }
             await wait.ConfigureAwait(false);
-            try
-            {
-                using (var result = await dispatcher
-                                        .Submit(handle, 5, 0, () => Array.Empty<byte>(), 0, 0, 5000,
-                                                CancellationToken.None)
-                                        .ConfigureAwait(false))
-                {
-                }
-            }
-            finally
-            {
-                SqliteRuntime.Unregister(this);
-            }
+            await dispatcher.CloseAsync(handle).ConfigureAwait(false);
+            SqliteRuntime.Unregister(this);
         }
     }
     public static class SqliteRuntime
@@ -348,8 +334,9 @@ namespace UIFrame.Sqlite
             {
                 if (shutdown == null)
                     return;
-                if (!shutdown.IsCompleted || shutdown.IsFaulted || shutdown.IsCanceled)
-                    throw new InvalidOperationException("Previous SQLite shutdown did not succeed.");
+                if (!shutdown.IsCompleted || (dispatcher != null && !dispatcher.IsReleased))
+                    throw new InvalidOperationException("Previous SQLite shutdown still owns native resources.");
+                databases.Clear();
                 dispatcher = null;
                 shutdown = null;
                 opened = null;
@@ -398,6 +385,8 @@ namespace UIFrame.Sqlite
                 else
                     ReportCleanup(error);
             }
+            if (completion == null || completion.IsReleased)
+                lock (gate) databases.Clear();
             if (primary != null)
                 System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(primary).Throw();
         }

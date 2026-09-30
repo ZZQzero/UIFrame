@@ -1,31 +1,21 @@
-"""Run the iOS repository's ownership tests on macOS Foundation, without OS uploads."""
+"""Run the platform-independent native backup repository contract suite."""
+import argparse
 from pathlib import Path
 import subprocess
-import tempfile
 
 
 def main():
-    source = Path(__file__).with_name("backup_persistence.mm")
-    with tempfile.TemporaryDirectory(prefix="uiframe-native-backup-") as temporary:
-        root = Path(temporary)
-        (root / "UIKit").mkdir()
-        (root / "UIKit/UIKit.h").write_text("#import <Foundation/Foundation.h>\n")
-        (root / "PluginBase").mkdir()
-        (root / "PluginBase/AppDelegateListener.h").write_text(
-            "#import <Foundation/Foundation.h>\n"
-            "@protocol AppDelegateListener <NSObject>\n@end\n"
-            "static void UnityRegisterAppDelegateListener(id object) {}\n"
-        )
-        executable = root / "backup_persistence"
-        subprocess.run([
-            "xcrun", "clang++", "-fobjc-arc", "-fblocks", "-std=c++17",
-            "-framework", "Foundation", "-framework", "Security",
-            "-I", str(root), str(source), "-o", str(executable),
-        ], check=True)
-        store = root / "store"
-        store.mkdir()
-        subprocess.run([str(executable), str(store)], check=True)
+    parser=argparse.ArgumentParser()
+    parser.add_argument('--cmake',required=True)
+    parser.add_argument('--build',type=Path,required=True)
+    parser.add_argument('--sqlite-library',type=Path,required=True)
+    parser.add_argument('--sanitize',action='store_true')
+    args=parser.parse_args()
+    source=Path(__file__).resolve().parents[2]/'Runtime/MediaBackup/Native~'
+    subprocess.run([args.cmake,'-S',str(source),'-B',str(args.build),'-DUFSQLITE_LIBRARY='+str(args.sqlite_library.resolve()),
+                    '-DUFBACKUP_TESTS=ON','-DUFBACKUP_SANITIZE='+('ON' if args.sanitize else 'OFF')],check=True)
+    subprocess.run([args.cmake,'--build',str(args.build),'--parallel','2'],check=True)
+    subprocess.run([str(Path(args.cmake).with_name('ctest')),'--test-dir',str(args.build),'--output-on-failure'],check=True)
 
 
-if __name__ == "__main__":
-    main()
+if __name__=='__main__':main()

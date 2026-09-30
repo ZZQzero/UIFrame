@@ -6,7 +6,8 @@
         "YooAsset",
         "Unity.TextMeshPro",
         "Unity.RenderPipelines.Universal.Runtime",
-        "Unity.InputSystem"
+        "Unity.InputSystem",
+        "UIFrame.Sqlite"
     ],
     "includePlatforms": [],
     "excludePlatforms": [],

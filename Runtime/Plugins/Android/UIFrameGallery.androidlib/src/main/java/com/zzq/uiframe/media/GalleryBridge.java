@@ -81,6 +81,7 @@ public final class GalleryBridge {
             try {
                 job.check(); JSONObject result;
                 switch (op) {
+                    case "imagesOpen": case "imagesNext": case "imagesClose": case "observe": case "unobserve": case "drain": case "stat": result=GalleryIndex.call(job);break;
                     case "access": result = response("ok").put("access", access()); break;
                     case "albums": result = library(job, true); break;
                     case "images": result = library(job, false); break;

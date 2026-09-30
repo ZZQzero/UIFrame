@@ -43,7 +43,7 @@ namespace
     uf_completion call(uint64_t client, uint64_t db, uint32_t kind, const std::vector<uint8_t> &payload = {})
     {
         uint64_t operation = 0;
-        expect(ufsqlite_submit(client, db, kind, payload.data(), payload.size(), 1, 4096, 5000, &operation) ==
+        expect(ufsqlite_submit(client, db, kind, payload.data(), payload.size(), kind == UF_CLOSE ? 0 : 1, kind == UF_CLOSE ? 0 : 4096, 5000, &operation) ==
                    UF_OK,
                "admission failed");
         uf_completion result{};

@@ -1,12 +1,14 @@
 # 长期照片备份与图库性能实施计划
 
-日期：2026-09-30  
-状态：实施中。通用SQLite核心已有代码与桌面验证；L0已加入两库SQL schema和1万 / 10万 / 100万历史基准，照片运行路径尚未接入。下文的图库、缓存、共享备份仓库、批量操作与清理接口仍是待实现契约，移动端指标未验收。  
+日期：2026-09-30
+状态：代码已接入，发布验收未完成（2026-10-01更新）。共享 BackupRepository、图库索引、缩略图缓存、批量操作、清理及服务器 TTL 均已实现；当前运行接口见 Gallery.md。桌面行为、进程中断和移动端发布构建已有证据，真机及长期压力门槛仍未通过。
 适用范围：UIFrame / Unity 6000，Android、iOS，以及现有桌面目录与 Editor 验证路径。
 
 本文落实 SQLite、图库增量刷新、缩略图缓存、批量任务管理和清理策略。基础能力与现有接口见 [Gallery.md](Gallery.md)，已执行验证见 [GalleryValidation.md](GalleryValidation.md)，早期总体方案见 [GalleryImplementationPlan.md](GalleryImplementationPlan.md)。本轮相关存储、并发和生命周期决策以本文为准。
 
 通用数据库能力单独落在 Runtime/Sqlite，见 [Sqlite 模块说明](../Runtime/Sqlite/README.md)和[实施计划](../Runtime/Sqlite/ImplementationPlan.md)。连接、事务、查询、取消与快照由通用模块负责，本文只定义图库与照片备份的业务存储；游戏存档等其他业务可以独立使用同一模块。
+
+执行记录（2026-10-01）：通用核心使用 ABI 3，业务仓库使用 ABI 1；C#、Android、iOS 已接入同一份原生业务状态机。四目标产物可复现构建，照片任务 / 策略 / 基线 / 回执的 JSON 持久化及全量 GetTasks 已移除。构建和桌面测试不能代替下列阶段的真机与长时门槛。
 
 ## 1. 成功标准与范围
 
@@ -23,9 +25,9 @@
 
 按已确认要求，直接替换持久化实现：不增加旧 JSON 的识别、读取、导入、迁移或双写代码，也不保留第二种任务存储后端。HTTP 和桥接消息仍可使用 JSON。当前格式的异常退出恢复属于必要功能。
 
-## 2. 已核对的起点
+## 2. 实施前基线（历史对照）
 
-| 模块 | 当前实现 | 本轮需要解决的问题 |
+| 模块 | 实施前实现 | 本轮解决的问题 |
 | --- | --- | --- |
 | ImageBackupService | 任务逐文件 JSON，启动加载全部任务；扫描基线与回执读取到字典 | 文件数量、启动读取、历史常驻内存、全量快照 |
 | AutomaticImageBackup | 周期性分页遍历来源，按来源版本记录跳过已处理项 | 每轮仍枚举整个范围，没有系统变化监听 |
@@ -120,7 +122,7 @@ BackupRepository 属于照片业务模块，其 SQL、schema 和状态转换只�
 
 ### 5.1 接收、交接、完成
 
-1. C# 调用 BackupRepository 登记带 OperationId 的准备操作，逐文件准备并流式计算哈希；文件刷盘、落到最终私有位置后，调用 CommitPreparedBatch，在一个 catalog 事务中提交本批任务及文件归属。本批项数、字节和实际 SQL 数受预算约束；大量照片分批接收，不能承诺跨批原子成功，也不能用“200 项”替代通用模块“200 条 SQL”的计算。提交前确定失败才清理未移交文件；提交结果不明时保留文件并按 OperationId 核对。
+1. C# 调用 BackupRepository 登记带 OperationId 的准备操作，逐文件准备并流式计算哈希；文件刷盘、落到最终私有位置后，调用 Accept，在一个 catalog 事务中提交本批任务及文件归属。本批项数、字节和实际 SQL 数受预算约束；大量照片分批接收，不能承诺跨批原子成功，也不能用“200 项”替代通用模块“200 条 SQL”的计算。提交前确定失败才清理未移交文件；提交结果不明时保留文件并按 OperationId 核对。
 2. 自动发现通过同一仓库命令保存候选元数据，受暂存容量约束逐项准备；空间不足保留待准备候选，不提前复制整库原图。
 3. 准备传输时，BackupRepository 在 catalog 中保存任务提交意图、执行代次、不可变文件和会话身份；平台执行器在事务之外创建 / 唤醒系统任务。
 4. 平台报告系统任务关联。相同“仓库 ID + 任务 ID + 代次”的重复事件由仓库幂等处理；参数不一致明确失败。恢复时查询系统任务并核对关联，不能仅凭提交调用没有应答就再次创建传输。
@@ -235,25 +237,27 @@ operation_items 保存任务身份与必要结果摘要，不通过外键级联�
 
 本轮不承诺元数据磁盘永远恒定：备份事实可能随来源版本持续增长。主要目标是查询与内存有界，并通过明确的范围停用 / 重置操作管理不再需要的记录。
 
-## 6. 拟定 API 与接入方式
+## 6. 已实现 API 与接入方式
 
-以下名称为实施约定草案，不能作为当前已存在的 API 调用：
+以下列出当前入口；准确重载与调用示例见 Gallery.md：
 
 | 入口 | 返回 / 承诺 |
 | --- | --- |
 | ImageBackupService.QueryTasksAsync(query, token) | 当前页、下一游标；不生成全历史列表 |
-| ImageBackupService.GetSummaryAsync(token) | 各状态计数、已确认字节与等待原因 |
-| ImageBackupService.QueryBackupsAsync(query, token) | 本地确认备份回执的分页查询，独立于任务历史 |
+| ImageBackupService.GetSummaryAsync(token) | 各状态计数与全局暂停；字节占用另由维护接口提供，具体任务原因通过分页读取 |
+| ImageBackupService.QueryBackupsAsync(pageSize, cursor, token) | 本地确认备份回执的分页查询，独立于任务历史 |
 | ImageBackupService.DownloadBackupAndVerifyAsync(backupId, destination, token) | 从同账号回执取得预期大小 / 哈希并下载校验，不依赖任务仍存在 |
 | ImageBackupService.SubmitOperationAsync(command, token) | command 包含预先确定的 OperationId；持久受理后进入 Selecting；提交前取消无操作，提交后返回已确定 ID；不承诺此时已固定全部目标 |
-| ImageBackupService.QueryOperationAsync(id, cursor, token) | 阶段、选择进度、逐项结果及总体是否结束；结果过期明确报告 |
+| ImageBackupService.QueryOperationAsync(id, cursor, pageSize, token) | 阶段、选择进度、逐项结果及总体是否结束；结果过期明确报告 |
 | ImageBackupService.WaitOperationAsync(id, token) | 等待结束；取消等待不撤销已受理操作 |
-| ImageLibraryIndex.QueryAsync(query, token) | 授权范围内的元数据页与索引代次 |
+| ImageLibraryIndex.QueryAsync(scope, pageSize, cursor, token) | 授权范围内的元数据页与索引代次 |
 | ImageLibraryIndex.RefreshAsync(scope, token) | 完成本次核对；需要继续处理的新变化另行报告 |
-| ImageLibraryIndex.Watch(scope) | 可释放订阅；提供变化批次、权限变化及 RequiresRefresh |
+| ImageLibraryIndex.Watch(scope, callback) | 可释放订阅；提供变化批次、权限变化及 RequiresRefresh |
 | ImageThumbnailCache.AcquireAsync(image, options, token) | 独立 ImageTexture 租约，命中时复用底层资源 |
 | BackupMaintenance.PreviewAsync(policy, token) | 分类占用与当前可清理候选摘要 |
 | BackupMaintenance.RunAsync(policy, token) | 实际清理结果；删除前重新验证候选资格 |
+
+接口收敛：汇总只读取持久计数与队列暂停，不混入瞬时系统网络状态；容量统计和逐任务等待原因分别由维护、任务页提供。任务变化使用 ReadChangesAsync 游标读取，图库 Watch 提供生命周期订阅。
 
 任务变化通知与图库通知共用“有序变化批次 + 过期后刷新”的消费方式，不共用图片处理队列。UI 订阅由面板作用域释放，持久仓库和原生传输由应用服务拥有。
 
@@ -358,13 +362,27 @@ L0 若受设备或构建依赖限制，记录具体阻塞项；可以完成独�
 
 ## 10. 开始执行的第一批任务
 
-2026-09-30进展：`catalog.sql` / `library.sql`已通过共享引擎建表与关键约束测试；当前catalog测试数据已完成1万、10万、100万规模基准，查询使用tasks_state_page索引。尚未实现共享BackupRepository与原生启动定位，因此L0.3 / L0.4及整个L0不标完成。详见[通用模块验证记录](../Runtime/Sqlite/Validation.md)。
+2026-10-01 对照结果：
 
-- [ ] L0.1 记录当前工具链、活动目标、仓库数据形态和现有回归结果；保存只读性能基准。
-- [ ] L0.2 复用 Runtime/Sqlite 的 S0 绑定验证与版本记录；确认 S1–S2 就绪后再接入 L1，不在照片模块重新封装通用读写。
-- [ ] L0.3 提交 library / catalog 的 SQL schema、索引、统一 BackupRepository 命令契约、原生启动定位和中断窗口测试。
-- [ ] L0.4 用当前格式构造1万和10万条基准数据；确定页缓存与工作队列容量，不创建任何旧格式兼容测试。
-- [ ] L1.1 实现仓库生命周期、身份、事务与文件归属，先替换手动接收 / 上传，再替换自动扫描持久化。
-- [ ] L1.2 两端平台适配与 C# 都接入同一个 BackupRepository，移除重复状态持久化，跑完无 Unity 启动和交接中断矩阵后再开放下一阶段。
+| 阶段 | 已落地 | 仍需验收 |
+| --- | --- | --- |
+| L0 / L1 | 两库 schema、共享仓库 ABI、私有根定位、唯一引擎链接；准备 / 文件归属 / 代次 / 回执；移除旧持久化；7个实际杀进程恢复窗口 | Android / iOS 无 Unity 回调、锁屏与磁盘故障的完整设备矩阵 |
+| L2 | 键分页、汇总计数、变化序号、持久 discoveries、独立回执下载；实际仓库百万任务桌面基准 | 最低手机冷启动、Unity 托管堆与帧延迟 |
+| L3 | MediaStore / PhotoKit 观察者、目录监听、范围代次、完整核对、可恢复基线与范围重置 | 部分授权、云端照片、系统通知溢出和设备图库压力 |
+| L4 | 共享租约、同键合并、独立取消、LRU、请求预算；Editor 分页列表使用共享预览；100等待者行为测试 | 产品虚拟列表在5000张照片、10轮滚动下的纹理和进程峰值 |
+| L5 | 持久批量筛选 / 执行 / 结果；退出交接窗口唤醒；任务中心分页与单独全局暂停 | 十万目标混合负载、真机迟到回调与 UI 帧预算 |
+| L6 | 分页保留 / 清理、空间预览、失败显式重试、checkpoint；本机 TTL 与活跃上传互斥 | 手机低存储空间、长时间 WAL 和后台资源竞争 |
+| L7 | 文档、示例、来源校验、四目标库、Android 发布 APK、iOS 设备目标链接 | Windows 实际运行、签名安装、设备矩阵及24小时稳定性 |
 
-每阶段交付代码、对应测试、实际使用文档和验证记录。所有新增默认值、限制范围、成功确定点及解除条件同步写入 Gallery.md；本计划中的勾选状态仅在对应门槛完成后更新。通用数据库的商业发布还需通过 Runtime/Sqlite 计划中的帧预算、原生 / 托管内存、ABI、符号共存和进程中断门槛，不能只用本页照片功能测试替代。
+落实后的默认值和规则：准备批次最多32张；图库 / 任务页最多200项；批量选择128项、执行32项；备份命令输入 / 输出各1 MiB，进程最多16个同时受理命令。自动循环由通知驱动增量处理，并按配置周期完整核对；设备后台只负责已接受文件的传输。系统执行者已经消失且服务器结果未知时进入 NeedsAttention，不猜测重新上传。
+
+维护优先回收文件，再清理符合保留策略的任务，随后过期操作明细与废弃扫描元数据。默认每轮最多200个逻辑项目 / 元数据行、100 ms；单个不可中断文件操作可能超过时间片。操作头保留ID、动作、指纹和结果摘要，过期后删除 criteria 和目标明细。预览中的可回收字节是待清理意图的上限，实际释放前再次检查占用。
+
+- [x] L0.1 已记录当前宿主工具链与桌面基准；最低真机清单仍待项目提供。
+- [x] L0.2 已复用唯一 SQLite 核心，不另建通用存储后端。
+- [x] L0.3 已提交两库 schema、原生命令契约和桌面进程中断验证；设备回调矩阵另列。
+- [x] L0.4 已用实际仓库构造1万 / 10万 / 100万历史并测量，未创建旧格式兼容测试。
+- [x] L1.1 已替换手动接收与自动发现持久化，准备身份可独立核对。
+- [ ] L1.2 平台代码已共用仓库；无 Unity 的系统启动 / 回调与交接中断完整设备矩阵未验收。
+
+上述勾选表示具体实施项完成，不代表 L0–L7 商业发布门槛全部通过。当前证据、重现命令与剩余项目见 [GalleryValidation.md](GalleryValidation.md)。

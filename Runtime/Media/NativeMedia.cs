@@ -18,13 +18,13 @@ namespace Game.Media
     [Serializable] internal sealed class MediaItem
     {
         public string id, name, mime, path, version, source;
-        public int width, height, count = -1;
+        public int width, height, kind, count = -1;
         public long size = -1;
     }
     [Serializable] internal sealed class MediaResponse
     {
         public string status, code, error, access;
-        public bool more;
+        public bool more,hasNext,requiresReconcile;
         public MediaItem[] items;
     }
 
@@ -59,6 +59,7 @@ namespace Game.Media
             {
                 token.ThrowIfCancellationRequested();
                 if (!quitRegistered) { Application.quitting += CancelAll; quitRegistered = true; }
+                if(active.Count>=32)throw new GalleryException("MediaQueueFull","At most 32 native media requests may be active.");
                 Start(JsonUtility.ToJson(request)); active.Add(request.id);
             }
             catch { if (!string.IsNullOrEmpty(request.output)) ImagePaths.CleanAfterFailure(request.output); throw; }

@@ -271,6 +271,92 @@ static NSDictionary *UFMCopyImage(UFMJob *job, NSString *source, NSString *desti
         }
     } @finally { [input close]; [output close]; }
 }
+static PHFetchResult<PHAsset*> *UFMFetch(NSString *album) {
+    if(!album.length)return [PHAsset fetchAssetsWithOptions:UFMImageOptions()];
+    PHAssetCollection *collection=[PHAssetCollection fetchAssetCollectionsWithLocalIdentifiers:@[album] options:nil].firstObject;
+    if(!collection)@throw [NSException exceptionWithName:@"SourceUnavailable" reason:@"Album is no longer accessible" userInfo:nil];
+    return [PHAsset fetchAssetsInAssetCollection:collection options:UFMImageOptions()];
+}
+static NSDictionary *UFMAssetItem(PHAsset *asset) {
+    NSString *name=[PHAssetResource assetResourcesForAsset:asset].firstObject.originalFilename?:@"image";
+    return @{@"id":asset.localIdentifier,@"name":name,@"mime":UFMMime(name.pathExtension),@"size":@(-1),@"width":@(asset.pixelWidth),@"height":@(asset.pixelHeight),@"version":[NSString stringWithFormat:@"%.6f",asset.modificationDate.timeIntervalSince1970]};
+}
+static NSObject *UFMIndexGate;
+static NSMutableDictionary<NSString*,NSMutableDictionary*> *UFMScans;
+@interface UFMLibraryObserver:NSObject<PHPhotoLibraryChangeObserver>
+@property NSString *album;
+@property PHFetchResult<PHAsset*> *fetch;
+@property NSMutableDictionary<NSString*,NSDictionary*> *pending;
+@property BOOL reconcile;
+@end
+static NSMutableDictionary<NSString*,UFMLibraryObserver*> *UFMObservers;
+@implementation UFMLibraryObserver
+- (void)photoLibraryDidChange:(PHChange*)change {
+    @synchronized(UFMIndexGate) {
+        PHFetchResultChangeDetails *details=_fetch?[change changeDetailsForFetchResult:_fetch]:nil;
+        if(!details || !details.hasIncrementalChanges || details.insertedIndexes.count+details.changedIndexes.count+details.removedIndexes.count+_pending.count>1024) {
+            _reconcile=YES;[_pending removeAllObjects];
+            @try {_fetch=details?details.fetchResultAfterChanges:UFMFetch(_album);} @catch(NSException *error){_fetch=nil;}
+            return;
+        }
+        PHFetchResult<PHAsset*> *before=_fetch;_fetch=details.fetchResultAfterChanges;
+        if(_reconcile)return;
+        [details.removedIndexes enumerateIndexesUsingBlock:^(NSUInteger index,BOOL *stop){
+            PHAsset *asset=before[index];self.pending[asset.localIdentifier]=@{@"id":asset.localIdentifier,@"kind":@3};
+        }];
+        for(NSIndexSet *set in @[details.insertedIndexes?:NSIndexSet.indexSet,details.changedIndexes?:NSIndexSet.indexSet]) {
+            [set enumerateIndexesUsingBlock:^(NSUInteger index,BOOL *stop){
+                PHAsset *asset=self.fetch[index];NSMutableDictionary *item=[UFMAssetItem(asset) mutableCopy];item[@"kind"]=@1;self.pending[asset.localIdentifier]=item;
+            }];
+        }
+    }
+}
+@end
+static NSDictionary *UFMIndex(UFMJob *job) {
+    static dispatch_once_t once;dispatch_once(&once,^{UFMIndexGate=[NSObject new];UFMScans=[NSMutableDictionary new];UFMObservers=[NSMutableDictionary new];});
+    @synchronized(UFMIndexGate) {
+        NSString *op=job.request[@"op"],*identity=job.request[@"path"];
+        if([op isEqual:@"imagesClose"]){[UFMScans removeObjectForKey:identity];return @{@"status":@"ok"};}
+        if([op isEqual:@"unobserve"]){UFMLibraryObserver *observer=UFMObservers[identity];[UFMObservers removeObjectForKey:identity];if(observer)[PHPhotoLibrary.sharedPhotoLibrary unregisterChangeObserver:observer];return @{@"status":@"ok"};}
+        if([op isEqual:@"stat"] && [job.request[@"source"] isEqual:@"directory"]) {
+            NSError *error=nil;NSString *path=UFMSource(job,&error);UFMCheckIO(error);
+            NSDictionary *attributes=[[NSFileManager defaultManager] attributesOfItemAtPath:path error:&error];UFMCheckIO(error);
+            return @{@"status":@"ok",@"items":@[@{@"id":identity,@"version":[NSString stringWithFormat:@"%.6f:%@",[attributes[NSFileModificationDate] timeIntervalSince1970],attributes[NSFileSize]]}]};
+        }
+        NSString *access=UFMAccess();if(![access isEqual:@"Authorized"] && ![access isEqual:@"Limited"])return UFMError(@"PermissionDenied",@"Photo library read access is unavailable");
+        if([op isEqual:@"stat"]) {
+            PHAsset *asset=[PHAsset fetchAssetsWithLocalIdentifiers:@[identity] options:nil].firstObject;
+            return asset?@{@"status":@"ok",@"items":@[UFMAssetItem(asset)]}:UFMError(@"SourceUnavailable",@"Photo is no longer accessible");
+        }
+        if([op isEqual:@"imagesOpen"]) {
+            if(UFMScans.count>=16 || UFMScans[identity])return UFMError(@"ScanCapacity",@"Photo scan capacity or identity conflict");
+            UFMScans[identity]=[@{@"fetch":UFMFetch(job.request[@"album"]),@"offset":@0} mutableCopy];return @{@"status":@"ok"};
+        }
+        if([op isEqual:@"imagesNext"]) {
+            NSMutableDictionary *scan=UFMScans[identity];if(!scan)return UFMError(@"InvalidScan",@"Photo scan no longer exists");
+            PHFetchResult<PHAsset*> *fetch=scan[@"fetch"];NSUInteger start=[scan[@"offset"] unsignedIntegerValue],end=MIN(start+200,fetch.count);NSMutableArray *items=[NSMutableArray new];
+            for(NSUInteger i=start;i<end;++i){if(job.canceled)return @{@"status":@"canceled"};[items addObject:UFMAssetItem(fetch[i])];}
+            scan[@"offset"]=@(end);return @{@"status":@"ok",@"items":items,@"hasNext":@(end<fetch.count)};
+        }
+        if([op isEqual:@"observe"]) {
+            if(UFMObservers.count>=16 || UFMObservers[identity])return UFMError(@"ObserverCapacity",@"Photo observer capacity or identity conflict");
+            UFMLibraryObserver *observer=[UFMLibraryObserver new];observer.album=job.request[@"album"];observer.reconcile=YES;observer.pending=[NSMutableDictionary new];
+            [PHPhotoLibrary.sharedPhotoLibrary registerChangeObserver:observer];
+            @try{observer.fetch=UFMFetch(observer.album);UFMObservers[identity]=observer;}
+            @catch(NSException *error){[PHPhotoLibrary.sharedPhotoLibrary unregisterChangeObserver:observer];@throw;}
+            return @{@"status":@"ok"};
+        }
+        if([op isEqual:@"drain"]) {
+            UFMLibraryObserver *observer=UFMObservers[identity];if(!observer)return UFMError(@"InvalidObserver",@"Photo observer no longer exists");
+            NSMutableArray *items=[NSMutableArray new];NSMutableArray *keys=[NSMutableArray new];
+            for(NSString *key in observer.pending){[keys addObject:key];[items addObject:observer.pending[key]];if(items.count==32)break;}
+            [observer.pending removeObjectsForKeys:keys];BOOL reconcile=observer.reconcile;observer.reconcile=NO;
+            return @{@"status":@"ok",@"items":items,@"requiresReconcile":@(reconcile),@"hasNext":@(observer.pending.count!=0)};
+        }
+        return UFMError(@"UnsupportedOperation",op);
+    }
+}
+
 static BOOL UFMFitsPixels(UFMJob *job, double w, double h) {
     double scale=MIN(1,[job.request[@"edge"] doubleValue]/MAX(w,h));
     return MAX(1,floor(w*scale))*MAX(1,floor(h*scale)) <= [job.request[@"maxPixels"] doubleValue];
@@ -494,7 +580,8 @@ extern "C" void UFMStart(const char *json) {
             if(![[NSBundle mainBundle] objectForInfoDictionaryKey:@"NSPhotoLibraryUsageDescription"]) { UFMComplete(job,UFMError(@"InvalidConfiguration",@"Photo library usage description is missing.")); return; }
             [PHPhotoLibrary requestAuthorizationForAccessLevel:PHAccessLevelReadWrite handler:^(PHAuthorizationStatus status) { UFMComplete(job,@{@"status":@"ok",@"access":UFMAccess()}); }];
         } else [UFMQueue addOperationWithBlock:^{ @autoreleasepool { @try {
-            if([op isEqual:@"albums"] || [op isEqual:@"images"]) UFMComplete(job,UFMLibrary(job));
+            if([@[@"imagesOpen",@"imagesNext",@"imagesClose",@"observe",@"unobserve",@"drain",@"stat"] containsObject:op]) UFMComplete(job,UFMIndex(job));
+            else if([op isEqual:@"albums"] || [op isEqual:@"images"]) UFMComplete(job,UFMLibrary(job));
             else if([op isEqual:@"directory"]) UFMComplete(job,UFMDirectory(job));
             else if([op isEqual:@"export"] || [op isEqual:@"preview"]) {
                 if ([job.request[@"source"] isEqual:@"file"] || [job.request[@"source"] isEqual:@"directory"]) {

@@ -14,7 +14,7 @@ import time
 class Completion(c.Structure):
     _fields_=[('size',c.c_uint32),('abi',c.c_uint32),('operation',c.c_uint64),('database',c.c_uint64),
               ('error',c.c_int32),('sqlite_code',c.c_int32),('committed',c.c_int32),('reserved',c.c_int32),
-              ('data',c.c_void_p),('data_size',c.c_uint64),('message',c.c_char*256)]
+              ('phase',c.c_uint32),('data',c.c_void_p),('data_size',c.c_uint64),('message',c.c_char*256)]
 
 def text(value):
     value=value.encode('utf-8')
@@ -32,12 +32,12 @@ class Store:
         self.library.ufsqlite_wait.argtypes=[c.c_uint64,c.POINTER(Completion),c.c_uint32,c.c_uint32,c.POINTER(c.c_uint32)]
         self.library.ufsqlite_release_result.argtypes=[c.c_uint64,c.c_uint64]
         self.client=c.c_uint64()
-        assert self.library.ufsqlite_client_create(2,c.byref(self.client))==0
+        assert self.library.ufsqlite_client_create(3,c.byref(self.client))==0
         self.database=0
         _,self.database=self.wait(self.submit(1,struct.pack('<I',mode)+text(str(path))+struct.pack('<QQ',32*1024*1024,128*1024*1024)))
     def submit(self,kind,payload=b''):
         op=c.c_uint64()
-        rc=self.library.ufsqlite_submit(self.client,self.database,kind,payload,len(payload),200,4096,5000,c.byref(op))
+        rc=self.library.ufsqlite_submit(self.client,self.database,kind,payload,len(payload),0 if kind==5 else 200,0 if kind==5 else 4096,5000,c.byref(op))
         assert rc==0,rc
         return op.value
     def wait(self,operation):

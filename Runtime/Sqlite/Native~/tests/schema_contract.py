@@ -2,6 +2,7 @@
 from pathlib import Path
 import sys
 import tempfile
+import sqlite3
 from process_recovery import Store
 
 PACKAGE=Path(__file__).resolve().parents[4]
@@ -11,7 +12,11 @@ def main(library):
         for name,relative in [('catalog','Runtime/MediaBackup/Native~/schema/catalog.sql'),('library','Runtime/MediaStorage/Schema~/library.sql')]:
             db=Store(library,Path(temporary)/(name+'.sqlite'),0)
             sql=(PACKAGE/relative).read_text()
-            db.sql(*[s.strip() for s in sql.split(';') if s.strip()])
+            statements=[];pending=''
+            for line in sql.splitlines(True):
+                pending+=line
+                if sqlite3.complete_statement(pending):statements.append(pending);pending=''
+            db.sql(*statements)
             assert db.scalar('PRAGMA user_version')==1
             if name=='catalog':
                 db.sql("INSERT INTO tasks(id,batch_id,source_id,content_version,state,created_utc,updated_utc) VALUES('t1','b','source','v1',3,1,1)",

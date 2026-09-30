@@ -1,30 +1,26 @@
-# 图片、相册与备份使用说明
+# 图片、图库与长期备份
 
-实现入口位于 `Game.Media` 与 `Game.Media.Backup`。系统选图不依赖 `UI.Init()`；创建 Texture / Sprite、调用原生桥接及备份服务入口要求 Unity 主线程。
+入口位于 `Game.Media`、`Game.Media.Backup`。所有公开入口在 Unity 主线程调用；文件复制、哈希、数据库和平台后台网络在工作线程运行。无需调用 `UI.Init()`。SQLite 是独立的 `Runtime/Sqlite` 模块；照片仓库通过独立原生库复用同一个引擎。
 
-## 当前支持情况
+## 当前实现与范围
 
-| 功能 | 当前实现 |
+| 能力 | 入口与约定 |
 | --- | --- |
-| Android 系统选图 | API 33+ Photo Picker；25–32 系统文档选择器；单选 / 多选 |
-| iOS 系统选图 | PHPicker；最低功能版本 iOS 14，当前宿主为 iOS 15 |
-| Unity Editor 选图 | 单张文件窗口；显式多文件导入可用 |
-| 相册访问与查询 | Android MediaStore / iOS PhotoKit；权限查询、请求、相册及图片元数据快照 |
-| 普通目录 | 文件枚举、可选递归、快照分页；默认跳过符号链接 |
-| 外部目录 | Android SAF 持久 URI / iOS 目录书签；显式选择、恢复与枚举 |
-| 预览 / 文件导出 | 移动端原生缩采样；PNG / JPEG 转码；保留提供者字节 |
-| 手动备份 | 持久文件与任务、分片上传、服务端校验、去重、下载验证 |
-| 自动备份 | 应用运行期间的目录 / 授权相册扫描、历史基线、持久策略、条件上传 |
-| 原生后台传输 | Android JobScheduler / iOS 后台 URLSession；显式启用后传输已入队文件，系统决定执行时机 |
-| 后台发现新照片 | 尚未实现；`SupportsBackgroundDiscovery` 返回 false |
+| 系统选图 | `GameGallery.PickImagesAsync`，系统选择器负责选图预览；通常无需整库读取授权 |
+| 相册 / 目录 | PhotoKit、MediaStore、普通目录、SAF / iOS 目录书签 |
+| 按页读取 | `VisitImagesAsync` 每次最多200项；两端按需读取下一页，不先序列化整个照片库 |
+| 图库索引 | `ImageLibraryIndex`，独立的 library.sqlite；版本、范围代次和持久变化游标 |
+| 共享缩略图 | `ImageThumbnailCache`，同键合并、独立取消、纹理租约和空闲 LRU |
+| 长期备份 | `ImageBackupService`，按账号的 catalog.sqlite；手动准备、分页查询、独立回执 |
+| 后台传输 | Android JobScheduler / iOS URLSession，三端共用原生 BackupRepository 状态机 |
+| 自动发现 | `AutomaticImageBackup`，前台监听与周期核对、历史基线和持久待准备候选 |
+| 批量与清理 | 固定 OperationId、逐页目标选择、执行代次、文件与历史清理 |
 
-整库处理推荐 `GameGallery.VisitImagesAsync`、`GameImageDirectory.VisitAsync` 或 `ImageDirectoryHandle.VisitAsync`：每页最多 200 条，等待当前回调完成后再交付下一页；回调返回 `true` 继续、`false` 正常停止，访问方法返回是否完成整个遍历。回调异常保留原异常并结束遍历，Token 取消仍抛取消异常。普通目录在工作线程逐页枚举；移动端先将枚举结果按页暂存到磁盘，再逐页交付和释放，不在原生与 C# 层各积累一份整库 JSON。单页编码上限 16 MiB，超出明确失败；暂存占用随元数据总量增长，正常完成、取消或失败会清理，进程异常退出可能留下由系统管理的临时文件。它仍不是数据库游标式的按需枚举。
+本轮只有当前 SQLite 数据格式，不扫描、兼容、迁移或双写旧 JSON。JSON 仍用于 HTTP、系统桥接、服务器凭据配置和构建清单。没有后台发现新照片的系统服务；`SupportsBackgroundDiscovery=false`。操作系统决定后台上传机会，强制结束应用后不承诺继续执行。
 
-`QueryImagesAsync` / `QueryAsync` 保留完整快照语义，因此内存仍随照片数增长；`GetPage` 只是读取已有快照。尚未提供系统变化通知和跨页面共享的缩略图缓存。图库变化后请重新查询；旧引用读取失败会传播。外部目录需要实际设备验证授权的持久性，不保证所有文件提供者都支持相同能力。
+`GameGallery.QueryImagesAsync` 和 `GameImageDirectory.QueryAsync` 是明确的全量快照 API，内存随元数据条数增长；大型图库使用下述索引分页。授权目录提供者按完整核对处理；SAF / 目录书签枚举仍有提供者及元数据临时文件成本，不标为可靠增量。
 
-实施计划中的后台发现、变化通知、有界共享缓存及完整真机矩阵仍是后续工作，不能把已有编译或本机测试当作这些功能已完成。
-
-SQLite、图库增量刷新、共享缩略图、批量任务管理与清理策略的实施顺序和验收标准见 [长期照片备份与图库性能实施计划](GalleryLongTermBackupPlan.md)。该文档是待实施计划，不改变本页当前接口与能力说明。
+构建与真机验收状态见 [GalleryValidation.md](GalleryValidation.md)。计划中的性能数字为目标，不能从桌面编译或缓存预算推断手机峰值内存。
 
 ## 系统选择与图片所有权
 
@@ -117,157 +113,159 @@ iOS 目录书签按 SHA-256 标识保存一次，每个图片引用只包含短�
 
 授权失效、书签过期或文件被删除会明确失败，业务可由用户主动重新选择目录。目录扫描与照片库查询都不修改或删除用户原图。
 
-## 本机备份服务
+## 图库索引与监听
 
-需要 Python 3.9 或更高版本，无额外包。以下命令在包目录运行，数据目录可替换为自己的绝对路径：
+```csharp
+var library = await ImageLibraryIndex.OpenAsync(
+    Path.Combine(Application.persistentDataPath, "Gallery", "library.sqlite"));
+var scope = new ImageLibraryScope(ImageLibrarySourceKind.PhotoLibrary);
+await library.RefreshAsync(scope, token);
+var first = await library.QueryAsync(scope, pageSize: 100, token: token);
+var next = first.Next == null ? null : await library.QueryAsync(scope, 100, first.Next, token);
+using var subscription = library.Watch(scope, batch => { /* 更新可见页面 */ });
+```
+
+照片库授权由 `RequestLibraryAccessAsync` 显式请求；刷新、监听和自动备份不会主动弹授权框。索引每页最多200条，每次写入最多32张元数据。游标绑定库身份、代次、范围修订及权限代次；变化日志被截断或范围变化时返回 `RequiresRefresh`，旧分页游标明确失败。
+
+`Watch` 使用300ms安静窗口、最长2s合并连续事件，刷新不并发重入。普通目录分别监听图片文件和目录结构，忽略数据库等非图片文件；最多保留1,024个变化身份，溢出要求完整核对。Android使用 ContentObserver，支持系统版本时同时检查 MediaStore version / generation；iOS使用 PhotoKit fetch result 的增量变化。重开、恢复前台、权限或连续性变化触发完整核对。增量读取和系统权限仍需真机验收。
+
+每个索引最多16个观察范围，每范围32个订阅。失败只停止对应范围的自动驱动，`GetWatchFailure` 可查询；调用 `RequestRefresh` 显式重新开始。完整枚举失败不提交缺失删除；已成功写入的页面不回滚。订阅回调异常保留错误，不重放该回调。`PruneChangesAsync` 每次最多清200条日志，旧消费者必须核对刷新。
+
+应用服务退出时 `await library.ShutdownAsync()`，面板仅释放订阅。索引与账号备份库分别管理生命周期。
+
+## 共享缩略图与内存
+
+```csharp
+var cache = new ImageThumbnailCache(); // 应用服务拥有
+var lease = await cache.AcquireAsync(image,
+    new ImagePreviewOptions { MaxEdge = 256, Readable = false }, token);
+rawImage.texture = lease.Texture;
+// 离屏或换图时：
+rawImage.texture = null;
+lease.Dispose();
+// 应用服务退出：
+await cache.ShutdownAsync();
+```
+
+缓存键包括来源身份、内容版本、尺寸、像素预算和 Readable。同键并发共享一次处理，每个等待者独立取消。最后等待者取消时先移除可复用项；同键可以立即发起新代次，旧完成不会覆盖它。加载本身拥有来源租约，选择集合释放后已受理读取仍可完成；释放后不能再新建请求，包括缓存命中和加入已有在途请求。
+
+空闲纹理默认预算32MiB，最多128个可保留键，按 LRU 回收。大于预算的结果仍按请求返回，最后使用者释放后销毁。`Statistics` 区分空闲、在用、待销毁字节和全局请求数量；这些不是整个进程的内存上限。
+
+缓存、直接预览和导出共用请求准入：最多128个在途键、512个等待者、1MiB请求元数据；在保留来源前检查，超限报 `ImageQueueFull`，释放或等待已有请求后可再次申请。解码并发保持1。关闭取消未完成请求、释放空闲项，已交付租约仍可安全使用并自行释放。业务不得直接 Destroy 共享 Texture / Sprite。
+
+`RefreshAsync(scope, token, completeReconciliation: true)` 明确要求完整核对；自动循环在变化通知时使用增量刷新，并按 scanIntervalSeconds 周期完整核对。
+
+来源版本未知时缓存拒绝受理；原地修改且修改时间 / 大小不变时，业务调用 `Invalidate(image)`。文件的时间与长度不是密码学内容证明；备份确认另行使用流式 SHA-256。首次只提供内存缓存。
+
+## 启动备份与接收图片
+
+```csharp
+bool native = Application.platform == RuntimePlatform.Android ||
+              Application.platform == RuntimePlatform.IPhonePlayer;
+var backup = await ImageBackupService.CreateAsync(new BackupConfiguration {
+    ServerUrl = "https://your-backup.example",
+    Account = accountId,
+    AccessToken = () => currentAccessToken,
+    StorageDirectory = native ? ImageBackupService.NativeBackupStorageDirectory :
+        Path.Combine(Application.persistentDataPath, "PhotoBackup"),
+    EnableNativeBackgroundTransfer = native,
+    NativeWifiOnly = true
+});
+string operationId = Guid.NewGuid().ToString("N"); // 调用方在提交前保存
+var ids = await backup.EnqueueAsync(operationId, selection.Items, token);
+await backup.ProcessAsync(token);
+```
+
+`StorageDirectory` 是根目录。实际路径由标准化服务器地址和账号的 SHA-256 分隔；后台模式必须使用平台私有根，让系统能在 Unity 启动前定位 catalog。服务器、账号与目录身份不匹配明确失败。使用异步工厂，没有同步构造或全量 `GetTasks` 兼容入口。
+
+一次原子准备批次为1–32张，大量照片分批提交。先持久记录准备ID和字节预留，再流式复制、SHA-256、刷盘和检查来源版本，全部就绪后一次事务接受整批。默认暂存预算与单文件上限均为512MiB，另保留16MiB文件系统余量。未知长度按剩余预算预留；失败的部分文件也有持久清理归属。空间不足保留自动发现候选，不删除原图或未备份文件。
+
+接受结果不明时，保留原 OperationId，使用 `QueryPreparationAsync` 查询 Accepted / Abandoned 和原任务ID；不要另造ID重发。已接受ID在任务历史删除后仍可核对。普通 `EnqueueAsync(images, token)` 适合无需跨中断核对的临时交互。
+
+数据库参数 / 结果每次上限1MiB，返回最多200行；原生最多16条并行准入命令、64个附件。一个 catalog 只有一个准备者，原生后台附件独立保有资源；C#关闭不会取消系统已受理传输。`ShutdownAsync` 等待自身操作结束后释放，`Dispose` 仅允许无活动操作时调用。
+
+## 分页、回执与结果核对
+
+```csharp
+var page = await backup.QueryTasksAsync(new BackupTaskQuery {
+    State = BackupState.Queued, PageSize = 100
+}, token);
+var summary = await backup.GetSummaryAsync(token);
+var receipts = await backup.QueryBackupsAsync(100, cancellationToken: token);
+await backup.DownloadBackupAndVerifyAsync(receipts.Items[0].BackupId,
+    absoluteDestination, token);
+```
+
+任务游标包含仓库、筛选条件及创建上界；状态实时变化，不宣称跨页冻结快照。汇总按状态持久计数，不加载历史字典。`ReadChangesAsync` 返回有序任务变化页；日志截断返回 `RequiresRefresh`。回执与来源版本关系独立保存，清理任务历史不丢失下载依据或自动判重事实。
+
+状态成功仅来自服务器确认身份、大小和 SHA-256，随后由共享仓库原子记录。HTTP响应丢失或格式错误不能证明服务器没提交，任务进入 `NeedsAttention`。`ReconcileTaskAsync` 按原幂等身份查询；已完成则保存回执，未完成则通过与提交互斥的服务端删除会话取得确定结果。失败保留待核对状态。`RetryAsync` 是显式再执行，继续使用原内容幂等身份，不自动删除未知结果。
+
+已声明的可选托管暂时故障重试最多5次，默认关闭；不与原生后台模式组合。所有网络请求有完整响应读取截止时间，默认2分钟；响应上限64KiB、分片上限4MiB。凭据回调异常终止当前处理并保留原异常。下载流式校验到临时文件，校验通过才发布，既有目标不覆盖。
+
+## 暂停、批量操作与后台
+
+`PauseAsync` 持久设置全局暂停并等待执行者停止 / 释放；取消等待不会撤销已经保存的暂停。`ResumeAsync` 只解除全局暂停。单项暂停不会被全局恢复清除；未知服务器结果需要核对，暂停并不等于取消远端提交。
+
+```csharp
+string id = await backup.SubmitOperationAsync(new BackupOperationCommand {
+    OperationId = Guid.NewGuid().ToString("N"),
+    Action = BackupAction.Pause,
+    State = BackupState.Queued
+}, token);
+var progress = await backup.QueryOperationAsync(id, cancellationToken: token);
+var finished = await backup.WaitOperationAsync(id, token);
+```
+
+操作包括 Resume、Pause、Cancel、Retry、RetryCleanup、ClearHistory。显式目标1–128个，或按状态筛选；不能同时传两者。Selecting 每页最多128个，Running 每页最多32个。筛选按逐页当时状态及提交创建上界进行；选择完毕后目标固定。WaitingForRelease 仍未完成，实际系统资源释放后才能结束。取消 Wait 只停止等待。相同ID相同参数返回原操作，参数不同拒绝；失败阶段不自动重跑；仓库已持久记录某个操作失败时，其余独立操作继续推进。无法确认持久结果或平台同步失败时停止当前驱动，等待者观察原错误，排除故障并关闭 / 重开服务后继续未失败阶段。
+
+逐项结果包括 Applied、AlreadySatisfied、NotApplicable、Missing、Failed、Pending、WaitingForRelease。清历史不会级联删除操作结果；明细过期后仍保留持久操作头和幂等依据，查询明确标记 `DetailsExpired`。查询未知ID返回 null。
+
+Android使用 JobScheduler 和 AndroidKeyStore，iOS使用后台 URLSession 和 Keychain；平台只负责调度、传输、凭据和实际资源释放，SQL及状态转换只有一份。iOS同时最多16个系统上传任务。上传切后台尽力继续；没有系统执行时间保证，用户强制停止或系统限制需重新打开应用。后台回调数据库失败不会报告成功，iOS仍释放系统 completion handler；排除持久错误后可显式 `RecoverNativeAsync`，未知服务器结果另行核对。
+
+## 自动备份
+
+```csharp
+var automatic = await AutomaticImageBackup.CreateAsync(backup, library);
+await automatic.ConfigureAsync(new AutomaticBackupPolicy {
+    enabled = true, sourceKind = BackupSourceKind.PhotoLibrary,
+    source = "", includeExisting = false, wifiOnly = true,
+    scanIntervalSeconds = 300
+}, token);
+await automatic.RunAsync(applicationToken);
+```
+
+Wi-Fi策略需要可验证的提供者；桌面可传自己的 `Func<bool>`。原生与自动备份网络策略必须一致。自动循环消费图库变化并按配置周期完整核对，最小周期30秒。目录需要递归时明确设置 `recursive`。
+
+首次不包含历史时，基线按页保存实际看到的来源版本，再短事务激活；中断未激活集合无排除效力。扫描期间新变化继续按持久日志消费。已发现候选按页判重，不逐张重复打开数据库或查询服务器能力。单张准备失败单独保存，可通过 `GetPreparationFailuresAsync` 分页查看并显式 `RetryPreparationFailuresAsync`；空间不足显示 `IsWaitingForCapacity`，候选保留。
+
+权限撤销使当前循环失败，并逐页暂停该范围尚未完成的任务；授权代次变化同样先暂停该范围既有任务，等待业务确认后显式恢复。范围成员变化通过移出事件处理，不删除服务器副本。恢复授权后显式确认范围再恢复对应任务。`ResetScopeAsync` 在循环停止后显式清除当前范围的基线和来源处置，保留确认回执与已接受任务；中断的重置必须继续完成，不能混入新扫描。
+
+## 清理与容量
+
+```csharp
+var maintenance = new BackupMaintenance(backup);
+var policy = new BackupRetentionPolicy(); // 30天 / 10,000条终结历史
+var preview = await maintenance.PreviewAsync(policy, token);
+var actual = await maintenance.RunAsync(policy, token);
+```
+
+每轮最多200个逻辑项目 / 元数据行，默认100ms时间片；单项原生事务/文件操作不能在任意指令中断。预览仅供展示，ReclaimableBytes 是待清理意图的字节上限，可能包含执行者尚未释放的文件；执行前仓库重新检查状态和引用。完成或取消的暂存文件仅在实际执行者与凭据释放后删除；失败 / 暂停 / 未知服务器结果不随成功历史回收。返回实际文件删除数量和字节，数据库删行不冒充物理空间释放。
+
+清理失败持久保存，不自动重试；调用 `RetryCleanupAsync` 或 RetryCleanup 批量操作。未记录失败的中断清理意图可以继续。可显式执行非阻塞 checkpoint。回执、排除基线、取消处置和操作ID等必要事实保留，元数据磁盘不承诺永远恒定。
+
+## 本机参考服务与构建
 
 ```sh
-python3 Tools~/BackupServer/server.py init --root /tmp/uiframe-backup-local
-python3 Tools~/BackupServer/server.py serve --root /tmp/uiframe-backup-local
+python3 Tools~/BackupServer/server.py init --root /absolute/private/backup
+python3 Tools~/BackupServer/server.py serve --root /absolute/private/backup
+# 显式启用未完成会话7天过期：
+python3 Tools~/BackupServer/server.py serve --root /absolute/private/backup --upload-ttl-days 7
 ```
 
-默认仅监听 `127.0.0.1:8787`。初始化生成 `credentials.json`，包含本机账号与随机访问令牌；把它填入编辑器调试窗口，不要提交该文件。服务使用 SQLite、磁盘内容文件和 Bearer 认证；客户端显式允许开发 HTTP 后才能连接本地 HTTP 地址。
+`init` 创建私有 credentials.json，仅在运行时提供账号和令牌，不提交Git。开发HTTP需要 `AllowDevelopmentHttp=true` 且地址为本机或明确局域网IP；设备访问电脑不能使用设备自己的127.0.0.1。正式部署使用HTTPS与项目认证。
 
-手机上的 `127.0.0.1` 指手机本身。真机联调需显式让服务监听可访问的本机网卡地址，配置客户端为电脑局域网地址，并配置开发构建的 HTTP 访问规则；本包不替项目放开所有明文网络。正式接入使用 HTTPS 和项目认证服务。
+TTL仅适用于未完成上传。上传、校验或提交中的会话不能被回收；先事务认领，禁止继续使用，再删除分片并提交完成。中断恢复同一清理意图，失败需要 `--retry-failed-cleanup` 显式处理。旧会话返回410，重新登记是显式操作，幂等身份保持；已完成副本和共享blob不受TTL影响。此服务为单进程本机参考实现，生产配额、认证、部署和灾备由项目配置。
 
-这是单进程本机参考服务：串行保护数据库与存储提交、支持内容去重和账号隔离；文件下载、请求体读取、分片文件写入及提交 SHA-256 校验在全局锁外执行；同一上传的修改通过有界分组锁串行，数据库操作仍受全局锁保护。分组碰撞可能串行少量无关上传，但不会形成全服务的文件校验锁。它不包含生产配额管理、分布式存储、令牌生命周期、运维监控或多副本容灾。服务数据库及对象文件应由部署方一起备份。它提供真实存储和下载验证，但不是已部署的线上服务。
+`Runtime/MediaBackup/Native~/build/build.py` 依赖对应目标的已验证 SQLite 构建；`install.py` 校验来源及依赖后安装。二进制位于 `Runtime/MediaBackup/Plugins/{macOS,Windows/x86_64,Android/arm64-v8a,iOS}`。构建处理器检查来源哈希、核心版本，自动复制iOS头文件并配置链接、框架和Android keep规则，无需另建原生App。
 
-协议 v1：
-
-| 方法与路径 | 职责 |
-| --- | --- |
-| `GET /v1/capabilities` | 协议版本、认证账号、分片与文件上限 |
-| `POST /v1/uploads` | 以 key / sha256 / size / source 建立或恢复上传；本机服务附带当前 `capabilities` |
-| `GET /v1/uploads/{key}` | 查询已确认偏移与提交结果 |
-| `PUT /v1/uploads/{key}?offset=N` | 顺序写入最多 4 MiB 分片 |
-| `PUT /v1/uploads/{key}/background` | 系统后台完整文件上传，SHA-256 校验后原子提交；需账号摘要头 |
-| `POST /v1/uploads/{key}/commit` | 完整校验并提交备份记录 |
-| `GET /v1/backups` | 列出当前账号的已提交记录 |
-| `GET /v1/backups/{key}/content` | 下载校验 |
-| `DELETE /v1/uploads/{key}` | 放弃未完成会话；不删除已完成备份 |
-
-目前单文件服务上限 512 MiB。不完整上传不会完成；客户端会保留错误及本地文件。未完成的服务端会话尚无自动过期回收，部署方应管理其存储。客户端取消保留会话身份，不自动声明远端没有副本。
-
-## 客户端持久队列
-
-推荐 `await ImageBackupService.CreateAsync(configuration, token)`：独占锁获取、历史读取和恢复在工作线程完成，返回后仍在 Unity 主线程使用服务。同步构造函数会阻塞调用线程加载队列，适合确定数据量很小的场景。取消打开过程会等待正在执行的文件工作释放仓库，不返回半初始化实例。示例已改用异步创建。
-
-服务器能力按服务实例（固定服务器和账号）保存在内存中。第一次真正需要提交新任务时查询一次，空队列、全部已完成或只唤醒已有原生任务不会查询。后续处理轮次复用；创建上传会话响应若附带当前协议的可选字段 `capabilities`，会验证并更新缓存。服务规则改变时可在空闲状态显式 `await backup.RefreshServerCapabilitiesAsync(token)`；失败会抛出，不自动重试任务。服务器仍逐次验证认证、大小和内容。客户端控制接口与错误响应使用流式读取，编码正文上限统一为 64 KiB，包含未知 Content-Length 的响应；超出会失败，不先缓冲完整响应。服务端需要对大清单分页，批量清单建会话接口尚未实现。
-
-图片下载在工作线程中按流读取，写入量最多为任务记录的已确认大小，最多多读 1 字节判断越界；边写入边计算 SHA-256，不再重读文件。长度与校验均通过后才发布目标文件，失败删除临时文件且不覆盖已有目标。`RequestTimeout` 默认 2 分钟，覆盖每次 C# HTTP 请求的发送、响应头与正文读取；截止时抛出 `TimeoutException`，调用方主动取消仍为取消异常。此配置不改变原生系统后台会话的调度时限。工作线程中的文件操作自己检查取消，结束后仍回到 Unity 主线程交付结果与清理。
-
-```csharp
-using Game.Media.Backup;
-
-var backup = await ImageBackupService.CreateAsync(new BackupConfiguration
-{
-    ServerUrl = "http://127.0.0.1:8787",
-    Account = "local-user",
-    StorageDirectory = System.IO.Path.Combine(Application.persistentDataPath, "MyBackup"),
-    AccessToken = () => tokenFromYourCredentialProvider,
-    AllowDevelopmentHttp = true,
-    EnableTransientRetries = true
-});
-
-var taskIds = await backup.EnqueueAsync(selection.Items, token);
-// 此后 selection 可释放，面板关闭不影响已接受任务的持久文件。
-await backup.ProcessAsync(token);
-var tasks = backup.GetTasks();
-await backup.DownloadAndVerifyAsync(taskIds[0], absoluteNewFilePath, token);
-// 应用服务结束时：取消在途操作，等待结束并释放仓库。
-await backup.ShutdownAsync();
-```
-
-一个存储目录只允许一个服务拥有，并固定绑定服务器与账号；不能换账号后接着使用旧队列。C# 队列 JSON 不保存访问令牌，由调用方提供认证服务 / 安全存储。启用原生传输时按下节规则保存用于已提交任务的凭据。
-
-`EnqueueAsync` 对一个批次先准备全部文件，成功提交后才返回 ID；失败不交付半批任务。已知大小先检查，实际复制过程持续检查单文件限制和剩余预算；普通文件直接写入备份暂存目录，同时计算 SHA-256，原生导出也直接写入该目录，避免先生成完整临时副本再复制。空间预算不足抛出 `BackupBudgetExceededException`（继承 IOException），需先释放队列空间再显式继续。队列采用批次目录原子移交、任务 JSON 原子替换和单写入者规则。文件预算默认 512 MiB；前台与 Android 上传并发为 1，iOS 每个网络会话限制同主机连接为 2；仅数据目录中的模块自有文件会被清理。
-
-`ProcessAsync` 处理当前符合条件的任务一轮，任务级失败保存在对应记录中，其他独立任务可以继续。`canTransfer` 或 `AccessToken` 业务回调抛错会立即终止本轮、保留原异常和堆栈，不进入传输重试；尚未处理的任务保持原状态。服务不可用、认证账号与配置不匹配、队列持久化失败等公共前置 / 仓库故障仍向调用方抛出。调用方必须检查每项状态，不能把 `ProcessAsync` 正常返回视为所有图片成功。
-
-支持 `PauseAsync`、`Resume`、`Retry(taskId)`、`Cancel(taskId)`。`IsPaused` 是整个队列的持久状态，与账号 / 服务器身份一并原子保存。暂停完成后可以继续准备新图片和自动扫描，但新任务及手动重试的任务保持 Paused，`ProcessAsync` 不提交上传；重开服务仍然暂停，只有 `Resume` 解除。暂停先保存队列状态，再停止在途工作并等待原生释放；取消等待或释放失败不代表在途工作已停止，需要处理错误并再次完成暂停。
-
-取消单任务与手动重试要求当前没有处理 / 接收工作，先暂停并等待；这是当前单写入调度方式的显式限制。上传完成后先持久记为 Completed 再清理本地文件；清理失败不反向改写已提交结果。`cleanupPending` / `cleanupError` 独立保存清理进度和错误，原生 forget 完成前不清除关联。已记录的清理失败不会因查询或重开仓库而自动重试；排除问题后调用 `RetryCleanup(taskId)`。进程中断留下的未完成清理意图可以恢复，不重复上传。
-
-服务持有仓库独占锁期间维护内存索引，禁止外部修改其文件。`GetTasks()` 返回独立快照；Android 原生记录在首次使用时加载内存索引，后续状态读取不反复读盘，相同网络条件的唤醒合并为一次调度。暂停仅轮询尚未释放的任务，间隔 100 ms；原生对账仅在状态变化时写盘，读取未变化的任务不会重复刷新 JSON。自动扫描为新任务单独执行上传，并周期性对账已有原生任务。
-
-可选有限重试只处理临时传输错误，最多 5 次，基础等待为 5 秒、30 秒、2 分钟、10 分钟、30 分钟，并考虑服务端 Retry-After。后续 Process / 自动循环在到期后再执行。认证拒绝、校验错误和格式 / 文件限制不会无限重试。未开启该策略时，失败需用户显式重试。
-
-## 移动端后台上传
-
-iOS 的 PhotoKit / 图片提供者等待使用异步回调，不占用图片工作线程；取消会通知提供者并停止写入。含文件输出的取消请求会等待原生释放输出目录，之后 C# 才能清理父目录。后台上传任务持久保存执行代次，旧代次完成回调不会释放新任务或删除新凭据；恢复到未启动的挂起任务会继续调度。Android 24+ 通过网络回调维护当前条件，传输循环不再逐块读取任务 JSON；旧系统保留直接网络检查。
-
-原生代码随 Unity 构建：Android 使用 `.androidlib` 源码和系统 JobScheduler，不需额外导出 AAR 或引入 AndroidX；iOS 自动编译 `.mm`，链接 Security 框架，通过 Unity `AppDelegateListener` 接收后台 URLSession 回调，无需手改导出的 AppDelegate。
-
-```csharp
-var backup = await ImageBackupService.CreateAsync(new BackupConfiguration
-{
-    ServerUrl = yourServerUrl,
-    Account = yourAccount,
-    StorageDirectory = Path.Combine(Application.persistentDataPath, "PhotoBackup"),
-    AccessToken = () => yourRuntimeToken,
-    EnableNativeBackgroundTransfer = true, // Android / iOS Player；Editor 会明确拒绝
-    NativeWifiOnly = true,
-    EnableTransientRetries = false
-});
-await backup.EnqueueAsync(selection.Items, applicationToken);
-await backup.ProcessAsync(applicationToken); // 完成文件交接，不代表已备份
-// 可切去其他应用；回来后读取原生层持久保存的结果。
-var tasks = backup.GetTasks();
-await backup.PauseAsync(); // 原生取消回调完成后才返回；保留待恢复文件
-backup.Resume();
-await backup.ProcessAsync(applicationToken);
-```
-
-- `SupportsNativeBackgroundTransfer` 报告平台能力；`UsesNativeBackgroundTransfer` 表示本服务实际启用了该模式，默认关闭。先检查服务端 `backgroundUpload: true`，不支持时明确失败，不自动改用前台传输。
-- 入队时仍需前台准备文件；`ProcessAsync` 在前台认证并建立上传会话，然后先持久保存交接意图，再提交原生层。每个任务只有一个上传执行者，Unity 不在暂停时启动第二套上传。
-- Android JobScheduler 持久调度，受系统后台配额、省电模式和厂商策略限制；系统中断后可重调度。iOS 后台 URLSession 使用文件上传，系统唤醒时由原生代码保存结果并完成系统回调。用户强制停止 / 划掉应用后不保证继续，重新打开后调用 `ProcessAsync` 恢复调度；系统也不承诺即时开始。
-- `NativeWifiOnly=true`：Android 检查可用的非计费 Wi-Fi；iOS 系统会话禁止蜂窝、昂贵与低数据模式网络（非计费有线网络也可能可用）。这不是跨平台精确的零蜂窝字节保证。自动扫描策略 `wifiOnly` 必须与原生配置一致，改变网络策略前先暂停旧任务，再创建相同目录的新配置服务并 `Resume/ProcessAsync`。C# `canTransfer` 回调无法在 Unity 暂停后执行，因此原生模式拒绝此参数。
-- 原生队列只传输已准备文件，不负责后台扫描新照片。Unity 服务对象销毁、`ShutdownAsync`、`ProcessAsync` 的 token 取消都不取消已经交给系统的任务；它们只停止 C# 工作。退出账号前必须显式 `PauseAsync`，等待原生释放，再关闭服务。要放弃任务用 `Cancel(id)`；取消会先记录状态，`GetTasks` 对账确认原生释放后才删除本地副本。取消不会删除已提交的服务器备份，也无法撤回可能刚完成的服务器提交。
-- `PauseAsync` 正在执行时不接受新批次或新上传；已在准备文件的批次须先取消并等待。暂停完成后允许入队，但要显式 `Resume` 后才上传。任务 JSON 与原生任务记录分别由各自唯一写入者维护；`nativeOwned` 是持久交接标记。尚无原生记录的交接意图可再次提交；已有记录只唤醒原任务。暂停 / 失败后的重试必须等旧任务释放，禁止旧回调与新任务共用文件。重新创建服务不会把原生上传改成前台上传，也不会清理原生仍占用的文件。
-- Android 凭据由 AndroidKeyStore 的 AES-GCM 密钥加密，保存在不参与系统备份的私有目录；iOS 使用设备专属 Keychain，URLSession 另持有请求头。Android 在暂停或传输终结时移除记录中的凭据；iOS 凭据统一由原生 `forget` 清理，完成 / 取消对账、恢复暂停任务或显式重试时执行。清理失败不改变已确认的备份结果。任务只能使用提交时的令牌，不能在后台调用 C# 刷新认证；401/403 进入 `NeedsAttention`，业务更新令牌后显式 `Retry(id)`、`ProcessAsync`。
-- 原生传输失败不会自动进行业务重试；`EnableTransientRetries` 与原生模式组合会被拒绝。系统等待网络或中断恢复属于系统调度。断线后的完整文件可能从头重传，服务端按固定 key 幂等提交；当前原生路径没有分片断点续传承诺。只有服务端返回匹配的 key / SHA-256 / 大小及提交结果才进入 `Completed`；发送字节不算已确认进度。
-- 文件预算约束备份准备文件的数据字节（含正在接收的图片），不包含任务 / 扫描元数据、照片提供者缓存和 iOS 系统可能建立的上传副本。系统实际空间不足仍会明确报错。请保持服务目录与原生存储，任务释放前不要手动清理。
-- 原生引擎独占应用内同一份传输仓库，只有写盘成功才发布内存状态。仓库读取 / 写入失败会停止该引擎后续调度、取消在途系统任务，并由状态查询等入口持续返回故障；Android 不再为该故障自动重调度，iOS 不报告未落盘的完成状态。取消仍会通知执行者释放资源，故障时不会谎报已经释放。排除存储问题后需要重启应用以重新创建原生仓库所有者；重新创建 C# 服务不能解除原生故障。
-
-本机验证需要让手机访问电脑局域网地址，不能使用手机自己的 `127.0.0.1`。本机 HTTP 同时需要 `AllowDevelopmentHttp=true` 和宿主的开发网络配置；iOS 局域网用途说明与系统授权、Android 明文网络策略由宿主配置。发布服务使用 HTTPS。服务端协议新增 `PUT /v1/uploads/{key}/background`，请求头 `X-Backup-Account-SHA256` 为配置账号 UTF-8 的 SHA-256，正文是原始文件，认证仍是 Bearer；返回值与 commit 相同。服务器必须先校验完整文件再提交，禁止仅收到请求就回复 completed。
-
-## 自动扫描
-
-```csharp
-var automatic = new AutomaticImageBackup(backup);
-automatic.Configure(new AutomaticBackupPolicy
-{
-    enabled = true,
-    sourceKind = BackupSourceKind.PhotoLibrary,
-    source = null,                 // 或具体相册 ID
-    includeExisting = true,
-    wifiOnly = true,
-    scanIntervalSeconds = 300
-});
-await automatic.RunAsync(applicationLifetimeToken);
-```
-
-`Directory` 来源使用绝对目录；`GrantedDirectory` 来源使用保存的目录书签。默认自动策略关闭，移动端 Wi-Fi 条件使用平台确认的可用、非计费 Wi-Fi 网络。Editor 可注入真实网络策略检测器，或在测试中显式关闭 Wi-Fi 限制；不以 Unity 通用网络可达性冒充 Wi-Fi。
-
-网络条件在扫描与提交分片前检查，不承诺网络切换瞬间零流量。更改策略前取消并等待旧循环；关闭自动策略不会删除已备份副本。首次选择不含历史照片时建立元数据基线，后续新增 / 版本变化入队；扫描通知或持久记录不能证明用户未授权照片也被备份。
-
-自动扫描直接逐页处理来源，不创建整库 ImageSnapshot。扫描按来源和版本保存增量回执。首次扫描在工作线程加载回执，同一范围的并发读取合并为一次；单个等待者取消不终止共享读取，服务关闭会取消它。之后复用内存索引，失败查询和重试只复制失败项，不复制全部历史；需要在首次扫描前显示错误列表时，使用 `await automatic.GetPreparationFailuresAsync(token)`，结果固定属于调用时的来源范围，等待期间更改策略不会串入另一来源。同步查询在缓存尚未建立时会同步加载；若同一范围正在异步加载，同步查询明确拒绝，等待异步接口完成即可。服务持有仓库期间禁止外部编辑回执。索引和持久任务仍随历史条数增长，尚未改成磁盘数据库。
-
-自动循环先上传已有待处理任务，再扫描新图片，避免已保存回执的排队文件占满预算却得不到上传。原生任务尚在传输导致准备额度不足时，扫描保留未处理来源并设置 `IsWaitingForCapacity`，下一轮先对账再继续；不将额度等待记为单图失败。其他磁盘错误或无可释放任务的额度不足仍会传播。
-
-单张图片不可读取、不可导出或超出单文件限制，会持久记录到 `GetPreparationFailures()`，并继续扫描其他图片；`LastError` 保留该范围尚未解决的准备错误。相同失败版本不会每轮自动重试；取消并等待自动循环后调用 `RetryPreparationFailures()`，下一轮再尝试。来源版本变化按新版本处理。除上述原生额度等待外，磁盘预算不足、仓库写入失败、整库权限 / 枚举失败和策略回调异常仍终止本轮，不伪装为单图问题。
-
-首次不含历史照片的基线逐页写入 `.baseline.new`，完整遍历、刷盘并替换 `.baseline` 后才原子提交扫描清单；取消或中断不提交部分基线。清单只记录是否排除了历史照片，清单存在表示首次完整扫描已提交。排除历史时，重开必须逐行读取对应 `.baseline`；文件丢失会明确报错并停止扫描，不将已有照片重新入队。包含历史的扫描不创建排除基线。之后每张图片使用独立、原子写入的回执，增量记录位于同名 `.entries` 目录，不反复重写整个相册的历史记录。
-
-这是**应用运行期间的自动发现**；移动端启用原生传输后，已提交文件可以由系统继续上传。`SupportsBackgroundDiscovery` 仍为 false。整库权限查询错误会结束自动循环并保留错误，需要业务提示用户处理；不会后台反复请求权限。当前来源范围缩小尚无原生变更通知，业务应在授权变化时取消扫描、暂停队列并重新确认范围。
-
-## 验证与示例
-
-- 编辑器调试：**Tools → UIFrame → 图片与备份**，可选择图片、浏览目录、上传与下载校验。
-- Runtime 示例：从 Package Manager 导入“图片选择与备份示例”，将 `GalleryDemo` 挂在应用服务对象上，配置 RawImage / Text 并绑定 UGUI 按钮；访问令牌运行时通过 `SetAccessToken` 提供。
-- Unity 常规测试：`UIFrame.Regression.MediaTests`。
-- 真实 HTTP 测试：先运行 `python3 Tools~/BackupServer/integration_server.py`，再显式运行 `RealServerRoundTripAndIdempotentResubmission`。这是独立的临时测试服务和固定测试账号，不使用真实凭据。
-- 服务端回归：在 `Tools~/BackupServer` 运行 `python3 -m unittest -v test_server.py`。
-- iOS 持久化回归（macOS）：`python3 Tests/Native~/run_backup_persistence.py`，直接编译生产实现验证写盘失败、状态发布与故障传播，不启动系统上传。
-
-移动端原生编译、Unity 构建、真机权限与系统窗口行为是不同验证层次。当前实测状态见 [GalleryValidation.md](GalleryValidation.md)，总体后续任务见 [GalleryImplementationPlan.md](GalleryImplementationPlan.md)。
+打开 `Tools/UIFrame/图片与备份` 使用索引分页、共享预览、任务分页 / 批量控制和清理预览；UGUI示例在 `Samples~/GalleryDemo`，提供任务翻页和预览后清理入口。设备能力与未完成验收见 [验证记录](GalleryValidation.md)，原生命令语义见 [RepositoryContract.md](../Runtime/MediaBackup/Native~/include/RepositoryContract.md)。

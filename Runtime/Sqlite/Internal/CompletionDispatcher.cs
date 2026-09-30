@@ -85,7 +85,11 @@ namespace UIFrame.Sqlite.Internal
             new Dictionary<ulong, WeakReference<NativeResult>>();
         readonly ulong client;
         readonly Thread pump;
+        readonly TaskCompletionSource<bool> faultCleanup =
+            new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
         volatile bool stopping;
+        bool nativeStopped;
+        internal bool IsReleased { get; private set; }
         Exception fault;
         internal CompletionDispatcher()
         {
@@ -175,9 +179,9 @@ namespace UIFrame.Sqlite.Internal
         }
         void Drain()
         {
-            var batch = new NativeMethods.Completion[32];
             try
             {
+                var batch = new NativeMethods.Completion[32];
                 while (!stopping)
                 {
                     NativeMethods.Check(
@@ -220,7 +224,8 @@ namespace UIFrame.Sqlite.Internal
                                 else
                                     operation.Source.TrySetException(new SqliteException(
                                         (SqliteError)completion.Error, completion.Message, completion.Code,
-                                        completion.Operation, completion.Committed, completion.Reserved));
+                                        completion.Operation, completion.Committed, completion.Reserved,
+                                        (SqliteExecutionPhase)completion.Phase));
                             }
                             else
                             {
@@ -233,22 +238,82 @@ namespace UIFrame.Sqlite.Internal
             }
             catch (Exception error)
             {
+                Fail(error);
+            }
+        }
+        void Fail(Exception error)
+        {
+            lock (gate)
+            {
+                fault = error;
+                stopping = true;
+            }
+            try
+            {
+                // Native lifetime cleanup is independent of completion marshalling.
+                // It preserves buffers already handed to callers and other clients.
+                try { StopNative(); }
+                catch (Exception cleanup) { SqliteRuntime.ReportCleanup(cleanup); }
                 lock (gate)
                 {
-                    fault = error;
-                    stopping = true;
-                    foreach (var operation in pending.Values)
+                    foreach (var entry in pending)
+                    {
+                        var operation = entry.Value;
+                        try { operation.Cancellation.Dispose(); }
+                        catch (Exception cleanup) { SqliteRuntime.ReportCleanup(cleanup); }
+                        if (operation.Source.Task.Status != TaskStatus.RanToCompletion &&
+                            results.Remove(entry.Key))
+                        {
+                            operation.Result.Abandon();
+                            try { NativeMethods.Check(NativeMethods.ufsqlite_discard_result(client, entry.Key)); }
+                            catch (Exception cleanup) { SqliteRuntime.ReportCleanup(cleanup); }
+                        }
                         operation.Source.TrySetException(error);
+                    }
+                    pending.Clear();
                 }
+            }
+            finally
+            {
+                faultCleanup.TrySetResult(true);
                 SqliteRuntime.ReportCleanup(error);
             }
+        }
+        internal Task CloseAsync(ulong database)
+        {
+            lock (gate)
+            {
+                if (fault != null)
+                    return CloseAfterFault();
+                return CloseNormally(database);
+            }
+        }
+        async Task CloseAfterFault()
+        {
+            await faultCleanup.Task.ConfigureAwait(false);
+            System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(fault).Throw();
+        }
+        async Task CloseNormally(ulong database)
+        {
+            using (await Submit(database, 5, 0, () => Array.Empty<byte>(), 0, 0, 5000,
+                                CancellationToken.None).ConfigureAwait(false)) { }
         }
         internal void Release(ulong operation)
         {
             lock (gate)
             {
-                results.Remove(operation);
-                NativeMethods.Check(NativeMethods.ufsqlite_release_result(client, operation));
+                if (results.Remove(operation))
+                    NativeMethods.Check(NativeMethods.ufsqlite_release_result(client, operation));
+            }
+        }
+        void StopNative()
+        {
+            lock (gate)
+            {
+                if (nativeStopped)
+                    return;
+                nativeStopped = true;
+                NativeMethods.Check(NativeMethods.ufsqlite_client_stop(client));
             }
         }
         internal void Shutdown(bool releaseResults)
@@ -264,7 +329,7 @@ namespace UIFrame.Sqlite.Internal
                             outstanding.Add(result);
                 }
             }
-            Exception primary = null;
+            Exception primary = fault;
             if (outstanding != null)
                 foreach (var result in outstanding)
                     try
@@ -280,15 +345,40 @@ namespace UIFrame.Sqlite.Internal
                     }
             lock (gate)
             {
+                // A short weak reference is cleared before its finalizer runs.
+                // Domain shutdown also owns those buffers; a later finalizer sees
+                // the removed registration and cannot release the same handle twice.
+                if (releaseResults && pending.Count == 0)
+                    while (results.Count != 0)
+                    {
+                        ulong operation = 0;
+                        foreach (var entry in results) { operation = entry.Key; break; }
+                        results.Remove(operation);
+                        try { NativeMethods.Check(NativeMethods.ufsqlite_discard_result(client, operation)); }
+                        catch (Exception error)
+                        {
+                            if (primary == null) primary = error;
+                            else SqliteRuntime.ReportCleanup(error);
+                        }
+                    }
                 if (pending.Count != 0 || results.Count != 0)
                     throw new InvalidOperationException(
                         "Finish queries and dispose batch results before shutting down SQLite.");
                 stopping = true;
             }
             pump.Join();
+            if (primary == null)
+                primary = fault;
+            try { StopNative(); }
+            catch (Exception error)
+            {
+                if (primary == null) primary = error;
+                else SqliteRuntime.ReportCleanup(error);
+            }
             try
             {
                 NativeMethods.Check(NativeMethods.ufsqlite_client_release(client));
+                IsReleased = true;
             }
             catch (Exception error)
             {

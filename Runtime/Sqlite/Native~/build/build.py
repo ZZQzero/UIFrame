@@ -64,7 +64,7 @@ def main():
         windows_binary = inspect(args.output/'uiframe_sqlite.dll', ROOT/'include/ufsqlite.h')
     if sources != {p.relative_to(ROOT).as_posix():hashlib.sha256(p.read_bytes()).hexdigest() for p in source_paths}:
         raise RuntimeError('Sources changed during build; no artifact manifest was published')
-    manifest = dict(target=args.target, sqlite=lock['version'], source_id=lock['source_id'], abi=2,
+    manifest = dict(target=args.target, sqlite=lock['version'], source_id=lock['source_id'], abi=3,
                     build_id=(args.output/'build-id.txt').read_text(encoding="utf-8").strip(), sanitized=args.sanitize,
                     native_tests='passed' if host_tests else ('built-not-run' if windows else 'not-built'),
                     sources=sources,

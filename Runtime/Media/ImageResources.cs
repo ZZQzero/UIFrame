@@ -13,6 +13,8 @@ namespace Game.Media
         int leases = 1;
         bool disposed;
         internal ImageStorage(string directory) { this.directory = directory; }
+        internal void CheckAvailable()
+        { lock(gate) { if(disposed)throw new ObjectDisposedException(nameof(ImageSelection)); } }
         internal IDisposable Acquire()
         {
             lock (gate)
@@ -63,29 +65,51 @@ namespace Game.Media
 
     public sealed class ImageTexture : IDisposable
     {
-        Texture2D texture;
-        Sprite sprite;
-        public Texture2D Texture => texture != null ? texture : throw new ObjectDisposedException(nameof(ImageTexture));
+        internal sealed class Resource
+        {
+            internal Texture2D Texture;
+            internal Sprite Sprite;
+            internal int Leases;
+            internal readonly long Bytes;
+            internal Resource(Texture2D texture)
+            {
+                Texture=texture??throw new ArgumentNullException(nameof(texture));
+                Bytes=UnityEngine.Profiling.Profiler.GetRuntimeMemorySizeLong(texture);
+                if(Bytes<=0)Bytes=(long)texture.width*texture.height*4*(texture.isReadable?2:1);
+            }
+            internal void Release()
+            {
+                if(--Leases!=0)return;
+                var sprite=Sprite;var texture=Texture;Sprite=null;Texture=null;
+                var cleanup=new UIFrame.CleanupFailure();cleanup.Run(()=>Destroy(sprite));cleanup.Run(()=>Destroy(texture));cleanup.Throw();
+            }
+        }
+        Resource resource;
+        Action released;
+        public Texture2D Texture => resource?.Texture!=null?resource.Texture:throw new ObjectDisposedException(nameof(ImageTexture));
         public Sprite Sprite
         {
             get
             {
-                MediaThread.Check();
-                if (sprite == null) sprite = Sprite.Create(Texture, new Rect(0, 0, Texture.width, Texture.height), Vector2.one * 0.5f);
-                return sprite;
+                MediaThread.Check();var texture=Texture;
+                if(resource.Sprite==null)resource.Sprite=Sprite.Create(texture,new Rect(0,0,texture.width,texture.height),Vector2.one*0.5f);
+                return resource.Sprite;
             }
         }
-        internal ImageTexture(Texture2D texture) { this.texture = texture; }
+        internal long ByteCount=>resource?.Bytes??0;
+        internal ImageTexture(Texture2D texture):this(new Resource(texture),null){}
+        ImageTexture(Resource resource,Action released){this.resource=resource;this.released=released;resource.Leases++;}
+        internal ImageTexture Retain(Action onRelease=null)
+        {MediaThread.Check();if(resource==null)throw new ObjectDisposedException(nameof(ImageTexture));return new ImageTexture(resource,onRelease);}
         public void Dispose()
         {
-            MediaThread.Check();
-            var oldSprite = sprite; var oldTexture = texture; sprite = null; texture = null;
-            Destroy(oldSprite); Destroy(oldTexture);
+            MediaThread.Check();var old=resource;var callback=released;resource=null;released=null;if(old==null)return;
+            var cleanup=new UIFrame.CleanupFailure();cleanup.Run(old.Release);if(callback!=null)cleanup.Run(callback);cleanup.Throw();
         }
         internal static void Destroy(UnityEngine.Object value)
         {
-            if (value == null) return;
-            if (Application.isPlaying) UnityEngine.Object.Destroy(value); else UnityEngine.Object.DestroyImmediate(value);
+            if(value==null)return;
+            if(Application.isPlaying)UnityEngine.Object.Destroy(value);else UnityEngine.Object.DestroyImmediate(value);
         }
     }
 

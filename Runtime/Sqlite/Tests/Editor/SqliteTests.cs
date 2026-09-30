@@ -1,6 +1,8 @@
 using System;
 using System.IO;
 using System.Linq;
+using System.Reflection;
+using System.Runtime.ExceptionServices;
 using System.Threading;
 using System.Threading.Tasks;
 using NUnit.Framework;
@@ -37,6 +39,143 @@ namespace UIFrame.Sqlite.Tests
                                               await database.CloseAsync();
                                           Directory.Delete(directory, true);
                                       });
+        static object Member(object target, string name) => target.GetType()
+            .GetField(name, BindingFlags.Instance | BindingFlags.NonPublic).GetValue(target);
+        static object Invoke(object target, string name, params object[] arguments)
+        {
+            try { return target.GetType().GetMethod(name, BindingFlags.Instance | BindingFlags.NonPublic)
+                .Invoke(target, arguments); }
+            catch (TargetInvocationException error)
+            {
+                ExceptionDispatchInfo.Capture(error.InnerException).Throw();
+                throw;
+            }
+        }
+        static async Task<(object dispatcher, SqliteDatabase database)> OpenIsolated(string path)
+        {
+            var type = typeof(SqliteDatabase).Assembly.GetType("UIFrame.Sqlite.Internal.CompletionDispatcher");
+            var completion = Activator.CreateInstance(type, true);
+            byte[] payload;
+            using (var bytes = new MemoryStream())
+            {
+                using (var writer = new BinaryWriter(bytes, System.Text.Encoding.UTF8, true))
+                {
+                    var encoded = System.Text.Encoding.UTF8.GetBytes(path);
+                    writer.Write(0); writer.Write(encoded.Length); writer.Write(encoded);
+                    writer.Write(0L); writer.Write(128L * 1024 * 1024);
+                }
+                payload = bytes.ToArray();
+            }
+            var opened = (Task)Invoke(completion, "Submit", 0UL, 1U, payload.Length,
+                (Func<byte[]>)(() => payload), 0U, 0U, 5000U, CancellationToken.None);
+            await opened;
+            var result = opened.GetType().GetProperty("Result").GetValue(opened);
+            ulong handle = (ulong)Member(Member(result, "Completion"), "Database");
+            ((IDisposable)result).Dispose();
+            var isolated = (SqliteDatabase)Activator.CreateInstance(typeof(SqliteDatabase),
+                BindingFlags.Instance | BindingFlags.NonPublic, null, new object[] { completion, handle }, null);
+            return (completion, isolated);
+        }
+        [Test]
+        public void DomainCleanupReclaimsResultWhoseWeakTargetWasCleared() => Run(async () =>
+        {
+            var owner = await OpenIsolated(Path.Combine(directory, "domain.sqlite"));
+            var retained = await owner.database.ExecuteTransactionAsync(new SqliteBatch(
+                new SqliteQueryBudget(1, 128), new SqliteCommand("SELECT 23")));
+            await owner.database.CloseAsync();
+            var entries = (System.Collections.IDictionary)Member(owner.dispatcher, "results");
+            var id = entries.Keys.Cast<object>().Single();
+            // Reproduce the CLR ordering deterministically: weak target cleared,
+            // then domain cleanup, then the deferred finalizer's Dispose call.
+            entries[id] = Activator.CreateInstance(entries[id].GetType(), new object[] { null });
+            Invoke(owner.dispatcher, "Shutdown", true);
+            Assert.AreEqual(0, SqliteRuntime.GetDiagnostics().OutstandingOperations);
+            Assert.AreEqual(0, SqliteRuntime.GetDiagnostics().ReservedBytes);
+            retained.Dispose();
+            Assert.AreEqual(1, SqliteRuntime.GetDiagnostics().OpenDatabases);
+        });
+        [Test]
+        public void CompletionFaultClosesNativeStoreAndPreservesDeliveredResults() => Run(async () =>
+        {
+            string path = Path.Combine(directory, "fault.sqlite");
+            var owner = await OpenIsolated(path);
+            var completion = owner.dispatcher;
+            var type = completion.GetType();
+            var isolated = owner.database;
+            var retained = await isolated.ExecuteTransactionAsync(new SqliteBatch(
+                new SqliteQueryBudget(1, 128), new SqliteCommand("SELECT 19")));
+            var original = new InvalidOperationException("completion fault sentinel");
+            // Suspend the consumer at an idle boundary, then execute its production
+            // failure handler with an undelivered native operation still in flight.
+            type.GetField("stopping", BindingFlags.Instance | BindingFlags.NonPublic).SetValue(completion, true);
+            Assert.IsTrue(((Thread)Member(completion, "pump")).Join(3000));
+            type.GetField("stopping", BindingFlags.Instance | BindingFlags.NonPublic).SetValue(completion, false);
+            var pending = isolated.QueryPageAsync(new SqliteCommand(
+                "WITH RECURSIVE r(x) AS (VALUES(0) UNION ALL SELECT x+1 FROM r WHERE x<100000000) SELECT sum(x) FROM r"),
+                new SqliteQueryBudget(1, 128), row => row.GetInt64(0));
+            Invoke(completion, "Fail", original);
+            Assert.AreSame(original, Assert.ThrowsAsync<InvalidOperationException>(async () => await pending));
+            Assert.AreSame(original, Assert.ThrowsAsync<InvalidOperationException>(async () => await isolated.CloseAsync()));
+            try { Assert.AreEqual(19, retained.MapRows(0, row => row.GetInt64(0))[0]); }
+            finally { retained.Dispose(); }
+            Assert.AreSame(original, Assert.Throws<InvalidOperationException>(() => Invoke(completion, "Shutdown", false)));
+            // The independent runtime client remains usable, and the stopped owner
+            // has released its OS file lock and native database registration.
+            var reopened = await SqliteDatabase.OpenAsync(new SqliteOpenOptions(path, SqliteOpenMode.OpenExistingReadWrite));
+            await reopened.CloseAsync();
+            Assert.AreEqual(7, (await database.QueryPageAsync(new SqliteCommand("SELECT 7"),
+                new SqliteQueryBudget(1, 128), row => row.GetInt64(0)))[0]);
+            Assert.AreEqual(1, SqliteRuntime.GetDiagnostics().OpenDatabases);
+            Assert.AreEqual(0, SqliteRuntime.GetDiagnostics().OutstandingOperations);
+            Assert.AreEqual(0, SqliteRuntime.GetDiagnostics().ReservedBytes);
+        });
+        [Test]
+        public void DiagnosticsTrackWorkBuffersAndFailurePhase() => Run(async () =>
+        {
+            var before = SqliteRuntime.GetDiagnostics();
+            for (int i = 0; i < 2; i++)
+                await database.QueryPageAsync(new SqliteCommand("SELECT 123"), new SqliteQueryBudget(1, 128),
+                    row => row.GetInt64(0));
+            await database.ExecuteAsync(new SqliteCommand("INSERT INTO items VALUES(1,'metrics',NULL)"));
+            var failure = Assert.ThrowsAsync<SqliteException>(async () =>
+                await database.ExecuteAsync(new SqliteCommand("DELETE FROM missing_metrics_table")));
+            Assert.AreEqual(SqliteExecutionPhase.Prepare, failure.Phase);
+            using (var result = await database.ExecuteTransactionAsync(new SqliteBatch(
+                new SqliteQueryBudget(1, 128), new SqliteCommand("SELECT 8"))))
+            {
+                var held = SqliteRuntime.GetDiagnostics();
+                Assert.Greater(held.HeldResultBytes, 0);
+                Assert.GreaterOrEqual(held.ReservedResultBytes, 128);
+                Assert.Greater(held.ParameterBytes, 0);
+            }
+            var after = SqliteRuntime.GetDiagnostics();
+            Assert.Greater(after.StatementCacheHits, before.StatementCacheHits);
+            Assert.Greater(after.StatementCacheMisses, before.StatementCacheMisses);
+            Assert.Greater(after.CommittedTransactions, before.CommittedTransactions);
+            Assert.Greater(after.FailedOperations, before.FailedOperations);
+            Assert.Greater(after.QueueWaitNanoseconds, before.QueueWaitNanoseconds);
+            Assert.Greater(after.ExecutionNanoseconds, before.ExecutionNanoseconds);
+            Assert.Greater(after.CommitNanoseconds, before.CommitNanoseconds);
+            Assert.AreEqual(0, after.QueuedOperations);
+            Assert.AreEqual(0, after.ActiveOperations);
+            Assert.AreEqual(0, after.HeldResultBytes);
+            Assert.AreEqual(0, after.ParameterBytes);
+            Assert.AreEqual(0, after.ReservedResultBytes);
+        });
+        [Test]
+        public void ExecuteDeadlineRollsBackAndKeepsIndependentWorkUsable() => Run(async () =>
+        {
+            var before = SqliteRuntime.GetDiagnostics().TimedOutOperations;
+            var error = Assert.ThrowsAsync<SqliteException>(async () => await database.ExecuteAsync(
+                new SqliteCommand("INSERT INTO items(id,value) WITH RECURSIVE r(x) AS " +
+                    "(VALUES(0) UNION ALL SELECT x+1 FROM r WHERE x<100000000) SELECT 1,sum(x) FROM r"),
+                TimeSpan.FromMilliseconds(1)));
+            Assert.AreEqual(SqliteError.Timeout, error.Error);
+            Assert.AreEqual(0, (await database.QueryPageAsync(new SqliteCommand("SELECT count(*) FROM items"),
+                new SqliteQueryBudget(1, 128), row => row.GetInt64(0)))[0]);
+            Assert.AreEqual(1, await database.ExecuteAsync(new SqliteCommand("INSERT INTO items VALUES(1,'after-timeout',NULL)")));
+            Assert.AreEqual(before + 1, SqliteRuntime.GetDiagnostics().TimedOutOperations);
+        });
         [Test]
         public void NativeErrorsPreserveUtf8Identifiers() => Run(
             () =>

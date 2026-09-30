@@ -82,8 +82,9 @@ namespace Game.Media
             {
                 var item = items[i];
                 if (!File.Exists(item.path)) throw new GalleryException("SourceUnavailable", "Selected file is missing.");
-                images[i] = new ImageReference("file", item.path, item.name, item.mime, new FileInfo(item.path).Length,
-                    item.width, item.height, item.version, owner, item.id ?? ("selected:" + item.name));
+                var file = new FileInfo(item.path);
+                images[i] = new ImageReference("file", item.path, item.name, item.mime, file.Length,
+                    item.width, item.height, file.LastWriteTimeUtc.Ticks + ":" + file.Length, owner, item.id ?? ("selected:" + item.name));
             }
             return new ImageSelection(images, owner);
         }
@@ -117,10 +118,29 @@ namespace Game.Media
             string albumId = null, CancellationToken cancellationToken = default)
         {
             if (consume == null) throw new ArgumentNullException(nameof(consume));
-            bool completed = true;
-            await NativeMedia.Request(new MediaRequest { op = "images", album = albumId }, cancellationToken,
-                async items => completed = await ConsumePage(items, "library", consume));
-            return completed;
+            MediaThread.Check();string scan=Guid.NewGuid().ToString("N");Exception failure=null;
+            try
+            {
+                await NativeMedia.Request(new MediaRequest {op="imagesOpen",path=scan,album=albumId},cancellationToken);
+                for(;;)
+                {
+                    var page=await NativeMedia.Request(new MediaRequest {op="imagesNext",path=scan},cancellationToken);
+                    if(!await ConsumePage(page.items??Array.Empty<MediaItem>(),"library",consume))return false;
+                    if(!page.hasNext)return true;
+                }
+            }
+            catch(Exception error){failure=error;throw;}
+            finally
+            {
+                try {await NativeMedia.Request(new MediaRequest {op="imagesClose",path=scan},default);}
+                catch(Exception cleanup){if(failure==null)throw;UnityEngine.Debug.LogException(cleanup);}
+            }
+        }
+        internal static async UniTask ValidateVersionAsync(ImageReference image,CancellationToken token)
+        {
+            string version=image.Source=="file"?ImageReference.FromFile(image.Id).Version:
+                (await NativeMedia.Request(new MediaRequest {op="stat",source=image.Source,path=image.Id},token)).items[0].version;
+            if(version!=image.Version)throw new GalleryException("SourceChanged","Image content changed after its metadata was read.");
         }
         internal static UniTask<bool> ConsumePage(MediaItem[] items, string source, Func<IReadOnlyList<ImageReference>, UniTask<bool>> consume)
         {

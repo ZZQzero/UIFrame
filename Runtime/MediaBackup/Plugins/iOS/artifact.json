@@ -1,0 +1,48 @@
+{
+  "abi": 1,
+  "sqlite_build_id": "cc2af4a34676c4a76a07358b30d6c4351d4b22a8bdba0f2c9c2e0954fdbbc305",
+  "binary": "libuiframe_backup.a",
+  "sha256": "0ed6ae215686dd3ec95b571fd00254bc6e95c5dc11111a2722d52459f9fa3cbf",
+  "sources": [
+    {
+      "path": "CMakeLists.txt",
+      "sha256": "545444ac2e8a48c3e9764a89ddfb8c0e93fd21c083c242d2467b7049c7c6d57c"
+    },
+    {
+      "path": "src/android.cpp",
+      "sha256": "43e44798e24ea99c390a01a408e818415cd194abf975c08459ac2610b43e4ca6"
+    },
+    {
+      "path": "src/repository.cpp",
+      "sha256": "e7217f6ffdc9978b145d2d6e08a7d32239b0ea5be4fa8d535388d4097faa6baa"
+    },
+    {
+      "path": "include/ufbackup.h",
+      "sha256": "9a4db8ffd30f095d402e67e59a8ebe7a91a82383f031a50b6c7f1458e577e8be"
+    },
+    {
+      "path": "schema/catalog.sql",
+      "sha256": "bef08bfb4e7ce8cfb9aaa114af8ec6dd2ca9af7c96273eb762c533ed79cc59c2"
+    },
+    {
+      "path": "build/build.py",
+      "sha256": "eb016a74737f1315a3a34b4fe08cf8d1f0bf614b10e9eac9093f7961cb59725b"
+    },
+    {
+      "path": "build/install.py",
+      "sha256": "80eeb24d0a3a5fea18772273b9157be1e2d42c4fe8f7a539e08bfa8d73ce16ef"
+    },
+    {
+      "path": "build/schema.py",
+      "sha256": "4c0ef46652545b4d4a8045c15b5122eac81d0fefa1b102fb3e255081843e19e4"
+    },
+    {
+      "path": "../../Sqlite/Native~/include/ufsqlite_client.hpp",
+      "sha256": "bd00e120d2724cf9c7a70a4a8454618887e9fc5e10531b1d24562887ad292171"
+    },
+    {
+      "path": "../../Sqlite/Native~/include/ufsqlite.h",
+      "sha256": "49b6cc0a230f5a9ba120a7e0cb70dfd0dd434e564eeea7bc6a9ac9b37fc000f4"
+    }
+  ]
+}

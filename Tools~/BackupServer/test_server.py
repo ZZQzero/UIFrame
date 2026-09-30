@@ -44,6 +44,42 @@ class BackupProtocolTests(unittest.TestCase):
         self.assertEqual(200, status)
         return key, body, result
 
+    def test_expiration_reclaims_only_incomplete_sessions_and_requires_explicit_registration(self):
+        key, body, _ = self.create(b'abc')
+        self.call('PUT', '/v1/uploads/' + key + '?offset=0', b'ab')
+        with self.store.lock, self.store.db:
+            self.store.db.execute('UPDATE uploads SET last_activity=0')
+        result = self.store.cleanup_expired(1)
+        self.assertEqual(1, result['expired'])
+        self.assertEqual(2, result['freedBytes'])
+        self.assertEqual(410, self.call('GET', '/v1/uploads/' + key)[0])
+        self.assertEqual(410, self.call('PUT', '/v1/uploads/' + key + '?offset=0', b'abc')[0])
+        status, response = self.call('POST', '/v1/uploads', body)
+        self.assertEqual(200, status)
+        self.assertEqual(0, response['offset'])
+        self.call('PUT', '/v1/uploads/' + key + '?offset=0', b'abc')
+        self.call('POST', '/v1/uploads/' + key + '/commit')
+        with self.store.lock, self.store.db:
+            self.store.db.execute('UPDATE uploads SET last_activity=0')
+        self.assertEqual(0, self.store.cleanup_expired(1)['expired'])
+        self.assertEqual(b'abc', self.call('GET', '/v1/backups/' + key + '/content')[1])
+
+    def test_cleanup_skips_active_transfer_and_recovers_durable_claim(self):
+        key, _, _ = self.create(b'abc')
+        self.assertTrue(self.store.begin_activity('alice', key))
+        with self.store.lock, self.store.db:
+            self.store.db.execute('UPDATE uploads SET last_activity=0')
+        self.assertEqual(1, self.store.cleanup_expired(1)['skipped'])
+        self.store.end_activity('alice', key)
+        incoming = self.store.directory('alice') / 'interrupted.incoming'
+        incoming.write_bytes(b'1234')
+        with self.store.lock, self.store.db:
+            self.store.db.execute('UPDATE uploads SET cleanup_state=1')
+            self.store.db.execute('INSERT INTO incoming VALUES(?,?,?)', ('alice', key, incoming.name))
+        self.assertFalse(self.store.begin_activity('alice', key))
+        self.assertEqual(4, self.store.cleanup_expired(1)['freedBytes'])
+        self.assertFalse(incoming.exists())
+
     def test_upload_creation_includes_current_server_capabilities(self):
         _, _, response = self.create(b'abc')
         self.assertEqual('alice', response['capabilities']['account'])

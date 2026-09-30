@@ -12,6 +12,7 @@ CREATE TABLE library_scopes (
     source_identity TEXT NOT NULL,
     revision INTEGER NOT NULL CHECK(revision>0),
     permission_generation INTEGER NOT NULL CHECK(permission_generation>=0),
+    access_state INTEGER NOT NULL DEFAULT 0,
     completed_scan_id TEXT,
     platform_cursor BLOB,
     requires_reconcile INTEGER NOT NULL CHECK(requires_reconcile IN(0,1))
@@ -26,6 +27,7 @@ CREATE TABLE assets (
     modified_utc INTEGER NOT NULL,
     accessible INTEGER NOT NULL CHECK(accessible IN(0,1)),
     content_needs_reconcile INTEGER NOT NULL CHECK(content_needs_reconcile IN(0,1))
+    ,asset_revision INTEGER NOT NULL DEFAULT 1 CHECK(asset_revision>0)
 ) STRICT;
 CREATE TABLE scope_assets (
     scope_id TEXT NOT NULL REFERENCES library_scopes(id),
@@ -33,10 +35,12 @@ CREATE TABLE scope_assets (
     sort_key INTEGER NOT NULL,
     seen_scan_id TEXT,
     updated_seq INTEGER NOT NULL,
+    content_version TEXT,
+    asset_revision INTEGER NOT NULL DEFAULT 0 CHECK(asset_revision>=0),
     present INTEGER NOT NULL CHECK(present IN(0,1)),
     PRIMARY KEY(scope_id,source_id)
 ) WITHOUT ROWID, STRICT;
-CREATE INDEX assets_page ON scope_assets(scope_id,present,sort_key,source_id);
+CREATE INDEX assets_page ON scope_assets(scope_id,present,source_id);
 CREATE INDEX assets_scan ON scope_assets(scope_id,seen_scan_id,source_id);
 CREATE TABLE scan_runs (
     id TEXT PRIMARY KEY,

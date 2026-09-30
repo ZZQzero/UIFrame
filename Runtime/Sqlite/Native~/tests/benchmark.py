@@ -9,6 +9,7 @@ import statistics
 import subprocess
 import sys
 import tempfile
+import sqlite3
 import time
 from process_recovery import Store, commands
 
@@ -19,7 +20,11 @@ def worker(library, count):
         path = Path(directory)/'catalog.sqlite'
         store = Store(library, path, 0)
         schema = (PACKAGE/'Runtime/MediaBackup/Native~/schema/catalog.sql').read_text()
-        store.sql(*[part.strip() for part in schema.split(';') if part.strip()])
+        statements=[];pending=''
+        for line in schema.splitlines(True):
+            pending+=line
+            if sqlite3.complete_statement(pending):statements.append(pending);pending=''
+        store.sql(*statements)
         started = time.perf_counter()
         for offset in range(0, count, 200):
             store.sql(f'''WITH RECURSIVE page(n) AS (VALUES({offset+1}) UNION ALL

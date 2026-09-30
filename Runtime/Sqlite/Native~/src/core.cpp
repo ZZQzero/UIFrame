@@ -6,7 +6,7 @@
 #include <chrono>
 #include <condition_variable>
 #include <cstring>
-#include <deque>
+#include <list>
 #include <filesystem>
 #include <memory>
 #include <mutex>
@@ -150,6 +150,7 @@ namespace
         Connection write, read;
         std::atomic<bool> ready{false}, fault{false};
         bool closing = false, write_busy = false, read_busy = false, snapshot_busy = false, readonly = false;
+        bool close_reserved = false;
         uint64_t parameters = 0, results = 0, count = 0;
         uint64_t min_free = 0, max_wal = 0;
 #ifdef _WIN32
@@ -211,6 +212,8 @@ namespace
         std::vector<uint8_t> input, output;
         uint64_t charge = 0;
         Clock::time_point deadline;
+        Clock::time_point enqueued;
+        uint64_t execution_ns = 0, commit_ns = 0, cache_hits = 0, cache_misses = 0;
         std::atomic<bool> cancel{false};
         bool submitted = false, done = false, claimed = false;
         uf_completion completion{};
@@ -220,6 +223,7 @@ namespace
     struct Client
     {
         uint64_t operations = 0, waiters = 0;
+        bool stopping = false;
         Job *first = nullptr;
         Job *last = nullptr;
     };
@@ -231,8 +235,11 @@ namespace
         std::unordered_map<uint64_t, std::shared_ptr<Job>> jobs;
         std::unordered_map<uint64_t, std::shared_ptr<Database>> databases;
         std::unordered_map<std::string, uint64_t> owners;
-        std::deque<std::shared_ptr<Job>> queue;
+        std::list<std::shared_ptr<Job>> queue;
         uint64_t next = 1, reserved = 0, total_completed = 0;
+        uint64_t active = 0, queue_wait_ns = 0, max_queue_wait_ns = 0;
+        uint64_t execution_ns = 0, max_execution_ns = 0, commit_ns = 0, commits = 0;
+        uint64_t cache_hits = 0, cache_misses = 0, errors = 0, canceled = 0, timeouts = 0;
         bool stopping = false, snapshot_slot = false;
         std::thread workers[2];
         Engine() = default;
@@ -463,15 +470,17 @@ namespace
         std::string key;
         sqlite3_stmt *value = nullptr;
         bool valid = false;
-        Statement(Connection &connection, std::string sql) : c(connection), key(std::move(sql))
+        Statement(Connection &connection, std::string sql, Job &job) : c(connection), key(std::move(sql))
         {
             for (auto i = c.cache.begin(); i != c.cache.end(); ++i)
                 if (i->stmt && i->sql == key)
                 {
                     value = i->stmt;
                     i->stmt = nullptr;
+                    ++job.cache_hits;
                     return;
                 }
+            ++job.cache_misses;
             const char *tail = nullptr;
             sql_check(sqlite3_prepare_v3(c.db, key.c_str(), int(key.size() + 1), SQLITE_PREPARE_PERSISTENT,
                                          &value, &tail),
@@ -652,13 +661,15 @@ namespace
                 auto sql = r.string();
                 require(sql.find('\0') == std::string::npos, UF_ARGUMENT, "NUL in SQL");
                 auto expected = int64_t(r.number(8));
-                Statement s(c, std::move(sql));
+                j.completion.phase = UF_PHASE_PREPARE;
+                Statement s(c, std::move(sql), j);
                 bind(r, s.value, c.db);
                 require(j.kind != UF_QUERY || sqlite3_stmt_readonly(s.value), UF_ARGUMENT,
                         "Query requires read-only SQL");
                 auto changes_before = sqlite3_total_changes64(c.db);
                 require(j.kind != UF_EXECUTE || sqlite3_column_count(s.value) == 0, UF_ARGUMENT,
                         "Execute does not accept returned rows");
+                j.completion.phase = UF_PHASE_EXECUTE;
                 int rc = sqlite3_step(s.value);
                 sql_check(rc, c.db, &j);
                 // sqlite3_step may reprepare a cached statement after a schema change.
@@ -729,7 +740,15 @@ namespace
             if (transaction)
             {
                 committing = true;
-                internal(c, "COMMIT", &j);
+                j.completion.phase = UF_PHASE_COMMIT;
+                auto started = Clock::now();
+                try { internal(c, "COMMIT", &j); }
+                catch (...)
+                {
+                    j.commit_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(Clock::now() - started).count();
+                    throw;
+                }
+                j.commit_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(Clock::now() - started).count();
                 transaction = false;
                 j.completion.committed = 1;
             }
@@ -920,7 +939,7 @@ namespace
         j.snapshot.reset();
         return true;
     }
-    bool runnable(const std::shared_ptr<Job> &j, bool writer, const std::deque<std::shared_ptr<Job>> &queue)
+    bool runnable(const std::shared_ptr<Job> &j, bool writer, const std::list<std::shared_ptr<Job>> &queue)
     {
         auto d = j->database;
         if (!j->submitted)
@@ -930,7 +949,7 @@ namespace
         if (j->kind == UF_CLOSE)
         {
             for (auto &q : queue)
-                if (q->database == d && q->id < j->id)
+                if (q != j && q->database == d && q->submitted)
                     return false;
             return !d->read_busy && !d->write_busy && !d->snapshot_busy;
         }
@@ -982,6 +1001,7 @@ namespace
         for (;;)
         {
             std::shared_ptr<Job> j;
+            Clock::time_point started;
             {
                 std::unique_lock<std::mutex> l(mutex);
                 work.wait(l, [&] {
@@ -996,6 +1016,11 @@ namespace
                                        [&](auto &q) { return runnable(q, writer, queue); });
                 j = *it;
                 queue.erase(it);
+                started = Clock::now();
+                auto waiting = uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(started - j->enqueued).count());
+                queue_wait_ns += waiting;
+                max_queue_wait_ns = std::max(max_queue_wait_ns, waiting);
+                ++active;
                 if (read_job(j->kind))
                     j->database->read_busy = true;
                 else if (j->kind == UF_SNAPSHOT)
@@ -1006,6 +1031,10 @@ namespace
             bool again = false;
             try
             {
+                j->completion.phase = j->kind == UF_OPEN ? UF_PHASE_OPEN :
+                    j->kind == UF_CLOSE ? UF_PHASE_CLOSE :
+                    j->kind == UF_SNAPSHOT ? UF_PHASE_SNAPSHOT :
+                    (j->kind == UF_CHECKPOINT || j->kind == UF_STORAGE) ? UF_PHASE_MAINTENANCE : UF_PHASE_EXECUTE;
                 if (j->kind == UF_SNAPSHOT)
                 {
                     again = !snapshot_step(*j);
@@ -1058,6 +1087,10 @@ namespace
             }
             {
                 std::lock_guard<std::mutex> l(mutex);
+                --active;
+                auto elapsed = uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(Clock::now() - started).count());
+                execution_ns += elapsed;
+                j->execution_ns += elapsed;
                 auto d = j->database;
                 if (read_job(j->kind))
                     d->read_busy = false;
@@ -1070,6 +1103,7 @@ namespace
                     try
                     {
                         queue.push_back(j);
+                        j->enqueued = Clock::now();
                         work.notify_all();
                         continue;
                     }
@@ -1099,6 +1133,14 @@ namespace
                 j->completion.data = j->output.data();
                 j->completion.data_size = j->output.size();
                 ++total_completed;
+                max_execution_ns = std::max(max_execution_ns, j->execution_ns);
+                commit_ns += j->commit_ns;
+                if (j->commit_ns && j->completion.committed == 1) ++commits;
+                cache_hits += j->cache_hits;
+                cache_misses += j->cache_misses;
+                if (j->completion.error == UF_CANCELED) ++canceled;
+                else if (j->completion.error == UF_TIMEOUT) ++timeouts;
+                else if (j->completion.error) ++errors;
                 auto &client = clients.at(j->client);
                 if (client.last)
                     client.last->completion_next = j.get();
@@ -1129,6 +1171,34 @@ namespace
         {
             return UF_STATE;
         }
+    }
+    // Called with the engine lock held. Results may be relinquished without a
+    // working completion consumer; removing an intrusive link needs no allocation.
+    void release_job(Engine &e, const std::shared_ptr<Job> &j)
+    {
+        auto &client = e.clients.at(j->client);
+        Job *previous = nullptr;
+        for (auto current = client.first; current; current = current->completion_next)
+        {
+            if (current == j.get())
+            {
+                if (previous)
+                    previous->completion_next = current->completion_next;
+                else
+                    client.first = current->completion_next;
+                if (client.last == current)
+                    client.last = previous;
+                break;
+            }
+            previous = current;
+        }
+        auto d = j->database;
+        e.reserved -= j->charge;
+        d->parameters -= j->input.size() * 2;
+        d->results -= j->result_limit;
+        --d->count;
+        --client.operations;
+        e.jobs.erase(j->id);
     }
 } // namespace
 extern "C"
@@ -1198,6 +1268,65 @@ extern "C"
             return UF_OK;
         });
     }
+    int ufsqlite_client_stop(uint64_t client)
+    {
+        return guarded([&] {
+            auto &e = engine();
+            std::lock_guard<std::mutex> lifetime(e.lifecycle);
+            std::unique_lock<std::mutex> l(e.mutex);
+            auto ci = e.clients.find(client);
+            require(ci != e.clients.end(), UF_HANDLE, "Unknown client");
+            require(!ci->second.stopping, UF_STATE, "Client already stopped");
+            ci->second.stopping = true;
+            for (auto it = e.jobs.begin(); it != e.jobs.end();)
+            {
+                auto j = (it++)->second;
+                if (j->client != client)
+                    continue;
+                if (!j->submitted)
+                {
+                    e.queue.erase(std::find(e.queue.begin(), e.queue.end(), j));
+                    if (j->kind == UF_OPEN)
+                        e.databases.erase(j->database->id);
+                    if (j->kind == UF_SNAPSHOT)
+                        e.snapshot_slot = false;
+                    if (j->kind == UF_CLOSE)
+                        j->database->close_reserved = false;
+                    release_job(e, j);
+                }
+                else if (j->kind != UF_CLOSE)
+                    j->cancel = true;
+            }
+            e.work.notify_all();
+            e.completion.wait(l, [&] {
+                return std::none_of(e.jobs.begin(), e.jobs.end(), [&](const auto &entry) {
+                    return entry.second->client == client && !entry.second->done;
+                });
+            });
+            int error = UF_OK;
+            for (;;)
+            {
+                auto it = std::find_if(e.databases.begin(), e.databases.end(), [&](const auto &entry) {
+                    return entry.second->client == client;
+                });
+                if (it == e.databases.end())
+                    break;
+                auto d = it->second;
+                d->closing = true;
+                l.unlock();
+                int a = d->read.close(), b = d->write.close();
+                d->unlock();
+                if (a != SQLITE_OK || b != SQLITE_OK)
+                    error = UF_SQL;
+                l.lock();
+                auto owner = e.owners.find(d->identity);
+                if (owner != e.owners.end() && owner->second == d->id)
+                    e.owners.erase(owner);
+                e.databases.erase(d->id);
+            }
+            return error;
+        });
+    }
     int ufsqlite_reserve(uint64_t client, uint64_t database, uint32_t kind, uint64_t length, uint32_t rows,
                          uint32_t bytes, uint32_t timeout, uint64_t *operation)
     {
@@ -1205,10 +1334,13 @@ extern "C"
             require(operation && kind >= UF_OPEN && kind <= UF_STORAGE && timeout > 0 &&
                         length <= ParameterBudget && bytes <= MiB && rows <= 200,
                     UF_ARGUMENT, "Invalid request");
+            require(kind != UF_CLOSE || (length == 0 && rows == 0 && bytes == 0), UF_ARGUMENT,
+                    "Close takes no input or result budget");
             auto &e = engine();
             std::lock_guard<std::mutex> l(e.mutex);
             auto ci = e.clients.find(client);
             require(ci != e.clients.end(), UF_HANDLE, "Unknown client");
+            require(!ci->second.stopping, UF_STATE, "Client not accepting work");
             std::shared_ptr<Database> d;
             if (kind == UF_OPEN)
             {
@@ -1224,6 +1356,7 @@ extern "C"
                         "Unknown database");
                 d = it->second;
                 require(d->ready && !d->closing, UF_STATE, "Database not accepting work");
+                require(kind != UF_CLOSE || !d->close_reserved, UF_STATE, "Close already reserved");
             }
             if (kind == UF_SNAPSHOT)
                 require(!e.snapshot_slot, UF_CAPACITY, "Snapshot slot is busy");
@@ -1272,12 +1405,7 @@ extern "C"
             if (kind == UF_SNAPSHOT)
                 e.snapshot_slot = true;
             if (kind == UF_CLOSE)
-            {
-                d->closing = true;
-                for (auto &entry : e.jobs)
-                    if (entry.second->database == d && entry.second->kind == UF_SNAPSHOT)
-                        entry.second->cancel = true;
-            }
+                d->close_reserved = true;
             d->parameters += length * 2;
             d->results += bytes;
             ++d->count;
@@ -1298,9 +1426,24 @@ extern "C"
             auto j = i->second;
             require(!j->submitted && j->input.size() == length && (length == 0 || payload), UF_ARGUMENT,
                     "Invalid reserved request");
+            auto d = j->database;
+            require(!e.clients.at(client).stopping && !d->closing, UF_STATE,
+                    "Owner not accepting work");
             if (length)
                 std::memcpy(j->input.data(), payload, size_t(length));
+            // Reuse the preallocated node. Acceptance order is commit order,
+            // independent of reservation/encoding order and without new allocation.
+            e.queue.splice(e.queue.end(), e.queue, std::find(e.queue.begin(), e.queue.end(), j));
             j->submitted = true;
+            j->enqueued = Clock::now();
+            j->completion.phase = UF_PHASE_QUEUE;
+            if (j->kind == UF_CLOSE)
+            {
+                d->closing = true;
+                for (auto &entry : e.jobs)
+                    if (entry.second->database == d && entry.second->kind == UF_SNAPSHOT)
+                        entry.second->cancel = true;
+            }
             e.work.notify_all();
             return UF_OK;
         });
@@ -1318,16 +1461,11 @@ extern "C"
             e.queue.erase(std::find(e.queue.begin(), e.queue.end(), j));
             if (j->kind == UF_OPEN)
                 e.databases.erase(d->id);
-            if (j->kind == UF_CLOSE)
-                d->closing = false;
             if (j->kind == UF_SNAPSHOT)
                 e.snapshot_slot = false;
-            e.reserved -= j->charge;
-            d->parameters -= j->input.size() * 2;
-            d->results -= j->result_limit;
-            --d->count;
-            --e.clients.at(client).operations;
-            e.jobs.erase(i);
+            if (j->kind == UF_CLOSE)
+                d->close_reserved = false;
+            release_job(e, j);
             e.work.notify_all();
             return UF_OK;
         });
@@ -1405,13 +1543,20 @@ extern "C"
             require(i != e.jobs.end() && i->second->client == client, UF_HANDLE, "Unknown operation");
             auto j = i->second;
             require(j->done && j->claimed, UF_STATE, "Result not claimed");
-            auto d = j->database;
-            e.reserved -= j->charge;
-            d->parameters -= j->input.size() * 2;
-            d->results -= j->result_limit;
-            --d->count;
-            --e.clients.at(client).operations;
-            e.jobs.erase(i);
+            release_job(e, j);
+            return UF_OK;
+        });
+    }
+    int ufsqlite_discard_result(uint64_t client, uint64_t operation)
+    {
+        return guarded([&] {
+            auto &e = engine();
+            std::lock_guard<std::mutex> l(e.mutex);
+            auto it = e.jobs.find(operation);
+            require(it != e.jobs.end() && it->second->client == client, UF_HANDLE, "Unknown operation");
+            auto j = it->second;
+            require(j->done, UF_STATE, "Operation still running");
+            release_job(e, j);
             return UF_OK;
         });
     }
@@ -1427,6 +1572,27 @@ extern "C"
             o->reserved_bytes = e.reserved;
             o->completed = e.total_completed;
             o->sqlite_bytes = sqlite3_memory_used();
+            o->queued = std::count_if(e.queue.begin(), e.queue.end(), [](const auto &j) { return j->submitted; });
+            o->active = e.active;
+            o->parameter_bytes = o->result_reserved_bytes = o->held_result_bytes = 0;
+            for (const auto &entry : e.jobs)
+            {
+                const auto &j = entry.second;
+                o->parameter_bytes += j->input.size() * 2;
+                o->result_reserved_bytes += j->result_limit;
+                if (j->done) o->held_result_bytes += j->output.size();
+            }
+            o->queue_wait_ns = e.queue_wait_ns;
+            o->max_queue_wait_ns = e.max_queue_wait_ns;
+            o->execution_ns = e.execution_ns;
+            o->max_execution_ns = e.max_execution_ns;
+            o->commit_ns = e.commit_ns;
+            o->commits = e.commits;
+            o->cache_hits = e.cache_hits;
+            o->cache_misses = e.cache_misses;
+            o->errors = e.errors;
+            o->canceled = e.canceled;
+            o->timeouts = e.timeouts;
             return UF_OK;
         });
     }
