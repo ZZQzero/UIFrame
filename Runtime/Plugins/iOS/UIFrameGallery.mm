@@ -238,11 +238,8 @@ static NSString *UFMSource(UFMJob *job, NSError **error) {
     if([job.request[@"source"] isEqual:@"directory"]) {
         NSDictionary *identity=[NSJSONSerialization JSONObjectWithData:[job.request[@"path"] dataUsingEncoding:NSUTF8StringEncoding] options:0 error:error];
         if(!identity) return nil;
-        NSString *bookmark=identity[@"bookmark"];
-        if(!bookmark) {
-            NSString *stored=UFMBookmarkPath(identity[@"bookmarkId"],error); if(!stored) return nil;
-            bookmark=[NSString stringWithContentsOfFile:stored encoding:NSUTF8StringEncoding error:error]; if(!bookmark) return nil;
-        }
+        NSString *stored=UFMBookmarkPath(identity[@"bookmarkId"],error); if(!stored) return nil;
+        NSString *bookmark=[NSString stringWithContentsOfFile:stored encoding:NSUTF8StringEncoding error:error]; if(!bookmark) return nil;
         NSURL *root=UFMResolveDirectory(job,bookmark,error); if(!root) return nil;
         NSString *path=[[root.path stringByAppendingPathComponent:identity[@"relative"]] stringByStandardizingPath];
         NSString *resolved=[path stringByResolvingSymlinksInPath];

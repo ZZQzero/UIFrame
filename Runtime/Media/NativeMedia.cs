@@ -62,8 +62,7 @@ namespace Game.Media
                 Start(JsonUtility.ToJson(request)); active.Add(request.id);
             }
             catch { if (!string.IsNullOrEmpty(request.output)) ImagePaths.CleanAfterFailure(request.output); throw; }
-            bool finished = false; List<MediaItem> pages = null;
-            long deadline = System.Diagnostics.Stopwatch.GetTimestamp() + System.Diagnostics.Stopwatch.Frequency / 500;
+            bool finished = false;
             try
             {
                 while (true)
@@ -84,17 +83,13 @@ namespace Game.Media
                             if (!proceed) return result;
                             if (!result.more) return result;
                         }
-                        else if (result.more || pages != null)
+                        else
                         {
-                            if (pages == null) pages = new List<MediaItem>();
-                            if (result.items != null) pages.AddRange(result.items);
-                            if (!result.more) { result.items = pages.ToArray(); return result; }
-                            if (System.Diagnostics.Stopwatch.GetTimestamp() < deadline) continue;
+                            if (result.more) throw new InvalidOperationException("Paged native responses require a page consumer.");
+                            return result;
                         }
-                        else return result;
                     }
                     await UniTask.Yield(PlayerLoopTiming.Update, token);
-                    deadline = System.Diagnostics.Stopwatch.GetTimestamp() + System.Diagnostics.Stopwatch.Frequency / 500;
                 }
             }
             finally

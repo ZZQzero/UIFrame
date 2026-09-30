@@ -9,12 +9,12 @@ static void UFBRequire(BOOL ok, NSString *message) {
 static void UFBError(NSError *error) { if (error) UFBRequire(NO,error.localizedDescription); }
 static BOOL UFBTerminal(NSInteger state) { return state==3 || state==4 || state==6 || state==7 || state==8; }
 static NSString *UFBTaskName(NSDictionary *job) {
-    return job[@"generation"] ? [NSString stringWithFormat:@"%@:%@",job[@"id"],job[@"generation"]] : job[@"id"];
+    return [NSString stringWithFormat:@"%@:%@",job[@"id"],job[@"generation"]];
 }
 static NSString *UFBTaskID(NSURLSessionTask *task) { return [task.taskDescription componentsSeparatedByString:@":"].firstObject; }
 
 @interface UFBEngine : NSObject <NSURLSessionDataDelegate, NSURLSessionTaskDelegate, AppDelegateListener>
-@property NSMutableDictionary<NSString*, NSMutableDictionary*> *jobs;
+@property NSMutableDictionary<NSString*, NSDictionary*> *jobs;
 @property NSMutableDictionary<NSString*, NSURLSessionUploadTask*> *tasks;
 @property NSMutableDictionary<NSNumber*, NSMutableData*> *bodiesWifi;
 @property NSMutableDictionary<NSNumber*, NSMutableData*> *bodiesAny;
@@ -23,7 +23,7 @@ static NSString *UFBTaskID(NSURLSessionTask *task) { return [task.taskDescriptio
 @property NSURLSession *any;
 @property NSString *directory;
 @property NSInteger recovered;
-@property NSString *startupError;
+@property NSException *repositoryFailure;
 + (instancetype)shared;
 - (NSDictionary*)call:(NSDictionary*)request;
 @end
@@ -51,13 +51,13 @@ static NSString *UFBTaskID(NSURLSessionTask *task) { return [task.taskDescriptio
         for (NSString *name in [[NSFileManager defaultManager] contentsOfDirectoryAtPath:_directory error:&error]) {
             if (![name.pathExtension isEqual:@"json"]) continue;
             NSData *data=[NSData dataWithContentsOfFile:[_directory stringByAppendingPathComponent:name] options:0 error:&error]; UFBError(error);
-            NSMutableDictionary *j=[NSJSONSerialization JSONObjectWithData:data options:NSJSONReadingMutableContainers error:&error]; UFBError(error);
+            NSDictionary *j=[NSJSONSerialization JSONObjectWithData:data options:0 error:&error]; UFBError(error);
             _jobs[j[@"id"]]=j;
         }
         UFBError(error);
         _wifi=[self session:YES]; _any=[self session:NO];
         [self recover:_wifi]; [self recover:_any];
-        } @catch (NSException *exception) { _startupError=exception.reason; NSLog(@"UIFrame backup initialization failed: %@",exception.reason); }
+        } @catch (NSException *exception) { [self failRepository:exception]; }
     }
     return self;
 }
@@ -71,10 +71,22 @@ static NSString *UFBTaskID(NSURLSessionTask *task) { return [task.taskDescriptio
     return [NSURLSession sessionWithConfiguration:c delegate:self delegateQueue:NSOperationQueue.mainQueue];
 }
 - (NSString*)path:(NSString*)identifier { return [_directory stringByAppendingPathComponent:[identifier stringByAppendingString:@".json"]]; }
-- (void)save:(NSMutableDictionary*)j {
-    NSError *error=nil;
-    NSData *data=[NSJSONSerialization dataWithJSONObject:j options:0 error:&error]; UFBError(error);
-    [data writeToFile:[self path:j[@"id"]] options:NSDataWritingAtomic|NSDataWritingFileProtectionCompleteUntilFirstUserAuthentication error:&error]; UFBError(error);
+- (void)failRepository:(NSException*)exception {
+    if (!_repositoryFailure) {
+        _repositoryFailure=exception;
+        NSLog(@"UIFrame backup repository stopped: %@",exception.reason);
+        for (NSURLSessionTask *task in _tasks.allValues) [task cancel];
+    }
+}
+- (void)save:(NSDictionary*)j {
+    if (_repositoryFailure) @throw _repositoryFailure;
+    @try {
+        NSError *error=nil;
+        NSDictionary *snapshot=[j copy];
+        NSData *data=[NSJSONSerialization dataWithJSONObject:snapshot options:0 error:&error]; UFBError(error);
+        [data writeToFile:[self path:j[@"id"]] options:NSDataWritingAtomic|NSDataWritingFileProtectionCompleteUntilFirstUserAuthentication error:&error]; UFBError(error);
+        _jobs[j[@"id"]]=snapshot;
+    } @catch (NSException *exception) { [self failRepository:exception]; @throw; }
 }
 - (NSMutableDictionary*)keyQuery:(NSString*)identifier {
     return [@{(__bridge id)kSecClass:(__bridge id)kSecClassGenericPassword,
@@ -101,10 +113,11 @@ static NSString *UFBTaskID(NSURLSessionTask *task) { return [task.taskDescriptio
     [session getAllTasksWithCompletionHandler:^(NSArray<__kindof NSURLSessionTask*> *tasks) {
         dispatch_async(dispatch_get_main_queue(), ^{
             @try {
+                if (self.repositoryFailure) { for (NSURLSessionTask *task in tasks) [task cancel]; return; }
                 for (NSURLSessionUploadTask *task in tasks) {
                     if (!task.taskDescription || task.state==NSURLSessionTaskStateCompleted) { [task cancel]; continue; }
                     NSString *identifier=UFBTaskID(task);
-                    NSMutableDictionary *j=self.jobs[identifier];
+                    NSMutableDictionary *j=[self.jobs[identifier] mutableCopy];
                     if (j && ![task.taskDescription isEqual:UFBTaskName(j)]) { [task cancel]; continue; }
                     if (!j || UFBTerminal([j[@"state"] integerValue])) { [task cancel]; if (!j) continue; }
                     self.tasks[identifier]=task;
@@ -113,16 +126,19 @@ static NSString *UFBTaskID(NSURLSessionTask *task) { return [task.taskDescriptio
                 }
                 self.recovered++;
                 if (self.recovered==2) {
-                    for (NSMutableDictionary *j in self.jobs.allValues) {
+                    for (NSDictionary *stored in self.jobs.allValues) {
+                        NSMutableDictionary *j=[stored mutableCopy];
                         if (!self.tasks[j[@"id"]]) { j[@"released"]=@YES; [self save:j]; }
                         [self schedule:j];
                     }
                 }
-            } @catch (NSException *exception) { self.startupError=exception.reason; NSLog(@"UIFrame backup recovery failed: %@",exception.reason); }
+            } @catch (NSException *exception) { [self failRepository:exception];
+                for (NSURLSessionTask *task in tasks) [task cancel]; }
         });
     }];
 }
 - (void)schedule:(NSMutableDictionary*)j {
+    if (_repositoryFailure) @throw _repositoryFailure;
     if (_recovered!=2 || _tasks[j[@"id"]] || UFBTerminal([j[@"state"] integerValue])) return;
     @try {
         NSString *payload=[NSHomeDirectory() stringByAppendingPathComponent:j[@"payload"]];
@@ -140,15 +156,20 @@ static NSString *UFBTaskID(NSURLSessionTask *task) { return [task.taskDescriptio
         NSURLSessionUploadTask *task=[session uploadTaskWithRequest:request fromFile:[NSURL fileURLWithPath:payload]];
         task.taskDescription=UFBTaskName(j); _tasks[j[@"id"]]=task; [task resume];
     } @catch (NSException *exception) {
-        j[@"state"]=@6; j[@"released"]=@YES; j[@"error"]=exception.reason; [self save:j];
+        if (_repositoryFailure) @throw;
+        NSURLSessionTask *task=_tasks[j[@"id"]]; [task cancel];
+        j[@"state"]=@6; j[@"released"]=@(task==nil); j[@"error"]=exception.reason; [self save:j];
     }
 }
 - (NSDictionary*)call:(NSDictionary*)request {
-    UFBRequire(!_startupError,_startupError);
     NSString *identifier=request[@"id"], *op=request[@"op"];
     UFBRequire([identifier isKindOfClass:NSString.class] && identifier.length==32 &&
         [identifier rangeOfCharacterFromSet:[[NSCharacterSet characterSetWithCharactersInString:@"0123456789abcdef"] invertedSet]].location==NSNotFound,@"Invalid backup task ID");
-    NSMutableDictionary *j=_jobs[identifier];
+    if (_repositoryFailure) {
+        if ([op isEqual:@"pause"] || [op isEqual:@"cancel"]) [_tasks[identifier] cancel];
+        @throw _repositoryFailure;
+    }
+    NSMutableDictionary *j=[_jobs[identifier] mutableCopy];
     if ([op isEqual:@"submit"]) {
         if (!j) {
             NSString *prefix=[NSHomeDirectory() stringByAppendingString:@"/"];
@@ -159,7 +180,7 @@ static NSString *UFBTaskID(NSURLSessionTask *task) { return [task.taskDescriptio
             [self storeToken:request[@"token"] identifier:identifier];
             j=[request mutableCopy]; [j removeObjectForKey:@"token"]; [j removeObjectForKey:@"op"];
             j[@"payload"]=[payload substringFromIndex:prefix.length]; j[@"state"]=@0; j[@"released"]=@YES;
-            [self save:j]; _jobs[identifier]=j;
+            [self save:j];
         }
         [self schedule:j];
     } else if ([op isEqual:@"wake"]) {
@@ -169,7 +190,7 @@ static NSString *UFBTaskID(NSURLSessionTask *task) { return [task.taskDescriptio
         UFBRequire(!j || state!=3 || ![op isEqual:@"cancel"],@"A committed backup cannot be canceled");
         if (j && state!=3 && state!=8 && ([op isEqual:@"cancel"] || state==0 || state==1)) {
             j[@"state"]=[op isEqual:@"cancel"]?@8:@4; [self save:j];
-            [_tasks[identifier] cancel]; [self removeToken:identifier];
+            [_tasks[identifier] cancel];
         }
     } else if ([op isEqual:@"forget"]) {
         UFBRequire(!j || ([j[@"released"] boolValue] && UFBTerminal([j[@"state"] integerValue])),@"Transfer still owns its payload");
@@ -179,6 +200,7 @@ static NSString *UFBTaskID(NSURLSessionTask *task) { return [task.taskDescriptio
             [_jobs removeObjectForKey:identifier]; j=nil;
         }
     } else UFBRequire([op isEqual:@"status"],@"Unknown backup command");
+    j=[_jobs[identifier] mutableCopy];
     if (!j) return @{ @"exists":@NO, @"released":@YES };
     return @{ @"exists":@YES, @"released":j[@"released"], @"state":j[@"state"],
         @"error":j[@"error"]?:@"", @"backupId":j[@"backupId"]?:@"", @"confirmedBytes":j[@"confirmedBytes"]?:@0 };
@@ -196,7 +218,7 @@ static NSString *UFBTaskID(NSURLSessionTask *task) { return [task.taskDescriptio
 - (void)URLSession:(NSURLSession*)session task:(NSURLSessionTask*)task didCompleteWithError:(NSError*)error {
     if (!task.taskDescription) return;
     NSString *identifier=UFBTaskID(task);
-    NSMutableDictionary *j=_jobs[identifier];
+    NSMutableDictionary *j=[_jobs[identifier] mutableCopy];
     NSMutableDictionary *bodies=[self bodies:session]; NSData *body=bodies[@(task.taskIdentifier)];
     [bodies removeObjectForKey:@(task.taskIdentifier)];
     // An old completion cannot release a replacement task or remove its credential.
@@ -204,6 +226,7 @@ static NSString *UFBTaskID(NSURLSessionTask *task) { return [task.taskDescriptio
     NSURLSessionTask *current=_tasks[identifier];
     if (current && current.taskIdentifier!=task.taskIdentifier) return;
     [_tasks removeObjectForKey:identifier];
+    if (_repositoryFailure) return;
     @try {
         j[@"released"]=@YES;
         if (!UFBTerminal([j[@"state"] integerValue])) {
@@ -221,12 +244,12 @@ static NSString *UFBTaskID(NSURLSessionTask *task) { return [task.taskDescriptio
                 j[@"error"]=error.localizedDescription?:parseError.localizedDescription?:[NSString stringWithFormat:@"Server did not confirm verified backup (HTTP %ld)",(long)code];
             }
         }
-        [self save:j]; [self removeToken:j[@"id"]];
-    } @catch (NSException *exception) { NSLog(@"UIFrame backup completion persistence failed: %@",exception.reason); }
+        [self save:j];
+    } @catch (NSException *exception) { [self failRepository:exception]; }
 }
 - (void)onHandleEventsForBackgroundURLSession:(NSNotification*)notification {
     for (NSString *identifier in notification.userInfo) {
-        if (_startupError && [identifier hasPrefix:[NSBundle.mainBundle.bundleIdentifier stringByAppendingString:@".uiframe.backup.v1."]]) {
+        if (_repositoryFailure && [identifier hasPrefix:[NSBundle.mainBundle.bundleIdentifier stringByAppendingString:@".uiframe.backup.v1."]]) {
             void (^completion)(void)=notification.userInfo[identifier]; dispatch_async(dispatch_get_main_queue(),completion); continue;
         }
         if ([identifier isEqual:_wifi.configuration.identifier] || [identifier isEqual:_any.configuration.identifier])

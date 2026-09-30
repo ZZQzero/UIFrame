@@ -57,7 +57,7 @@ namespace Game.Media
                         result[i] = new MediaItem { id = sources[i].Id, path = output, name = sources[i].FileName, mime = sources[i].MimeType, size = new FileInfo(output).Length };
                     }
                     return result;
-                }, cancellationToken: cancellationToken);
+                });
                 cancellationToken.ThrowIfCancellationRequested();
                 return Selection(items, directory);
             }

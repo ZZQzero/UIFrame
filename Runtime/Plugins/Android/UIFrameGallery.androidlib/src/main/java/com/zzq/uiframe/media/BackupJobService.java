@@ -9,6 +9,6 @@ public final class BackupJobService extends JobService {
         run=BackupBridge.start(this,parameters); return run!=null;
     }
     @Override public boolean onStopJob(JobParameters parameters) {
-        BackupBridge.stop(run); return true; // OS interruption; no application-error retry.
+        return BackupBridge.stop(run); // OS interruption; no application-error retry.
     }
 }

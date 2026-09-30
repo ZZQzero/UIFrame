@@ -50,8 +50,9 @@ namespace Game.Media.Backup
 
         public async UniTask<IReadOnlyList<BackupPreparationFailure>> GetPreparationFailuresAsync(CancellationToken cancellationToken = default)
         {
-            MediaThread.Check(); await service.EnsureScanAsync(Scope, cancellationToken);
-            return GetPreparationFailures();
+            MediaThread.Check(); string scope = Scope;
+            await service.EnsureScanAsync(scope, cancellationToken);
+            return service.GetScanFailures(scope);
         }
 
         /// <summary>Explicitly makes failed source versions eligible for the next scan.</summary>
@@ -59,8 +60,7 @@ namespace Game.Media.Backup
         {
             MediaThread.Check();
             if (running || looping) throw new InvalidOperationException("Cancel and await the automatic loop before retrying preparation.");
-            foreach (var entry in service.LoadScan(Scope).entries.Where(x => !string.IsNullOrEmpty(x.error)))
-            { entry.retryRequested = true; service.SaveScanEntry(Scope, entry); }
+            service.RetryScanFailures(Scope);
         }
 
         /// <param name="wifiAvailable">Required for Wi-Fi-only mode. Supply a platform-verified network policy check; Unity reachability is not a Wi-Fi guarantee.</param>
@@ -109,8 +109,8 @@ namespace Game.Media.Backup
                 }
                 string scope = Scope;
                 await service.EnsureScanAsync(scope, cancellationToken);
-                bool baseline = service.ScanHasBaseline(scope);
-                if (!baseline && !policy.includeExisting)
+                bool initialized = service.ScanInitialized(scope);
+                if (!initialized && !policy.includeExisting)
                 {
                     await service.EstablishBaselineAsync(scope, Visit, cancellationToken);
                     LastScanUtc = DateTime.UtcNow; LastError = null; return;
@@ -127,23 +127,20 @@ namespace Game.Media.Backup
                         if (service.ScanKnows(scope, fingerprint)) continue;
                         var receipt = new BackupReceipt { fingerprint = fingerprint, source = image.Source + ":" + image.OriginId, name = image.FileName };
                         IReadOnlyList<string> accepted = null;
-                        if (baseline || policy.includeExisting)
+                        // Recover an accepted job before writing its scan receipt after a crash.
+                        if (existing.TryGetValue((receipt.source, image.Version), out var previous)) accepted = new[] { previous };
+                        else
                         {
-                            // Recover an accepted job before writing its scan receipt after a crash.
-                            if (existing.TryGetValue((receipt.source, image.Version), out var previous)) accepted = new[] { previous };
-                            else
+                            try
                             {
-                                try
-                                {
-                                    accepted = await service.EnqueueBatchAsync(new[] { image }, cancellationToken);
-                                    existing[(receipt.source, image.Version)] = accepted[0];
-                                }
-                                catch (BackupBudgetExceededException) when (uploadDuringScan && service.HasPendingNativeTransfers)
-                                { IsWaitingForCapacity = true; return false; }
-                                catch (BackupSourceFailure failure)
-                                {
-                                    receipt.error = failure.Original.SourceException.ToString();
-                                }
+                                accepted = await service.EnqueueBatchAsync(new[] { image }, cancellationToken);
+                                existing[(receipt.source, image.Version)] = accepted[0];
+                            }
+                            catch (BackupBudgetExceededException) when (uploadDuringScan && service.HasPendingNativeTransfers)
+                            { IsWaitingForCapacity = true; return false; }
+                            catch (BackupSourceFailure failure)
+                            {
+                                receipt.error = failure.Original.SourceException.ToString();
                             }
                         }
                         service.SaveScanEntry(scope, receipt);
@@ -154,7 +151,7 @@ namespace Game.Media.Backup
                     return true;
                 });
                 if (!completed) return;
-                if (!baseline) service.SaveScan(scope, new BackupScanState { baselineEstablished = true });
+                if (!initialized) service.CompleteScan(scope);
                 LastScanUtc = DateTime.UtcNow; LastError = service.ScanError(scope);
             }
             catch (Exception error) { LastError = error.Message; throw; }

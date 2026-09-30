@@ -10,6 +10,8 @@
 !/Samples~/**
 !/Tools~/
 !/Tools~/**
+!/Tests/Native~/
+!/Tests/Native~/**
 **/__pycache__/
 **/*.pyc
 **/credentials.json

@@ -5,7 +5,7 @@ import android.content.*;
 import android.net.*;
 import android.os.Build;
 import android.security.keystore.*;
-import android.util.AtomicFile;
+import android.system.Os;
 import android.util.Base64;
 import org.json.JSONObject;
 import java.io.*;
@@ -22,6 +22,7 @@ public final class BackupBridge {
     private static final int JOB = 0x554642;
     private static final String KEY = "UIFrame.Backup.Token.v1";
     private static Run active;
+    private static Exception repositoryFailure;
     private static Map<String,JSONObject> cache;
     private static final LinkedHashSet<String> pendingIds=new LinkedHashSet<>();
     private static int queuedWifi, queuedAny, scheduledNetwork = -1;
@@ -29,19 +30,31 @@ public final class BackupBridge {
     private static void count(JSONObject j, int delta) throws Exception {
         if (queued(j)) { if(j.getBoolean("wifiOnly")) queuedWifi+=delta; else queuedAny+=delta; if(delta>0) pendingIds.add(j.getString("id")); else pendingIds.remove(j.getString("id")); }
     }
+    private static void checkRepository() throws Exception { if (repositoryFailure!=null) throw repositoryFailure; }
+    private static void failRepository(Context c, Exception error) {
+        if (repositoryFailure!=null) return;
+        repositoryFailure=error;
+        if (active!=null) { active.stopped=true; if (active.connection!=null) active.connection.disconnect(); }
+        try { ((JobScheduler)c.getSystemService(Context.JOB_SCHEDULER_SERVICE)).cancel(JOB); }
+        catch (Exception cleanup) { android.util.Log.e("UIFrameBackup","Scheduler cancellation failed",cleanup); }
+        scheduledNetwork=-1;
+        android.util.Log.e("UIFrameBackup","Native repository stopped",error);
+    }
     private static void load(Context c) throws Exception {
-        if (cache!=null) return;
-        Map<String,JSONObject> loaded=new HashMap<>();
-        File[] files=directory(c).listFiles((d,n)->n.endsWith(".json") || n.endsWith(".json.bak"));
-        if(files==null) throw new IOException("Cannot enumerate native backup store");
-        for(File file:files) {
-            String id=file.getName().substring(0,32);
-            if(!loaded.containsKey(id)) loaded.put(id,readDisk(c,id));
-        }
-        int wifi=0, any=0;
-        for(JSONObject j:loaded.values()) if(queued(j)) { if(j.getBoolean("wifiOnly")) wifi++; else any++; }
-        cache=loaded; queuedWifi=wifi; queuedAny=any;
-        for(JSONObject j:loaded.values()) if(queued(j)) pendingIds.add(j.getString("id"));
+        checkRepository(); if (cache!=null) return;
+        try {
+            Map<String,JSONObject> loaded=new HashMap<>();
+            File[] files=directory(c).listFiles((d,n)->n.endsWith(".json"));
+            if(files==null) throw new IOException("Cannot enumerate native backup store");
+            for(File file:files) {
+                String id=file.getName().substring(0,32);
+                loaded.put(id,readDisk(c,id));
+            }
+            int wifi=0, any=0;
+            for(JSONObject j:loaded.values()) if(queued(j)) { if(j.getBoolean("wifiOnly")) wifi++; else any++; }
+            cache=loaded; queuedWifi=wifi; queuedAny=any;
+            for(JSONObject j:loaded.values()) if(queued(j)) pendingIds.add(j.getString("id"));
+        } catch (Exception error) { failRepository(c,error); throw error; }
     }
     private static JSONObject read(Context c, String id) throws Exception {
         load(c); JSONObject j=cache.get(id); return j==null?null:new JSONObject(j.toString());
@@ -61,17 +74,24 @@ public final class BackupBridge {
         return new File(directory(c), id + ".json");
     }
     private static JSONObject readDisk(Context c, String id) throws Exception {
-        AtomicFile file = new AtomicFile(path(c,id));
-        if (!file.getBaseFile().exists() && !new File(file.getBaseFile()+".bak").exists()) return null;
-        return new JSONObject(new String(file.readFully(), StandardCharsets.UTF_8));
+        try (InputStream input=new FileInputStream(path(c,id)); ByteArrayOutputStream bytes=new ByteArrayOutputStream()) {
+            byte[] buffer=new byte[4096]; int n;
+            while ((n=input.read(buffer))!=-1) bytes.write(buffer,0,n);
+            return new JSONObject(bytes.toString("UTF-8"));
+        }
     }
     private static void save(Context c, JSONObject j) throws Exception {
         load(c);
-        AtomicFile f = new AtomicFile(path(c,j.getString("id")));
-        FileOutputStream out = f.startWrite();
-        try { out.write(j.toString().getBytes(StandardCharsets.UTF_8)); f.finishWrite(out); }
-        catch (Exception e) { f.failWrite(out); throw e; }
-        String id=j.getString("id"); count(cache.get(id),-1); cache.put(id,new JSONObject(j.toString())); count(j,1);
+        try {
+            String encoded=j.toString(); JSONObject snapshot=new JSONObject(encoded); String id=snapshot.getString("id");
+            File target=path(c,id), temporary=new File(target+".new");
+            try (FileOutputStream out=new FileOutputStream(temporary)) {
+                out.write(encoded.getBytes(StandardCharsets.UTF_8)); out.getFD().sync();
+            }
+            // The checked OS rename commits atomically; every failed write/rename is observable.
+            Os.rename(temporary.getPath(),target.getPath());
+            count(cache.get(id),-1); cache.put(id,snapshot); count(snapshot,1);
+        } catch (Exception error) { failRepository(c,error); throw error; }
     }
     private static SecretKey secret() throws Exception {
         KeyStore store = KeyStore.getInstance("AndroidKeyStore"); store.load(null);
@@ -103,6 +123,12 @@ public final class BackupBridge {
         synchronized (LOCK) {
             try {
                 JSONObject request = new JSONObject(json); String id=request.getString("id"), op=request.getString("op");
+                if (repositoryFailure!=null) {
+                    if ((op.equals("pause") || op.equals("cancel")) && active!=null && id.equals(active.id)) {
+                        active.taskCanceled=true; if (active.connection!=null) active.connection.disconnect();
+                    }
+                    throw repositoryFailure;
+                }
                 JSONObject j=read(c,id);
                 // A stopped process has no Java worker. Recover ownership without declaring success.
                 if (j!=null && (active==null || !id.equals(active.id)) && !j.getBoolean("released")) {
@@ -134,7 +160,10 @@ public final class BackupBridge {
                 } else if (op.equals("forget")) {
                     if (j!=null && (!j.getBoolean("released") || j.getInt("state")==0 || j.getInt("state")==1))
                         throw new IllegalStateException("Transfer still owns its payload");
-                    new AtomicFile(path(c,id)).delete(); count(cache.remove(id),-1); j=null;
+                    File target=path(c,id), temporary=new File(target+".new");
+                    if (temporary.exists() && !temporary.delete()) throw new IOException("Cannot remove native task staging file");
+                    if (target.exists() && !target.delete()) throw new IOException("Cannot remove native task record");
+                    count(cache.remove(id),-1); j=null;
                 } else if (!op.equals("status")) throw new IllegalArgumentException("Unknown backup command");
                 return status(j).toString();
             } catch (Exception e) {
@@ -143,7 +172,7 @@ public final class BackupBridge {
         }
     }
     private static void schedule(Context c) throws Exception {
-        if (active!=null) return;
+        checkRepository(); if (active!=null) return;
         load(c); if (queuedWifi+queuedAny==0) return;
         int network=queuedAny==0?JobInfo.NETWORK_TYPE_UNMETERED:JobInfo.NETWORK_TYPE_ANY;
         if (scheduledNetwork==network) return;
@@ -162,7 +191,7 @@ public final class BackupBridge {
     }
     static Run start(BackupJobService service, JobParameters parameters) {
         final Run run;
-        synchronized (LOCK) { if (active!=null) return null; run=new Run(); active=run; scheduledNetwork=-1; }
+        synchronized (LOCK) { if (repositoryFailure!=null || active!=null) return null; run=new Run(); active=run; scheduledNetwork=-1; }
         new Thread(()-> {
             boolean pending=false;
             try {
@@ -185,22 +214,25 @@ public final class BackupBridge {
                     transfer(service,run,selected);
                     synchronized (LOCK) { run.id=null; run.connection=null; }
                 }
-            } catch (Exception error) { android.util.Log.e("UIFrameBackup","Native queue failed",error); }
+            } catch (Exception error) { synchronized (LOCK) { failRepository(service,error); } }
             finally {
                 synchronized (LOCK) {
                     active=null;
                     try {
-                        pending=queuedWifi+queuedAny>0;
-                        if (!run.stopped) service.jobFinished(parameters,pending);
+                        pending=repositoryFailure==null && queuedWifi+queuedAny>0;
+                        if (!run.stopped || repositoryFailure!=null) service.jobFinished(parameters,pending);
                         else schedule(service);
-                    } catch (Exception error) { android.util.Log.e("UIFrameBackup","Native scheduling failed",error); }
+                    } catch (Exception error) { failRepository(service,error); }
                 }
             }
         },"UIFrameBackup").start();
         return run;
     }
-    static void stop(Run run) {
-        synchronized (LOCK) { if (run!=null) { run.stopped=true; if (run.connection!=null) run.connection.disconnect(); } }
+    static boolean stop(Run run) {
+        synchronized (LOCK) {
+            if (run!=null) { run.stopped=true; if (run.connection!=null) run.connection.disconnect(); }
+            return repositoryFailure==null;
+        }
     }
     private static void transfer(Context c, Run run, JSONObject original) throws Exception {
         JSONObject response=null; Exception failure=null; int code=0; boolean constraintLost=false;

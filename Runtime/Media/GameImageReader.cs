@@ -45,7 +45,7 @@ namespace Game.Media
                     nativeDirectory = output; path = result.items[0].path;
                 }
                 else if (image.Source != "file") throw new PlatformNotSupportedException("Native source unavailable.");
-                var header = await UniTask.RunOnThreadPool(() => ImageHeader.ReadFile(path), cancellationToken: cancellationToken);
+                var header = await UniTask.RunOnThreadPool(() => ImageHeader.ReadFile(path));
                 if (!NativeMedia.Available && (long)header.Width * header.Height > 16 * 1024 * 1024)
                     throw new GalleryException("ImageTooLarge", "Desktop preview is limited to 16 megapixels; mobile uses native downsampling.");
                 ImageHeader.CheckTarget(header.Width, header.Height, edge, pixels);
@@ -111,7 +111,7 @@ namespace Game.Media
                 if (options.Mode == ImageExportMode.PreserveProvidedBytes)
                 {
                     path = Path.Combine(directory, "image" + ImagePaths.Extension(image.FileName));
-                    await UniTask.RunOnThreadPool(() => GameGallery.CopyFile(image.Id, path, cancellationToken), cancellationToken: cancellationToken);
+                    await UniTask.RunOnThreadPool(() => GameGallery.CopyFile(image.Id, path, cancellationToken));
                 }
                 else
                 {
@@ -125,7 +125,7 @@ namespace Game.Media
                         path = Path.Combine(directory, "image.jpg");
                     }
                     else { bytes = ImageConversion.EncodeToPNG(preview.Texture); path = Path.Combine(directory, "image.png"); }
-                    await UniTask.RunOnThreadPool(() => File.WriteAllBytes(path, bytes), cancellationToken: cancellationToken);
+                    await UniTask.RunOnThreadPool(() => File.WriteAllBytes(path, bytes));
                 }
                 cancellationToken.ThrowIfCancellationRequested();
                 return new ImageFile(path, new ImageStorage(directory));

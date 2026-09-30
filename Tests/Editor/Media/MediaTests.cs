@@ -111,13 +111,13 @@ namespace UIFrame.Regression
                 await service.EnsureScanAsync(scope,default); var original=new Exception("Interrupted enumeration"); Exception observed=null;
                 try { await service.EstablishBaselineAsync(scope,async consume => { await consume(new[]{ImageReference.FromFile(imagePath)}); throw original; },default); }
                 catch(Exception error) { observed=error; }
-                Assert.AreSame(original,observed); Assert.IsFalse(service.ScanHasBaseline(scope));
+                Assert.AreSame(original,observed); Assert.IsFalse(service.ScanInitialized(scope));
                 Assert.IsEmpty(Directory.GetFiles(Config().StorageDirectory,"*.baseline.new"));
                 await service.EstablishBaselineAsync(scope,consume=>consume(new[]{ImageReference.FromFile(imagePath)}),default);
             }
             using(var reopened=new ImageBackupService(Config()))
             {
-                await reopened.EnsureScanAsync(scope,default); Assert.IsTrue(reopened.ScanHasBaseline(scope));
+                await reopened.EnsureScanAsync(scope,default); Assert.IsTrue(reopened.ScanInitialized(scope));
                 var image=ImageReference.FromFile(imagePath); Assert.IsTrue(reopened.ScanKnows(scope,"file:"+image.Id+"\n"+image.Version));
             }
         });
@@ -127,7 +127,7 @@ namespace UIFrame.Regression
             string scope="Directory::False";
             using(var service=new ImageBackupService(Config()))
             {
-                service.SaveScan(scope,new BackupScanState { baselineEstablished=true });
+                service.CompleteScan(scope);
                 for(int i=0;i<200;i++) service.SaveScanEntry(scope,new BackupReceipt { fingerprint="image-"+i,error=i==7?"unavailable":null });
             }
             using(var service=new ImageBackupService(Config()))
@@ -140,40 +140,62 @@ namespace UIFrame.Regression
             }
         });
 
-        [Test] public void DirectoryIdentityCanonicalizesOldAndNewFormats()
+        [Test] public void DirectoryIdentityHasStablePropertyOrder()
         {
-            string legacy="{\"bookmark\":\"saved-bookmark\",\"relative\":\"photo.png\"}";
-            string compact=ImageIdentity.Directory(legacy);
-            Assert.IsFalse(compact.Contains("saved-bookmark")); Assert.AreEqual(compact,ImageIdentity.Directory(compact));
-            Assert.AreEqual("directory:"+compact+"\nv1",ImageIdentity.Source("directory:"+legacy+"\nv1"));
-            Assert.AreEqual("directory:content://provider/a\nv1",ImageIdentity.Source("directory:content://provider/a\nv1"));
+            string compact="{\"bookmarkId\":\"directory-id\",\"relative\":\"photo.png\"}";
+            Assert.AreEqual(compact,ImageIdentity.Directory("{\"relative\":\"photo.png\",\"bookmarkId\":\"directory-id\"}"));
+            Assert.AreEqual(compact,ImageIdentity.Directory(compact));
+            Assert.AreEqual("content://provider/a",ImageIdentity.Directory("content://provider/a"));
         }
 
-        [UnityTest] public IEnumerator LegacyDirectoryReceiptsAndAcceptedTaskKeepTheirIdentity() => UniTask.ToCoroutine(async () =>
+        [UnityTest] public IEnumerator MissingCommittedBaselineStopsScanWithoutAcceptingHistory() => UniTask.ToCoroutine(async () =>
         {
-            string legacy="directory:{\"bookmark\":\"saved-bookmark\",\"relative\":\"photo.png\"}", scope="legacy-directory";
-            string compact=ImageIdentity.Source(legacy), key=null, id=null;
             using(var service=new ImageBackupService(Config()))
             {
-                id=(await service.EnqueueAsync(new[]{ImageReference.FromFile(imagePath)}))[0];
-                var task=service.GetTasks().Single(); key=task.key; task.source=legacy;
-                ImageBackupService.AtomicJson(Path.Combine(Config().StorageDirectory,"batches",task.batchId,id+".json"),task);
-                service.SaveScan(scope,new BackupScanState { baselineEstablished=true });
-                service.SaveScanEntry(scope,new BackupReceipt { fingerprint=legacy+"\nv1",source=legacy,error="old failure" });
+                var automatic=new AutomaticImageBackup(service);
+                automatic.Configure(new AutomaticBackupPolicy { enabled=true,sourceKind=BackupSourceKind.Directory,source=root,wifiOnly=false });
+                await automatic.ScanOnceAsync(); Assert.IsEmpty(service.GetTasks());
+            }
+            File.Delete(Directory.GetFiles(Config().StorageDirectory,"*.baseline").Single());
+            using(var service=new ImageBackupService(Config()))
+            {
+                var automatic=new AutomaticImageBackup(service); Exception observed=null;
+                try { await automatic.ScanOnceAsync(); } catch(Exception error) { observed=error; }
+                Assert.IsInstanceOf<FileNotFoundException>(observed); Assert.IsEmpty(service.GetTasks());
+            }
+        });
+
+        [UnityTest] public IEnumerator IncludedHistoryReopensWithoutExclusionBaseline() => UniTask.ToCoroutine(async () =>
+        {
+            using(var service=new ImageBackupService(Config()))
+            {
+                var automatic=new AutomaticImageBackup(service);
+                automatic.Configure(new AutomaticBackupPolicy { enabled=true,sourceKind=BackupSourceKind.Directory,source=root,includeExisting=true,wifiOnly=false });
+                await automatic.ScanOnceAsync(); Assert.AreEqual(1,service.GetTasks().Count);
+            }
+            Assert.IsEmpty(Directory.GetFiles(Config().StorageDirectory,"*.baseline"));
+            using(var service=new ImageBackupService(Config()))
+            {
+                var automatic=new AutomaticImageBackup(service); await automatic.ScanOnceAsync();
+                Assert.AreEqual(1,service.GetTasks().Count); Assert.IsNull(automatic.LastError);
+            }
+        });
+
+        [UnityTest] public IEnumerator PendingFailureQueryKeepsItsOriginalScope() => UniTask.ToCoroutine(async () =>
+        {
+            using(var service=new ImageBackupService(Config()))
+            {
+                foreach(string scope in new[]{"a","b"})
+                    service.SaveScanEntry("Directory:"+scope+":False",new BackupReceipt { fingerprint=scope,error=scope });
             }
             using(var service=new ImageBackupService(Config()))
             {
-                var task=service.GetTasks().Single(); Assert.AreEqual(id,task.id); Assert.AreEqual(key,task.key); Assert.AreEqual(compact,task.source);
-                await service.EnsureScanAsync(scope,default); Assert.IsTrue(service.ScanKnows(scope,compact+"\nv1"));
-                Assert.AreEqual("old failure",service.GetScanFailures(scope).Single().Error);
-                var receipt=service.LoadScan(scope).entries.Single(); receipt.retryRequested=true; receipt.error=null;
-                service.SaveScanEntry(scope,receipt);
-            }
-            using(var service=new ImageBackupService(Config()))
-            {
-                await service.EnsureScanAsync(scope,default);
-                Assert.IsFalse(service.ScanKnows(scope,compact+"\nv1")); Assert.IsEmpty(service.GetScanFailures(scope));
-                Assert.AreEqual(1,service.LoadScan(scope).entries.Count);
+                var automatic=new AutomaticImageBackup(service);
+                automatic.Configure(new AutomaticBackupPolicy { source="a" });
+                var pending=automatic.GetPreparationFailuresAsync();
+                automatic.Configure(new AutomaticBackupPolicy { source="b" });
+                Assert.AreEqual("a",(await pending).Single().Error);
+                Assert.AreEqual("b",(await automatic.GetPreparationFailuresAsync()).Single().Error);
             }
         });
 
@@ -197,6 +219,97 @@ namespace UIFrame.Regression
             }
         });
 
+        sealed class ResponseHandler : System.Net.Http.HttpMessageHandler
+        {
+            internal Func<System.Net.Http.HttpResponseMessage> respond;
+            internal int requests;
+            protected override System.Threading.Tasks.Task<System.Net.Http.HttpResponseMessage> SendAsync(System.Net.Http.HttpRequestMessage request,CancellationToken token)
+            { requests++; return System.Threading.Tasks.Task.FromResult(respond()); }
+        }
+        sealed class StreamResponse : System.Net.Http.HttpContent
+        {
+            readonly Stream stream;
+            internal StreamResponse(Stream stream) { this.stream=stream; }
+            protected override bool TryComputeLength(out long length) { length=0; return false; }
+            protected override System.Threading.Tasks.Task<Stream> CreateContentReadStreamAsync() => System.Threading.Tasks.Task.FromResult(stream);
+            protected override System.Threading.Tasks.Task SerializeToStreamAsync(Stream target,System.Net.TransportContext context) => throw new InvalidOperationException("Response must be streamed.");
+        }
+        sealed class StalledStream : MemoryStream
+        {
+            readonly System.Threading.Tasks.TaskCompletionSource<int> pending=new System.Threading.Tasks.TaskCompletionSource<int>();
+            internal volatile bool closed, reading;
+            public override System.Threading.Tasks.Task<int> ReadAsync(byte[] buffer,int offset,int count,CancellationToken token) { reading=true; return pending.Task; }
+            protected override void Dispose(bool disposing)
+            { closed=true; pending.TrySetException(new ObjectDisposedException(nameof(StalledStream))); base.Dispose(disposing); }
+        }
+        sealed class CountingStream : MemoryStream
+        {
+            internal int read;
+            internal CountingStream(byte[] data) : base(data,false) { }
+            public override async System.Threading.Tasks.Task<int> ReadAsync(byte[] buffer,int offset,int count,CancellationToken token)
+            { int n=await base.ReadAsync(buffer,offset,count,token); read+=n; return n; }
+        }
+        [UnityTest] public IEnumerator RequestDeadlineIncludesBodyAndPreservesCallerCancellation() => UniTask.ToCoroutine(async () =>
+        {
+            var config=Config(); config.RequestTimeout=TimeSpan.FromMilliseconds(250);
+            var handler=new ResponseHandler();
+            using var service=new ImageBackupService(config,NativeBackup.Call,false,handler);
+            foreach(bool cancelByCaller in new[]{false,true})
+            {
+                var stream=new StalledStream(); handler.respond=()=>new System.Net.Http.HttpResponseMessage { Content=new StreamResponse(stream) };
+                using var cancellation=new CancellationTokenSource();
+                var pending=service.RefreshServerCapabilitiesAsync(cancellation.Token);
+                if(cancelByCaller) cancellation.Cancel();
+                Exception observed=null; try { await pending; } catch(Exception error) { observed=error; }
+                if(cancelByCaller) Assert.IsInstanceOf<OperationCanceledException>(observed); else Assert.IsInstanceOf<TimeoutException>(observed);
+                Assert.IsTrue(stream.closed);
+            }
+            handler.respond=()=>new System.Net.Http.HttpResponseMessage { Content=new System.Net.Http.StringContent("{\"protocolVersion\":1,\"account\":\"integration-user\",\"chunkBytes\":1024,\"maxFileBytes\":1048576}") };
+            await service.RefreshServerCapabilitiesAsync(); Assert.AreEqual(3,handler.requests);
+        });
+
+        static void SaveTask(ImageBackupService service,BackupTaskInfo task) =>
+            typeof(ImageBackupService).GetMethod("Save",System.Reflection.BindingFlags.Instance|System.Reflection.BindingFlags.NonPublic).Invoke(service,new object[]{task});
+
+        [UnityTest] public IEnumerator DownloadsBoundUnknownLengthAndVerifyBeforePublishing() => UniTask.ToCoroutine(async () =>
+        {
+            var handler=new ResponseHandler(); using var service=new ImageBackupService(Config(),NativeBackup.Call,false,handler);
+            await service.EnqueueAsync(new[]{ImageReference.FromFile(imagePath)});
+            var task=service.GetTasks().Single(); task.state=BackupState.Completed; task.backupId="verified"; SaveTask(service,task);
+            byte[] expected=File.ReadAllBytes(imagePath); string destination=Path.Combine(root,"restored.png");
+            foreach(string mode in new[]{"oversize","short","corrupt","valid"})
+            {
+                byte[] body=mode=="oversize"?new byte[expected.Length+1024*1024]:mode=="short"?expected.Take(expected.Length-1).ToArray():(byte[])expected.Clone();
+                if(mode=="corrupt") body[0]^=1;
+                var stream=new CountingStream(body); handler.respond=()=>new System.Net.Http.HttpResponseMessage { Content=new StreamResponse(stream) };
+                Exception observed=null; try { await service.DownloadAndVerifyAsync(task.id,destination); } catch(Exception error) { observed=error; }
+                Assert.LessOrEqual(stream.read,expected.Length+1); Assert.IsEmpty(Directory.GetFiles(root,"*.part"));
+                if(mode=="valid") { Assert.IsNull(observed); CollectionAssert.AreEqual(expected,File.ReadAllBytes(destination)); }
+                else { Assert.IsInstanceOf<IOException>(observed); Assert.IsFalse(File.Exists(destination)); }
+            }
+            Exception exists=null; try { await service.DownloadAndVerifyAsync(task.id,destination); } catch(Exception error) { exists=error; }
+            Assert.IsInstanceOf<IOException>(exists); Assert.AreEqual(4,handler.requests); CollectionAssert.AreEqual(expected,File.ReadAllBytes(destination));
+        });
+
+        [UnityTest] public IEnumerator StalledDownloadTimesOutAndRemovesTemporaryFile() => UniTask.ToCoroutine(async () =>
+        {
+            var config=Config(); config.RequestTimeout=TimeSpan.FromMilliseconds(250);
+            var handler=new ResponseHandler(); using var service=new ImageBackupService(config,NativeBackup.Call,false,handler);
+            await service.EnqueueAsync(new[]{ImageReference.FromFile(imagePath)});
+            var task=service.GetTasks().Single(); task.state=BackupState.Completed; task.backupId="verified"; SaveTask(service,task);
+            foreach(bool cancelByCaller in new[]{false,true})
+            {
+                var stream=new StalledStream(); handler.respond=()=>new System.Net.Http.HttpResponseMessage { Content=new StreamResponse(stream) };
+                string destination=Path.Combine(root,"restored.png"); using var cancellation=new CancellationTokenSource();
+                var pending=service.DownloadAndVerifyAsync(task.id,destination,cancellation.Token);
+                await UniTask.WaitUntil(()=>stream.reading || stream.closed);
+                if(cancelByCaller) cancellation.Cancel();
+                Exception observed=null; try { await pending; } catch(Exception error) { observed=error; }
+                if(cancelByCaller) Assert.IsInstanceOf<OperationCanceledException>(observed); else Assert.IsInstanceOf<TimeoutException>(observed);
+                Assert.IsTrue(stream.closed); Assert.IsFalse(File.Exists(destination)); Assert.IsEmpty(Directory.GetFiles(root,"*.part"));
+            }
+        });
+
         [UnityTest] public IEnumerator AsyncOpenPreservesQueueAndCanceledOpenReleasesOwnership() => UniTask.ToCoroutine(async () =>
         {
             using (var service = await ImageBackupService.CreateAsync(Config()))
@@ -212,6 +325,31 @@ namespace UIFrame.Regression
             Assert.IsInstanceOf<OperationCanceledException>(observed);
             using var reopened = await ImageBackupService.CreateAsync(Config());
             Assert.AreEqual(1, reopened.GetTasks().Count);
+        });
+
+        [UnityTest] public IEnumerator CancelingFileWorkReturnsToOwnerThreadAndReleasesBatch() => UniTask.ToCoroutine(async () =>
+        {
+            int owner=Thread.CurrentThread.ManagedThreadId;
+            string large=Path.Combine(root,"large.png"); using(var file=File.Create(large)) file.SetLength(16*1024*1024);
+            using var service=new ImageBackupService(Config());
+            foreach(bool import in new[]{true,false})
+            {
+                using var cancellation=new CancellationTokenSource(); Exception observed=null;
+                if(import)
+                {
+                    var pending=GameGallery.ImportFilesAsync(new[]{large},cancellation.Token); cancellation.Cancel();
+                    try { using var result=await pending; } catch(Exception error) { observed=error; }
+                }
+                else
+                {
+                    var pending=service.EnqueueAsync(new[]{ImageReference.FromFile(large)},cancellation.Token); cancellation.Cancel();
+                    try { await pending; } catch(Exception error) { observed=error; }
+                }
+                int returned=Thread.CurrentThread.ManagedThreadId; await UniTask.SwitchToMainThread();
+                Assert.AreEqual(owner,returned); Assert.IsInstanceOf<OperationCanceledException>(observed);
+                Assert.IsEmpty(service.GetTasks()); Assert.IsEmpty(Directory.GetFiles(Path.Combine(Config().StorageDirectory,"staging"),"*",SearchOption.AllDirectories));
+            }
+            await service.EnqueueAsync(new[]{ImageReference.FromFile(imagePath)}); Assert.AreEqual(1,service.GetTasks().Count);
         });
 
         [UnityTest] public IEnumerator EmptyQueueDoesNotRequestCredentialsOrServer() => UniTask.ToCoroutine(async () =>
@@ -458,6 +596,37 @@ namespace UIFrame.Regression
             Assert.IsTrue(File.Exists(imagePath)); Assert.AreEqual(0,Directory.GetFiles(Path.Combine(root,"backup"),"*.payload",SearchOption.AllDirectories).Length);
         });
 
+        [UnityTest] public IEnumerator QueuePauseCoversNewTasksAutomaticDiscoveryAndReopening() => UniTask.ToCoroutine(async () =>
+        {
+            var config=Config(); int credentials=0;
+            config.AccessToken=()=> { credentials++; throw new Exception("Paused queue must not make requests."); };
+            using(var service=new ImageBackupService(config))
+            {
+                await service.PauseAsync(); Assert.IsTrue(service.IsPaused);
+                await service.EnqueueAsync(new[]{ImageReference.FromFile(imagePath)});
+                var automatic=new AutomaticImageBackup(service);
+                automatic.Configure(new AutomaticBackupPolicy { enabled=true,sourceKind=BackupSourceKind.Directory,source=root,includeExisting=true,wifiOnly=false });
+                File.Copy(imagePath,Path.Combine(root,"discovered.png"));
+                await automatic.ScanOnceAsync(uploadDuringScan:true); await service.ProcessAsync();
+                Assert.AreEqual(2,service.GetTasks().Count); Assert.IsTrue(service.GetTasks().All(x=>x.state==BackupState.Paused));
+            }
+            using(var service=new ImageBackupService(config))
+            {
+                Assert.IsTrue(service.IsPaused); await service.ProcessAsync(); Assert.AreEqual(0,credentials);
+                service.Resume(); Assert.IsFalse(service.IsPaused); Assert.IsTrue(service.GetTasks().All(x=>x.state==BackupState.Queued));
+            }
+            using(var service=new ImageBackupService(config)) Assert.IsFalse(service.IsPaused);
+        });
+
+        [UnityTest] public IEnumerator FailedPauseCommitDoesNotPublishPausedState() => UniTask.ToCoroutine(async () =>
+        {
+            using var service=new ImageBackupService(Config());
+            await service.EnqueueAsync(new[]{ImageReference.FromFile(imagePath)});
+            Directory.CreateDirectory(Path.Combine(Config().StorageDirectory,"identity.json.new"));
+            Exception observed=null; try { await service.PauseAsync(); } catch(Exception error) { observed=error; }
+            Assert.IsNotNull(observed); Assert.IsFalse(service.IsPaused); Assert.AreEqual(BackupState.Queued,service.GetTasks().Single().state);
+        });
+
         sealed class NativeFixture
         {
             public NativeBackupStatus status = new NativeBackupStatus { exists = true, released = false, state = BackupState.Uploading };
@@ -635,6 +804,18 @@ namespace UIFrame.Regression
             for (int i = 0; i < 3; i++) service.GetTasks().Single().state = BackupState.Canceled;
             Assert.AreEqual(timestamp, File.GetLastWriteTimeUtc(path)); Assert.AreEqual(BackupState.Uploading, service.GetTasks().Single().state);
             native.status.confirmedBytes = 1; service.GetTasks(); Assert.AreNotEqual(timestamp, File.GetLastWriteTimeUtc(path));
+        });
+
+        [UnityTest, Category("MediaIntegration"), Explicit("Requires integration_server.py")]
+        public IEnumerator PolicyWaitLeavesTaskQueuedWithoutRecordingFailure() => UniTask.ToCoroutine(async () =>
+        {
+            var config=Config(); config.EnableTransientRetries=true;
+            using var service=new ImageBackupService(config);
+            await service.EnqueueAsync(new[]{ImageReference.FromFile(imagePath)}); int checks=0;
+            await service.ProcessAsync(canTransfer:()=>++checks<3);
+            var waiting=service.GetTasks().Single(); Assert.AreEqual(3,checks); Assert.AreEqual(BackupState.Queued,waiting.state);
+            Assert.AreEqual(0,waiting.retries); Assert.IsTrue(string.IsNullOrEmpty(waiting.error)); Assert.AreEqual(1,Payloads().Length);
+            await service.ProcessAsync(canTransfer:()=>true); Assert.AreEqual(BackupState.Completed,service.GetTasks().Single().state);
         });
 
         [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]

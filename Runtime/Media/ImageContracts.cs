@@ -116,32 +116,17 @@ namespace Game.Media
             return Array.AsReadOnly(result);
         }
     }
-    // One canonical format at the persistence boundary. Legacy embedded bookmarks remain readable.
+    // Canonicalize the current directory identity because native JSON property order is unspecified.
     internal static class ImageIdentity
     {
-        [Serializable] sealed class DirectoryIdentity { public string bookmark, bookmarkId, relative; }
-        [Serializable] sealed class CompactIdentity { public string bookmarkId, relative; }
+        [Serializable] sealed class DirectoryIdentity { public string bookmarkId, relative; }
         internal static string Directory(string value)
         {
             if (string.IsNullOrEmpty(value) || value[0] != '{') return value; // Android content URI.
             var id = JsonUtility.FromJson<DirectoryIdentity>(value);
-            if (string.IsNullOrEmpty(id.relative) || string.IsNullOrEmpty(id.bookmark) && string.IsNullOrEmpty(id.bookmarkId))
+            if (string.IsNullOrEmpty(id.relative) || string.IsNullOrEmpty(id.bookmarkId))
                 throw new GalleryException("InvalidImage", "Invalid directory image identity.");
-            if (string.IsNullOrEmpty(id.bookmarkId))
-            {
-                using var sha = System.Security.Cryptography.SHA256.Create();
-                id.bookmarkId = BitConverter.ToString(sha.ComputeHash(System.Text.Encoding.UTF8.GetBytes(id.bookmark))).Replace("-", "").ToLowerInvariant();
-            }
-            return JsonUtility.ToJson(new CompactIdentity { bookmarkId = id.bookmarkId, relative = id.relative });
-        }
-        internal static string Source(string value)
-        {
-            const string prefix = "directory:";
-            if (value == null || !value.StartsWith(prefix, StringComparison.Ordinal)) return value;
-            int version = value.LastIndexOf('\n');
-            return prefix + Directory(version < 0 ? value.Substring(prefix.Length) : value.Substring(prefix.Length, version - prefix.Length))
-                + (version < 0 ? "" : value.Substring(version));
+            return JsonUtility.ToJson(id);
         }
     }
-
 }
