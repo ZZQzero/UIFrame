@@ -16,4 +16,4 @@
 
 应用负责创建、刷新并持有 ImageLibraryIndex 与 scope，再调用 `await list.InitializeAsync(library, scope)`。`ShowFirstPageAsync` / `ShowNextPageAsync` 切换最多200项的元数据页，`HasNextPage` 控制下一页按钮。屏幕只创建可见单元，滚动重绑取消旧加载，离屏释放租约；缓存由示例持有。
 
-关闭页面先 `await list.ShutdownAsync()`，之后应用再关闭图库索引。不要在列表仍查询时关闭索引。后台加载失败会向 Unity 日志传播，不以空图片伪装成功。5000张/10轮滚动、最低设备帧预算仍需产品场景验收。
+列表初始化时持有图库订阅并刷新首页，`HasLibraryChanges` 可提示重新加载；`ShowFirstPageAsync` 读取当前第一页。关闭页面先 `await list.ShutdownAsync()`（等待订阅释放），之后应用再关闭图库索引。不要在列表仍查询时关闭索引。后台加载失败会向 Unity 日志传播，不以空图片伪装成功。5000张/10轮滚动、最低设备帧预算仍需产品场景验收。

@@ -52,10 +52,13 @@ namespace Game.Media.Storage
         }
         internal async Task<LibraryScopeState> State(string scope,CancellationToken token=default)
         {
+            return await FindState(scope,token).ConfigureAwait(false)??throw new ArgumentException("Library scope not registered.");
+        }
+        internal async Task<LibraryScopeState> FindState(string scope,CancellationToken token=default)
+        {
             var rows=await Query(new SqliteCommand("SELECT id,revision,permission_generation,requires_reconcile,access_state FROM library_scopes WHERE id=?",scope),
                 r=>new LibraryScopeState { Scope=r.GetString(0),Revision=r.GetInt64(1),Permission=r.GetInt64(2),RequiresReconcile=r.GetInt64(3)!=0,Access=r.GetInt64(4) },token).ConfigureAwait(false);
-            if(rows.Count!=1) throw new ArgumentException("Library scope not registered.");
-            return rows[0];
+            return rows.Count==0?null:rows[0];
         }
         internal async Task<(long sequence,long retained)> Position(CancellationToken token=default)
         {
@@ -85,11 +88,11 @@ namespace Game.Media.Storage
                     "WHERE s.source_id IS NULL OR s.present=0 OR s.asset_revision<>a.asset_revision OR a.content_version IS NOT ? OR a.name<>? OR a.mime<>? OR a.width<>? OR a.height<>?",
                     scope.Scope,source,image.Version,image.Version,scope.Revision,scope.Permission,source,scope.Scope,image.Version,image.FileName,image.MimeType,image.Width??0,image.Height??0));
                 commands.Add(new SqliteCommand(
-                    "INSERT INTO assets(source_id,content_version,name,mime,width,height,modified_utc,accessible,content_needs_reconcile) VALUES(?,?,?,?,?,?,0,1,?) " +
-                    "ON CONFLICT(source_id) DO UPDATE SET asset_revision=assets.asset_revision+CASE WHEN assets.content_version IS NOT excluded.content_version OR assets.name<>excluded.name OR assets.mime<>excluded.mime OR assets.width<>excluded.width OR assets.height<>excluded.height THEN 1 ELSE 0 END,content_version=excluded.content_version,name=excluded.name,mime=excluded.mime,width=excluded.width,height=excluded.height,accessible=1,content_needs_reconcile=excluded.content_needs_reconcile",
-                    source,image.Version,image.FileName,image.MimeType,image.Width??0,image.Height??0,string.IsNullOrEmpty(image.Version)?1:0));
+                    "INSERT INTO assets(source_id,content_version,name,mime,width,height) VALUES(?,?,?,?,?,?) " +
+                    "ON CONFLICT(source_id) DO UPDATE SET asset_revision=assets.asset_revision+CASE WHEN assets.content_version IS NOT excluded.content_version OR assets.name<>excluded.name OR assets.mime<>excluded.mime OR assets.width<>excluded.width OR assets.height<>excluded.height THEN 1 ELSE 0 END,content_version=excluded.content_version,name=excluded.name,mime=excluded.mime,width=excluded.width,height=excluded.height",
+                    source,image.Version,image.FileName,image.MimeType,image.Width??0,image.Height??0));
                 commands.Add(new SqliteCommand(
-                    "INSERT INTO scope_assets(scope_id,source_id,sort_key,seen_scan_id,updated_seq,present,content_version,asset_revision) VALUES(?,?,0,?,(SELECT coalesce(max(sequence),0) FROM change_log),1,?,(SELECT asset_revision FROM assets WHERE source_id=?)) " +
+                    "INSERT INTO scope_assets(scope_id,source_id,seen_scan_id,updated_seq,present,content_version,asset_revision) VALUES(?,?,?,(SELECT coalesce(max(sequence),0) FROM change_log),1,?,(SELECT asset_revision FROM assets WHERE source_id=?)) " +
                     "ON CONFLICT(scope_id,source_id) DO UPDATE SET seen_scan_id=excluded.seen_scan_id,updated_seq=excluded.updated_seq,present=1,content_version=excluded.content_version,asset_revision=excluded.asset_revision",
                     scope.Scope,source,run,image.Version,source));
             }

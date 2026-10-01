@@ -16,15 +16,18 @@ public sealed class GalleryVirtualListDemo : MonoBehaviour,LoopScrollDataSource,
     IReadOnlyList<ImageReference> items=Array.Empty<ImageReference>();
     ImageThumbnailCache cache;
     ImageLibraryIndex library;
+    ImageLibraryIndex.WatchHandle observation;
     ImageLibraryScope scope;
     ImageLibraryCursor next;
     bool busy,closing,closed;
     public bool HasNextPage=>next!=null;
+    public bool HasLibraryChanges {get;private set;}
     public async UniTask InitializeAsync(ImageLibraryIndex index,ImageLibraryScope source)
     {
         if(cache!=null || closing)throw new InvalidOperationException("Gallery list is already initialized or closed.");
         if(scroll==null || cellPrefab==null)throw new InvalidOperationException("Configure LoopVerticalScrollRect and cell prefab.");
         library=index??throw new ArgumentNullException(nameof(index));scope=source??throw new ArgumentNullException(nameof(source));
+        observation=library.Watch(scope,changes=>HasLibraryChanges|=changes.RequiresRefresh || changes.Items.Count!=0);
         cache=new ImageThumbnailCache();scroll.dataSource=this;scroll.prefabSource=this;
         await ShowFirstPageAsync();
     }
@@ -36,8 +39,10 @@ public sealed class GalleryVirtualListDemo : MonoBehaviour,LoopScrollDataSource,
         if(cache==null || closing)throw new InvalidOperationException("Gallery list is unavailable.");
         if(busy)throw new InvalidOperationException("A page request is already active.");busy=true;
         try {
+            if(cursor==null)await library.RefreshAsync(scope);
             var page=await library.QueryAsync(scope,200,cursor);
             if(closing)return;
+            HasLibraryChanges=page.Position.RequiresRefresh;
             scroll.ClearCells();items=page.Items;next=page.Next;scroll.totalCount=items.Count;scroll.RefillCells();
         } finally {busy=false;}
     }
@@ -61,6 +66,7 @@ public sealed class GalleryVirtualListDemo : MonoBehaviour,LoopScrollDataSource,
         ExceptionDispatchInfo failure=null;
         void Capture(Exception error){if(failure==null)failure=ExceptionDispatchInfo.Capture(error);else Debug.LogException(error);}
         void Clean(Action action){try{action();}catch(Exception error){Capture(error);}}
+        if(observation!=null)try{await observation.CloseAsync();}catch(Exception error){Capture(error);}
         if(scroll!=null){Clean(scroll.ClearCells);scroll.dataSource=null;scroll.prefabSource=null;}
         foreach(var cell in cells)if(cell!=null){Clean(cell.Unbind);Destroy(cell.gameObject);}
         cells.Clear();pool.Clear();items=Array.Empty<ImageReference>();

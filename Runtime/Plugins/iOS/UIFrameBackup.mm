@@ -26,7 +26,7 @@ static NSString *UFBHash(NSString *value) {
 }
 static ufb_status UFBStatus(){ufb_status value{};value.size=sizeof(value);value.abi=UFB_ABI;return value;}
 static void UFBCheck(int code,const ufb_status &status) {
-    if(code) @throw [NSException exceptionWithName:@"UIFrameBackupRepository" reason:[NSString stringWithFormat:@"Backup repository error %d, SQLite %d, phase %u, commit %d: %s",code,status.sqlite_code,status.phase,status.committed,status.message] userInfo:nil];
+    if(code) @throw [NSException exceptionWithName:@"UIFrameBackupRepository" reason:[NSString stringWithFormat:@"Backup repository error %d, SQLite %d, phase %u, commit %d: %s",code,status.sqlite_code,status.phase,status.committed,status.message] userInfo:@{@"code":@(code)}];
 }
 static NSArray<NSDictionary*> *UFBCommand(uint64_t handle,unsigned command,NSArray *arguments) {
     using namespace ufsqlite;
@@ -306,7 +306,13 @@ static void *UFBQueueKey=&UFBQueueKey;
         }
         [self release:identity record:row];
         uint64_t handle=[self store:identity];NSArray *clean=UFBCommand(handle,UFB_CLEANUP_PAGE,@[@"",@32]);
-        for(NSDictionary *item in clean)UFBCommand(handle,UFB_CLEANUP_RUN,@[item[@"id"],item[@"updated_utc"],@(UFBNow())]);
+        for(NSDictionary *item in clean) {
+            @try {UFBCommand(handle,UFB_CLEANUP_RUN,@[item[@"id"],item[@"updated_utc"],@(UFBNow())]);}
+            @catch(NSException *failure) {
+                if(![failure.name isEqual:@"UIFrameBackupRepository"] || [failure.userInfo[@"code"] integerValue]!=UFB_CLEANUP_FILE_FAILED)@throw;
+                NSLog(@"UIFrame file cleanup failed (%@): %@",item[@"id"],failure.reason);
+            }
+        }
         [self drainWaiting];[self schedule:identity];[self trim:identity];
     } @catch(NSException *failure){if(identity)[self fail:identity error:failure];else NSLog(@"Unidentified backup callback: %@",failure.reason);}
 }

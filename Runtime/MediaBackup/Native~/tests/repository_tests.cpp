@@ -153,6 +153,25 @@ int main() {
             other.call(UFB_BIND_PREPARER,{"ff"},UF_STATE);
         }
         { Store reopened(root.u8string(),identity,false); expect(reopened.call(UFB_RECEIPTS,{int64_t(0),"",int64_t(10)}).back().rows.size()==1,"Receipt did not survive reopen"); }
+        {
+            Store store(root.u8string(),std::string(64,'f'),true);store.call(UFB_BIND_PREPARER,{"aa"});
+            store.call(UFB_PREPARE,{"bb","aa",int64_t(1),int64_t(2),"a1","file:bad","v1","bad.jpg","image/jpeg",int64_t(4),"a2","file:good","v1","good.jpg","image/jpeg",int64_t(4)});
+            auto folder=root/store.id/"payloads";
+            std::filesystem::create_directory(folder/"a1.payload");std::ofstream(folder/"a1.payload"/"unexpected")<<"data";
+            std::ofstream(folder/"a2.payload")<<"data";
+            store.call(UFB_ABANDON,{"bb","aa",int64_t(2),"fixture cleanup"});
+            auto files=store.call(UFB_CLEANUP_PAGE,{"",int64_t(10)}).back();expect(files.rows.size()==2,"Missing cleanup candidates");
+            store.call(UFB_CLEANUP_RUN,{"a1",files.rows[0][4],int64_t(3)},UFB_CLEANUP_FILE_FAILED);
+            auto remaining=store.call(UFB_CLEANUP_PAGE,{"",int64_t(10)}).back();
+            expect(remaining.rows.size()==1 && remaining.rows[0][0].text=="a2","Failed file was not isolated");
+            store.call(UFB_CLEANUP_RUN,{"a2",remaining.rows[0][4],int64_t(4)});
+            expect(!std::filesystem::exists(folder/"a2.payload"),"Independent cleanup was blocked");
+            store.call(UFB_INFO);store.call(UFB_PAUSE,{int64_t(1)});store.call(UFB_PAUSE,{int64_t(0)});
+            std::filesystem::remove_all(folder/"a1.payload");
+            auto retry=store.call(UFB_CLEANUP_RETRY,{"a1",int64_t(5)}).back();
+            expect(retry.rows.size()==1 && retry.rows[0][0].text=="a1","Retry lost its file identity");
+            store.call(UFB_CLEANUP_RUN,{"a1",retry.rows[0][1],int64_t(6)});
+        }
         for(int executor=1;executor<=2;++executor) {
             Store store(root.u8string(),std::string(64,char('c'+executor)),true);
             store.call(UFB_BIND_PREPARER,{"bb"});

@@ -16,6 +16,13 @@ sys.path.insert(0, str(NATIVE / 'tests'))
 from process_windows import Repository
 
 SOURCES = {
+    'android/util/Log.java': '''
+package android.util;
+public class Log {
+    public static int errors;
+    public static int e(String tag,String message){errors++;return 0;}
+    public static int e(String tag,String message,Throwable error){errors++;return 0;}
+}''',
     'android/content/Context.java': '''
 package android.content;
 public class Context {
@@ -100,7 +107,29 @@ public class BindingTest {
                 repository.call(BackupRepository.RELEASE,"cc",1L,true,true);
             }
         }
-        System.out.println("Android scheduling and worker binding paths passed through production JNI/repository");
+        String identity="c".repeat(64);
+        try(BackupRepository repository=new BackupRepository(context,identity)) {
+            repository.call(58,"aa");
+            repository.call(2,"bb","aa",1L,2L,"cc","asset:first","v1","first.jpg","image/jpeg",4L,
+                "dd","asset:second","v1","second.jpg","image/jpeg",4L);
+            File broken=new File(BackupRepository.root(context),identity+"/payloads/cc.payload");
+            File normal=new File(BackupRepository.root(context),identity+"/payloads/dd.payload");
+            check(broken.mkdir(),"Could not create failing cleanup fixture");
+            try(FileOutputStream output=new FileOutputStream(normal)){output.write(new byte[]{1,2,3,4});}
+            repository.call(5,"bb","aa",2L,"fixture abandoned");
+            java.lang.reflect.Method cleanup=BackupBridge.class.getDeclaredMethod("cleanup",BackupRepository.class);
+            cleanup.setAccessible(true);cleanup.invoke(null,repository);
+            check(android.util.Log.errors==1,"Isolated failure was not reported once");
+            check(broken.exists() && !normal.exists(),"Failed file stopped independent cleanup");
+            check(repository.call(BackupRepository.CLEANUP_PAGE,"",100L).isEmpty(),"Failed file remained automatically eligible");
+            cleanup.invoke(null,repository);check(android.util.Log.errors==1,"Cleanup automatically retried a failed file");
+            repository.call(15,1L);repository.call(15,0L);
+            BackupRepository.Row retry=repository.call(21,"cc",3L).get(0);
+            check("cc".equals(retry.text("id")),"Retry returned a different file");
+            check(broken.delete(),"Could not repair failing fixture");
+            repository.call(BackupRepository.CLEANUP_RUN,retry.text("id"),retry.number("updated_utc"),4L);
+        }
+        System.out.println("Android scheduling, binding and isolated cleanup passed through production JNI/repository");
     }
 }'''
 }
@@ -129,7 +158,7 @@ def main():
             '-I' + str(NATIVE / 'include'), '-I' + str(args.jdk / 'include'), '-I' + str(args.jdk / 'include/darwin'),
             str(args.repository), '-Wl,-rpath,' + str(args.repository.parent), '-Wl,-rpath,' + str(args.core.parent),
             '-o', str(bridge)], check=True)
-        for identity in ('a' * 64, 'b' * 64):
+        for identity in ('a' * 64, 'b' * 64, 'c' * 64):
             db = Repository(str(args.core), str(args.repository), root / 'data/UIFrameBackup', True, identity)
             db.close()
         subprocess.run([str(args.jdk / 'bin/java'), '-Djava.library.path=' + os.pathsep.join(map(str, (args.core.parent, args.repository.parent))),

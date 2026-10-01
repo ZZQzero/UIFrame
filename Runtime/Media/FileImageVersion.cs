@@ -1,4 +1,5 @@
 using System;
+using System.Buffers;
 using System.IO;
 using System.Security.Cryptography;
 using System.Threading;
@@ -14,13 +15,30 @@ namespace Game.Media
             => version != null && version.StartsWith(image.Version+Separator,StringComparison.Ordinal);
         internal static ImageReference WithVersion(ImageReference image,string version)
             => new ImageReference("file",image.Id,image.FileName,image.MimeType,image.ByteCount??-1,version:version);
+        internal static void ValidateMetadata(ImageReference image)
+        {
+            int separator=image.Version.IndexOf(Separator,StringComparison.Ordinal);
+            string metadata=separator<0?image.Version:image.Version.Substring(0,separator);
+            if(ImageReference.FromFile(image.Id).Version!=metadata)
+                throw new GalleryException("SourceChanged","File metadata changed during preparation.");
+        }
+        internal static void ValidateCopy(ImageReference image,string hash)
+        {
+            ValidateMetadata(image);
+            int separator=image.Version.IndexOf(Separator,StringComparison.Ordinal);
+            if(separator>=0 && image.Version.Substring(separator+Separator.Length)!=hash)
+                throw new GalleryException("SourceChanged","Copied bytes do not match the indexed content version.");
+        }
         internal static ImageReference Read(ImageReference image,CancellationToken token)
         {
             using var input=File.OpenRead(image.Id);
             using var sha=SHA256.Create();
-            var buffer=new byte[128*1024];int count;
-            while((count=input.Read(buffer,0,buffer.Length))!=0)
-            {token.ThrowIfCancellationRequested();sha.TransformBlock(buffer,0,count,null,0);}
+            var buffer=ArrayPool<byte>.Shared.Rent(128*1024);int count;
+            try {
+                while((count=input.Read(buffer,0,128*1024))!=0)
+                {token.ThrowIfCancellationRequested();sha.TransformBlock(buffer,0,count,null,0);}
+            }
+            finally {ArrayPool<byte>.Shared.Return(buffer);}
             token.ThrowIfCancellationRequested();sha.TransformFinalBlock(Array.Empty<byte>(),0,0);
             if(ImageReference.FromFile(image.Id).Version!=image.Version)
                 throw new GalleryException("SourceChanged","File changed while its content version was being read.");

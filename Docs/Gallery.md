@@ -119,19 +119,26 @@ iOS 目录书签按 SHA-256 标识保存一次，每个图片引用只包含短�
 var library = await ImageLibraryIndex.OpenAsync(
     Path.Combine(Application.persistentDataPath, "Gallery", "library.sqlite"));
 var scope = new ImageLibraryScope(ImageLibrarySourceKind.PhotoLibrary);
-await library.RefreshAsync(scope, token);
-var first = await library.QueryAsync(scope, pageSize: 100, token: token);
-var next = first.Next == null ? null : await library.QueryAsync(scope, 100, first.Next, token);
-using var subscription = library.Watch(scope, batch => { /* 更新可见页面 */ });
+var subscription = library.Watch(scope, batch => { /* 更新可见页面 */ });
+try
+{
+    await library.RefreshAsync(scope, token);
+    var first = await library.QueryAsync(scope, pageSize: 100, token: token);
+    var next = first.Next == null ? null : await library.QueryAsync(scope, 100, first.Next, token);
+    // 面板使用期间持有 subscription。
+}
+finally { await subscription.CloseAsync(); }
 ```
 
 照片库授权由 `RequestLibraryAccessAsync` 显式请求；刷新、监听和自动备份不会主动弹授权框。索引每页最多200条，每次写入最多32张元数据。游标绑定库身份、代次、范围修订及权限代次；变化日志被截断或范围变化时返回 `RequiresRefresh`，旧分页游标明确失败。
 
 `Watch` 使用300ms安静窗口、最长2s合并连续事件，刷新不并发重入。普通目录分别监听图片文件和目录结构，忽略数据库等非图片文件；最多保留1,024个变化身份，溢出要求完整核对。Android使用 ContentObserver，支持系统版本时同时检查 MediaStore version / generation；iOS使用 PhotoKit fetch result 的增量变化。重开、恢复前台、权限或连续性变化触发完整核对。增量读取和系统权限仍需真机验收。
 
-每个索引最多16个观察范围，每范围32个订阅。失败只停止对应范围的自动驱动，`GetWatchFailure` 可查询；调用 `RequestRefresh` 显式重新开始。完整枚举失败不提交缺失删除；已成功写入的页面不回滚。订阅回调异常保留错误，不重放该回调。`PruneChangesAsync` 每次最多清200条日志，旧消费者必须核对刷新。
+每个索引最多同时观察16个范围，每范围32个订阅；普通查询不创建长期监听，也不累计占用观察名额。同范围的订阅和在途刷新共享观察者，最后一个使用者结束后释放文件监听及原生观察。单次 `RefreshAsync` 临时持有观察者；需要持续增量读取时应先 `Watch` 并在使用期间保留句柄。观察中断后查询仍可读取缓存，但 `RequiresRefresh` 为 true，下次刷新重新核对来源，不能复用中断期间的连续性假设。
 
-应用服务退出时 `await library.ShutdownAsync()`，面板仅释放订阅。索引与账号备份库分别管理生命周期。
+自动驱动失败只停止对应范围，`subscription.Failure` 返回原异常。`subscription.Resume()` 恢复驱动，不重放已失败通知，也不要求全量重扫；`subscription.RequestRefresh()` 明确要求重新核对内容并恢复驱动。索引写入和通知交付分阶段：写入途中失败标记重新核对；等待刷新锁时取消、写入完成后的取消或回调异常不会使已提交索引失效。完整枚举失败不提交缺失删除，已写入页面不回滚。直接等待 `RefreshAsync` 时异常直接传播；后台驱动的异常同时由句柄和日志报告。`PruneChangesAsync` 每次最多清200条日志，旧消费者必须核对刷新。
+
+面板退出时 `await subscription.CloseAsync()`；最后一个订阅会等待在途观察使用者结束并完成原生注销，多个订阅共享时仅释放自身引用。关闭幂等，重复等待返回同一结果，释放失败不会自动再试。应用服务退出时 `await library.ShutdownAsync()`。索引与账号备份库分别管理生命周期。
 
 ## 共享缩略图与内存
 
@@ -182,7 +189,7 @@ await backup.ProcessAsync(token);
 
 接受结果不明时，保留原 OperationId，使用 `QueryPreparationAsync` 查询 Accepted / Abandoned 和原任务ID；不要另造ID重发。已接受ID在任务历史删除后仍可核对。普通 `EnqueueAsync(images, token)` 适合无需跨中断核对的临时交互。
 
-数据库参数 / 结果每次上限1MiB，返回最多200行；原生最多16条并行准入命令、64个附件。一个 catalog 只有一个准备者，原生后台附件独立保有资源；C#关闭不会取消系统已受理传输。`ShutdownAsync` 等待自身操作结束后释放，`Dispose` 仅允许无活动操作时调用。
+数据库参数 / 结果每次上限1MiB，返回最多200行；原生最多16条并行准入命令、64个附件。一个 catalog 只有一个准备者，原生后台附件独立保有资源；C#关闭不会取消系统已受理传输。`ShutdownAsync` 先拒绝新调用、取消本门面的长期等待，再等已受理操作收尾后释放；操作登记覆盖第一次异步等待到最终结束。`Dispose` 仅允许无活动操作时调用。应用先取消并等待自己启动的自动备份循环，再关闭备份门面和图库索引。
 
 ## 分页、回执与结果核对
 
@@ -204,7 +211,7 @@ await backup.DownloadBackupAndVerifyAsync(receipts.Items[0].BackupId,
 
 ## 暂停、批量操作与后台
 
-`PauseAsync` 持久设置全局暂停并等待执行者停止 / 释放；取消等待不会撤销已经保存的暂停。`ResumeAsync` 只解除全局暂停。单项暂停不会被全局恢复清除；未知服务器结果需要核对，暂停并不等于取消远端提交。
+`PauseAsync` 持久设置全局暂停并等待执行者停止 / 释放；取消等待不会撤销已经保存的暂停。`ResumeAsync` 只解除全局暂停。队列暂停 / 恢复之间互斥；暂停可与文件准备并行。能力刷新与上传处理双向互斥，避免传输中改变协议参数；独立下载、查询不会阻止恢复队列或文件清理。单项暂停不会被全局恢复清除；未知服务器结果需要核对，暂停并不等于取消远端提交。
 
 ```csharp
 string id = await backup.SubmitOperationAsync(new BackupOperationCommand {
@@ -255,7 +262,11 @@ var actual = await maintenance.RunAsync(policy, token);
 
 每轮最多200个逻辑项目 / 元数据行，默认100ms时间片；单项原生事务/文件操作不能在任意指令中断。预览仅供展示，ReclaimableBytes 是待清理意图的字节上限，可能包含执行者尚未释放的文件；执行前仓库重新检查状态和引用。完成或取消的暂存文件仅在实际执行者与凭据释放后删除；失败 / 暂停 / 未知服务器结果不随成功历史回收。返回实际文件删除数量和字节，数据库删行不冒充物理空间释放。
 
-清理失败持久保存，不自动重试；调用 `RetryCleanupAsync` 或 RetryCleanup 批量操作。未记录失败的中断清理意图可以继续。可显式执行非阻塞 checkpoint。回执、排除基线、取消处置和操作ID等必要事实保留，元数据磁盘不承诺永远恒定。
+单文件删除失败只有在仓库可靠保存该文件的故障状态后，才以 `BackupRepositoryException.IsIsolatedCleanupFailure` 报告。C# / Android / iOS 自动清理记录此错误并继续其他文件和上传，不自动重试故障文件；任务的服务器确认状态不因暂存清理失败而撤销。
+
+显式 `BackupMaintenance.RunAsync` 同样继续本批其他项，最后抛出 `BackupCleanupException`；其中 `Result` 包含成功清理统计、时间片状态和逐文件 `Failures`，每项保留文件 ID 与原始仓库异常。可用 `catch (BackupCleanupException error)` 读取部分结果并向用户报告。数据库失败或无法可靠保存故障状态时立即传播，不能假定单文件已隔离。
+
+`RetryCleanupAsync(taskId)` 仅重新清理指定任务文件；RetryCleanup 批量操作仅重新开放选定失败项的清理资格，由后续清理执行。未记录失败的中断清理意图可以继续。可显式执行非阻塞 checkpoint。回执、排除基线、取消处置和操作ID等必要事实保留，元数据磁盘不承诺永远恒定。
 
 无任务引用的文件元数据随物理文件清理完成一起删除；历史任务仍引用的记录随历史清理删除。扫描历史先定位废弃代次，再按稳定键分批删除其明细，不遍历有效基线。
 
@@ -282,7 +293,7 @@ TTL仅适用于未完成上传。上传、校验或提交中的会话不能被�
 
 - 后台交接分为认领、凭据持久化后的 Handoff、系统任务绑定、Start。系统只查询已交接代次；未交接的终结代次仅用于释放资源。C# 关闭或失败不能代替平台宣告凭据已经释放。接收文件统一由共享仓库 Seal 刷盘，再由 Accept 发布任务。
 - `ReadChangesAsync` 在单个只读 SQL 快照中读取身份、权限代次、保留水位和最多200条变化；日志被截断或范围变代时返回 `RequiresRefresh`，不把空页误当已消费。
-- `ImageReference.FromFile` 是便宜的文件元数据引用；持久目录索引在此基础上保存内容哈希证明。首次扫描、重开、监听溢出、重新获得焦点或显式 `RequestRefresh` 后重新核对内容；连续监听下的例行完整枚举可复用已核对且 stat 未变的版本，已通知路径始终重新核对。哈希使用128 KiB缓冲和工作线程。索引查询返回的内容版本同时用于缩略图键、备份判重和准备前后校验；不要自行截断版本字符串。
+- `ImageReference.FromFile` 是便宜的文件元数据引用；持久目录索引在此基础上保存内容哈希证明。首次扫描、重开、监听溢出、重新获得焦点或显式 `RequestRefresh` 后重新核对内容；连续监听下的例行完整枚举可复用已核对且 stat 未变的版本，已通知路径始终重新核对。哈希使用池化128 KiB缓冲和工作线程。索引版本用于缩略图键、备份判重及接收校验；目录备份复制前后检查文件元数据，复制时计算的哈希直接与索引版本比较，不在复制前后再次完整读取源文件。普通 `FromFile` 引用只有元数据检查，若需内容证明应使用索引返回的引用；不要自行截断版本字符串。复制器关闭流后由原生 Seal 统一刷盘发布；上传前对暂存文件及下载时的哈希校验仍保留。
 - Android 外部媒体通知先规范化为枚举使用的 external 图片身份；非图片/未知卷通知要求完整核对。扫描保存开始时的提供者版本/各卷 generation 与观察序号，完成前再次比较。iOS 扫描复用观察者持有的 PHFetchResult，比较观察修订；观察者重建必须完整核对，不把进程内序号当作可跨进程恢复的 PhotoKit token。扫描期间边界变化以 `LibraryChangedDuringScan` 失败，业务显式发起新扫描。
 - Limited 状态不能证明授权集合未变。iOS 集合成员变化、Android 无法区分的 Limited 通知，以及观察者重建/回到前台后的 Limited 范围均按“授权范围需要核对”处理：推进权限代次，旧游标失效。Limited 下移出记录为 `AccessChanged`，不推定原图已被删除。自动循环抛出 `ScopeConfirmationRequired` 并仅暂停该范围未完成任务。停止并等待循环后，业务向用户展示当前可见范围，再调用 `await automatic.ConfirmScopeAsync(token)`。此调用允许后续扫描，不恢复既有暂停任务；恢复任务仍由业务显式决定。不会自动弹权限窗口。
 - 每次开始/完成图库完整核对，都分批清理最多200条废弃或非当前完成扫描。当前完成代次和进行中的扫描始终保留；查询有 scope/phase 与 phase/id 索引。

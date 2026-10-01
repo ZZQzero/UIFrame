@@ -30,15 +30,11 @@ namespace Game.Media.Storage
     mime TEXT NOT NULL,
     width INTEGER NOT NULL CHECK(width>=0),
     height INTEGER NOT NULL CHECK(height>=0),
-    modified_utc INTEGER NOT NULL,
-    accessible INTEGER NOT NULL CHECK(accessible IN(0,1)),
-    content_needs_reconcile INTEGER NOT NULL CHECK(content_needs_reconcile IN(0,1))
-    ,asset_revision INTEGER NOT NULL DEFAULT 1 CHECK(asset_revision>0)
+    asset_revision INTEGER NOT NULL DEFAULT 1 CHECK(asset_revision>0)
 ) STRICT;",
             @"CREATE TABLE scope_assets (
     scope_id TEXT NOT NULL REFERENCES library_scopes(id),
     source_id TEXT NOT NULL REFERENCES assets(source_id),
-    sort_key INTEGER NOT NULL,
     seen_scan_id TEXT,
     updated_seq INTEGER NOT NULL,
     content_version TEXT,

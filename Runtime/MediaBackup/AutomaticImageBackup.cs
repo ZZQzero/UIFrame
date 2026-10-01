@@ -51,8 +51,10 @@ namespace Game.Media.Backup
         public bool IsWaitingForCapacity { get; private set; }
         public bool SupportsBackgroundDiscovery => false;
         public AutomaticBackupPolicy Policy => policy.Copy();
-        ImageLibraryScope Scope => new ImageLibraryScope((ImageLibrarySourceKind)policy.sourceKind,policy.source,policy.recursive);
-        string CatalogScope => ImageBackupService.Hash(Scope.Id+":"+policy.includeExisting);
+        ImageLibraryScope cachedScope;
+        string cachedCatalogScope;
+        ImageLibraryScope Scope => cachedScope??(cachedScope=new ImageLibraryScope((ImageLibrarySourceKind)policy.sourceKind,policy.source,policy.recursive));
+        string CatalogScope => cachedCatalogScope??(cachedCatalogScope=ImageBackupService.Hash(Scope.Id+":"+policy.includeExisting));
         AutomaticImageBackup(ImageBackupService service,ImageLibraryIndex library,Func<bool> wifiAvailable)
         {
             this.service=service??throw new ArgumentNullException(nameof(service));this.library=library??throw new ArgumentNullException(nameof(library));
@@ -77,7 +79,7 @@ namespace Game.Media.Backup
         public async UniTask ConfigureAsync(AutomaticBackupPolicy value,CancellationToken token=default)
         {
             MediaThread.Check();if(running || looping) throw new InvalidOperationException("Cancel and await the automatic loop before changing its policy.");
-            Validate(value);var copy=value.Copy();await service.Db(Command.SetPolicy,token,Encode(copy));policy=copy;
+            Validate(value);var copy=value.Copy();await service.Db(Command.SetPolicy,token,Encode(copy));policy=copy;cachedScope=null;cachedCatalogScope=null;
         }
         static byte[] Encode(AutomaticBackupPolicy value)
         {
@@ -135,9 +137,10 @@ namespace Game.Media.Backup
             MediaThread.Check();Validate(policy);if(!policy.enabled) throw new InvalidOperationException("Automatic backup is disabled.");
             if(running) throw new InvalidOperationException("An automatic scan is already active.");
             if(policy.wifiOnly && !wifiAvailable()) return;
-            running=true;IsWaitingForCapacity=false;
+            running=true;IsWaitingForCapacity=false;ImageLibraryIndex.WatchHandle observation=null;Exception primary=null;
             try
             {
+                observation=library.Watch(Scope,_=>{});
                 var source=Scope;string scope=CatalogScope;await library.RefreshAsync(source,cancellationToken,completeReconciliation);
                 var position=await library.GetPositionAsync(source,cancellationToken);
                 var previous=(await service.Db(Command.ScopeState,cancellationToken,scope)).Rows;
@@ -198,24 +201,37 @@ namespace Game.Media.Backup
             }
             catch(Exception error)
             {
-                LastError=error.Message;
+                primary=error;LastError=error.Message;
                 if(error is GalleryException gallery && (gallery.Code=="PermissionDenied" || gallery.Code=="ScopeConfirmationRequired"))
                 {
                     try {await SuspendScopeAsync(default);}catch(Exception secondary){UnityEngine.Debug.LogException(secondary);}
                 }
                 throw;
             }
-            finally { running=false; }
+            finally
+            {
+                try{if(observation!=null)await observation.CloseAsync();}
+                catch(Exception cleanup){if(primary==null)throw;UnityEngine.Debug.LogException(cleanup);}
+                finally{running=false;}
+            }
         }
         /// <summary>Explicitly accept the current permission scope. Existing paused tasks require a separate resume decision.</summary>
         public async UniTask ConfirmScopeAsync(CancellationToken token=default)
         {
             MediaThread.Check();Validate(policy);
             if(running || looping)throw new InvalidOperationException("Stop automatic backup before confirming its scope.");
-            await library.RefreshAsync(Scope,token,true);
-            var position=await library.GetPositionAsync(Scope,token);
-            await SuspendScopeAsync(token);
-            await service.Db(Command.Scope,token,CatalogScope,Scope.Id,position.LibraryId,position.IndexGeneration,position.ScopeRevision,position.PermissionGeneration,policy.includeExisting);
+            var observation=library.Watch(Scope,_=>{});Exception primary=null;
+            try {
+                await library.RefreshAsync(Scope,token,true);
+                var position=await library.GetPositionAsync(Scope,token);
+                await SuspendScopeAsync(token);
+                await service.Db(Command.Scope,token,CatalogScope,Scope.Id,position.LibraryId,position.IndexGeneration,position.ScopeRevision,position.PermissionGeneration,policy.includeExisting);
+            }
+            catch(Exception error){primary=error;throw;}
+            finally {
+                try{await observation.CloseAsync();}
+                catch(Exception cleanup){if(primary==null)throw;UnityEngine.Debug.LogException(cleanup);}
+            }
         }
         async UniTask SuspendScopeAsync(CancellationToken token)
         {
@@ -236,7 +252,7 @@ namespace Game.Media.Backup
         public async UniTask RunAsync(CancellationToken cancellationToken)
         {
             MediaThread.Check();if(looping) throw new InvalidOperationException("Automatic backup loop already running.");Validate(policy);looping=true;
-            bool changed=true;long nextReconciliation=0;IDisposable watch=null;var cleanup=new UIFrame.CleanupFailure();
+            bool changed=true;long nextReconciliation=0;ImageLibraryIndex.WatchHandle watch=null;var cleanup=new UIFrame.CleanupFailure();
             try
             {
                 watch=policy.enabled?library.Watch(Scope,batch=>{if(batch.RequiresRefresh || batch.Items.Count!=0)changed=true;}):null;
@@ -254,7 +270,7 @@ namespace Game.Media.Backup
                     long until=System.Diagnostics.Stopwatch.GetTimestamp()+(long)policy.scanIntervalSeconds*System.Diagnostics.Stopwatch.Frequency;
                     do
                     {
-                        var failure=library.GetWatchFailure(Scope);
+                        var failure=watch.Failure;
                         if(failure!=null)
                         {
                             if(failure is GalleryException gallery && (gallery.Code=="PermissionDenied" || gallery.Code=="ScopeConfirmationRequired"))
@@ -266,7 +282,10 @@ namespace Game.Media.Backup
                 }
             }
             catch(Exception error) { cleanup.Capture(error); }
-            finally { looping=false;if(watch!=null)cleanup.Run(watch.Dispose); }
+            finally {
+                try{if(watch!=null)await watch.CloseAsync();}catch(Exception error){cleanup.Capture(error);}
+                looping=false;
+            }
             cleanup.Throw();
         }
     }

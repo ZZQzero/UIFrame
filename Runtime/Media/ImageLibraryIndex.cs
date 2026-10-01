@@ -93,13 +93,16 @@ namespace Game.Media
             var repository=await UniTask.RunOnThreadPool(async()=>await LibraryRepository.OpenAsync(absoluteDatabasePath,token));
             return new ImageLibraryIndex(repository);
         }
-        sealed class Observer : IDisposable
+        internal sealed class Observer : IDisposable
         {
             internal readonly object Gate=new object();
             internal readonly HashSet<string> Paths=new HashSet<string>(StringComparer.Ordinal);
             internal readonly ImageLibraryScope Scope;
-            internal readonly List<Action<ImageLibraryChangeBatch>> Subscribers=new List<Action<ImageLibraryChangeBatch>>();
-            internal bool Reconcile=true,Initialized,NativeAttached;
+            internal readonly List<WatchHandle> Subscribers=new List<WatchHandle>();
+            internal int References;
+            internal bool Closing;
+            internal UniTask CloseTask;
+            internal bool Reconcile=true,NativeAttached;
             internal string NativeId,PlatformBoundary;
             internal bool AccessUncertain;
             internal readonly Dictionary<string,MediaItem> NativeItems=new Dictionary<string,MediaItem>(StringComparer.Ordinal);
@@ -112,6 +115,7 @@ namespace Game.Media
                 Scope=scope;AccessUncertain=scope.Kind==ImageLibrarySourceKind.PhotoLibrary;
                 if(scope.Kind==ImageLibrarySourceKind.Directory)
                 {
+                    try {
                     Watcher=new FileSystemWatcher(scope.Source) { IncludeSubdirectories=scope.Recursive,NotifyFilter=NotifyFilters.FileName|NotifyFilters.LastWrite|NotifyFilters.Size };
                     Watcher.Created+=(s,e)=>Changed(e.FullPath);
                     Watcher.Changed+=(s,e)=>Changed(e.FullPath);
@@ -120,8 +124,9 @@ namespace Game.Media
                     Watcher.Error+=(s,e)=>Signal(true);
                     DirectoryWatcher=new FileSystemWatcher(scope.Source) {IncludeSubdirectories=scope.Recursive,NotifyFilter=NotifyFilters.DirectoryName};
                     DirectoryWatcher.Created+=(s,e)=>Signal(true);DirectoryWatcher.Deleted+=(s,e)=>Signal(true);DirectoryWatcher.Renamed+=(s,e)=>Signal(true);DirectoryWatcher.Error+=(s,e)=>Signal(true);
-                    try {Watcher.EnableRaisingEvents=true;DirectoryWatcher.EnableRaisingEvents=true;}
-                    catch {Watcher.Dispose();DirectoryWatcher.Dispose();throw;}
+                    Watcher.EnableRaisingEvents=true;DirectoryWatcher.EnableRaisingEvents=true;
+                    }
+                    catch {try{Dispose();}catch(Exception cleanup){UnityEngine.Debug.LogException(cleanup);}throw;}
                 }
             }
             void Changed(string path)
@@ -141,12 +146,43 @@ namespace Game.Media
             public void Dispose() { var files=Watcher;var directories=DirectoryWatcher;Watcher=DirectoryWatcher=null;var cleanup=new UIFrame.CleanupFailure();if(files!=null)cleanup.Run(files.Dispose);if(directories!=null)cleanup.Run(directories.Dispose);cleanup.Throw(); }
         }
         void Check() { MediaThread.Check();if(closed || closing) throw new ObjectDisposedException(nameof(ImageLibraryIndex)); }
-        Observer Observe(ImageLibraryScope scope)
+        Observer AcquireObserver(ImageLibraryScope scope)
         {
-            if(scope==null) throw new ArgumentNullException(nameof(scope));
-            if(observers.TryGetValue(scope.Id,out var value)) return value;
-            if(observers.Count>=16) throw new InvalidOperationException("An image library supports at most 16 observed scopes per lifetime.");
-            var observer=new Observer(scope) {NativeId=observerOwner+scope.Id}; observers.Add(scope.Id,observer); return observer;
+            if(scope==null)throw new ArgumentNullException(nameof(scope));
+            if(!observers.TryGetValue(scope.Id,out var observer))
+            {
+                if(observers.Count>=16)throw new InvalidOperationException("At most 16 image scopes may be observed concurrently.");
+                observer=new Observer(scope) {NativeId=observerOwner+scope.Id};observers.Add(scope.Id,observer);
+            }
+            if(observer.Closing)throw new InvalidOperationException("Await this scope's observation close before observing it again.");
+            observer.References++;return observer;
+        }
+        bool NeedsRefresh(string scope) => !observers.TryGetValue(scope,out var observer) || observer.Closing || observer.Reconcile;
+        UniTask ReleaseObserver(Observer observer)
+        {
+            if(observer.Closing)return observer.CloseTask;
+            return --observer.References==0?CloseObserver(observer):UniTask.CompletedTask;
+        }
+        UniTask CloseObserver(Observer observer)
+        {
+            if(observer.Closing)return observer.CloseTask;
+            observer.Closing=true;observer.CloseTask=CloseObserverCore(observer).Preserve();return observer.CloseTask;
+        }
+        async UniTask CloseObserverCore(Observer observer)
+        {
+            work++;var cleanup=new UIFrame.CleanupFailure();
+            try
+            {
+                cleanup.Run(observer.Dispose);
+                if(observer.NativeAttached)
+                {
+                    observer.NativeAttached=false;
+                    try{await NativeMedia.Request(new MediaRequest {op="unobserve",path=observer.NativeId},default);}
+                    catch(Exception error){cleanup.Capture(error);}
+                }
+                observer.Subscribers.Clear();cleanup.Throw();observers.Remove(observer.Scope.Id);
+            }
+            finally {work--;}
         }
         async UniTask<long> Permission(ImageLibraryScope scope,CancellationToken token)
         {
@@ -161,28 +197,27 @@ namespace Game.Media
         }
         public async UniTask<ImageLibraryPosition> GetPositionAsync(ImageLibraryScope scope,CancellationToken token=default)
         {
-            Check(); var observer=Observe(scope);work++;
-            try { return await GetPositionCore(scope,observer,token); }
+            Check();if(scope==null)throw new ArgumentNullException(nameof(scope));work++;
+            try { return await GetPositionCore(scope,token); }
             finally { work--; }
         }
-        async UniTask<ImageLibraryPosition> GetPositionCore(ImageLibraryScope scope,Observer observer,CancellationToken token)
+        async UniTask<ImageLibraryPosition> GetPositionCore(ImageLibraryScope scope,CancellationToken token)
         {
-                LibraryScopeState state;
-                if(!observer.Initialized) { state=await repository.Scope(scope,await Permission(scope,token),token);observer.Initialized=true; }
-                else state=await repository.State(scope.Id,token);
+                if(scope==null)throw new ArgumentNullException(nameof(scope));
+                var state=await repository.FindState(scope.Id,token)??await repository.Scope(scope,await Permission(scope,token),token);
                 var position=await repository.Position(token);
                 return Position(state,position.sequence,position.retained);
         }
         ImageLibraryPosition Position(LibraryScopeState scope,long sequence,long retained) => new ImageLibraryPosition {
             LibraryId=repository.Id,IndexGeneration=repository.Generation,ScopeId=scope.Scope,ScopeRevision=scope.Revision,
-            PermissionGeneration=scope.Permission,Sequence=sequence,RetainedAfter=retained,RequiresRefresh=scope.RequiresReconcile };
+            PermissionGeneration=scope.Permission,Sequence=sequence,RetainedAfter=retained,RequiresRefresh=scope.RequiresReconcile || NeedsRefresh(scope.Scope) };
         static bool SameScope(ImageLibraryPosition a,ImageLibraryPosition b) => a.LibraryId==b.LibraryId && a.IndexGeneration==b.IndexGeneration && a.ScopeId==b.ScopeId && a.ScopeRevision==b.ScopeRevision && a.PermissionGeneration==b.PermissionGeneration;
         public async UniTask<ImageLibraryPage> QueryAsync(ImageLibraryScope scope,int pageSize=100,ImageLibraryCursor cursor=null,CancellationToken token=default)
         {
             Check();if(pageSize<1 || pageSize>200) throw new ArgumentOutOfRangeException(nameof(pageSize));work++;
             try
             {
-                var position=await GetPositionCore(scope,Observe(scope),token);
+                var position=await GetPositionCore(scope,token);
                 if(cursor!=null && !SameScope(cursor.Position,position)) throw new InvalidOperationException("Image library cursor requires a refresh.");
                 var rows=await repository.Page(scope.Id,cursor?.After??"",pageSize,token);
                 return new ImageLibraryPage { Items=rows,Position=position,Next=rows.Count==pageSize?new ImageLibraryCursor { Position=position,After=rows[rows.Count-1].Source+":"+rows[rows.Count-1].OriginId }:null };
@@ -197,22 +232,21 @@ namespace Game.Media
         }
         async UniTask<ImageLibraryChangeBatch> ReadChangesCore(ImageLibraryScope scope,ImageLibraryPosition after,int pageSize,CancellationToken token)
         {
-                var observer=Observe(scope);
-                if(!observer.Initialized)await GetPositionCore(scope,observer,token);
+                if(scope==null)throw new ArgumentNullException(nameof(scope));
                 var batch=await repository.Changes(scope.Id,after.Sequence,pageSize,token);
-                if(!SameScope(after,batch.Position) || after.Sequence<batch.Position.RetainedAfter || after.Sequence>batch.Position.Sequence || batch.Position.RequiresRefresh)
+                if(NeedsRefresh(scope.Id) || !SameScope(after,batch.Position) || after.Sequence<batch.Position.RetainedAfter || after.Sequence>batch.Position.Sequence || batch.Position.RequiresRefresh)
                     return new ImageLibraryChangeBatch {Items=Array.Empty<ImageLibraryChange>(),Position=batch.Position,RequiresRefresh=true};
                 return batch;
         }
 
         public async UniTask<ImageLibraryRefresh> RefreshAsync(ImageLibraryScope scope,CancellationToken token=default,bool completeReconciliation=false)
         {
-            Check();var observer=Observe(scope);work++;
+            Check();token.ThrowIfCancellationRequested();var observer=AcquireObserver(scope);work++;
             using var linked=CancellationTokenSource.CreateLinkedTokenSource(token,lifetime.Token);token=linked.Token;
-            bool acquired=false;
+            bool acquired=false,updating=false;Exception primary=null;
             try
             {
-                await refreshGate.WaitAsync(token);acquired=true;refreshing=true;
+                await refreshGate.WaitAsync(token);acquired=true;refreshing=true;updating=true;
                 await PollNative(observer,token);
                 var state=await repository.Scope(scope,await Permission(scope,token),token); var start=await repository.Position(token);
                 bool complete,verifyContents;long serial;string[] paths;MediaItem[] changes;
@@ -268,7 +302,8 @@ namespace Game.Media
                     if(File.Exists(path)) await repository.Upsert(state,null,await ResolveFiles(new[]{ImageReference.FromFile(path)},true,paths,token),token);
                     else await repository.Remove(state,"file:"+path,3,token);
                 }
-                token.ThrowIfCancellationRequested();var position=await GetPositionCore(scope,observer,token);bool pending;observer.Failure=null;
+                updating=false;
+                token.ThrowIfCancellationRequested();var position=await GetPositionCore(scope,token);bool pending;observer.Failure=null;
                 lock(observer.Gate) pending=observer.Serial!=serial || observer.Reconcile || observer.Paths.Count!=0 || observer.NativeItems.Count!=0;
                 // A failing subscriber ends this dispatch only. The next refresh
                 // is a new operation and never replays the failed change batch.
@@ -278,15 +313,21 @@ namespace Game.Media
                     for(;;)
                     {
                         var batch=await ReadChangesCore(scope,cursor,200,token);
-                        foreach(var subscriber in observer.Subscribers.ToArray()) subscriber(batch);
+                        foreach(var subscriber in observer.Subscribers.ToArray())if(!subscriber.IsClosed)subscriber.Callback(batch);
                         if(batch.RequiresRefresh || batch.Position.Sequence>=position.Sequence) break;cursor=batch.Position;
                     }
                 }
                 return new ImageLibraryRefresh { Kind=complete?ImageLibraryRefreshKind.CompleteReconciliation:examined==0?ImageLibraryRefreshKind.Current:ImageLibraryRefreshKind.Incremental,
                     Examined=examined,HasPendingChanges=pending,Position=position };
             }
-            catch { observer.Signal(true);throw; }
-            finally { if(acquired){refreshing=false;refreshGate.Release();}work--; }
+            catch(Exception error) {primary=error;if(updating)observer.Signal(true);throw;}
+            finally
+            {
+                if(acquired){refreshing=false;refreshGate.Release();}
+                try{await ReleaseObserver(observer);}
+                catch(Exception cleanup){if(primary==null)throw;UnityEngine.Debug.LogException(cleanup);}
+                finally {work--;}
+            }
         }
         async UniTask<ImageReference[]> ResolveFiles(ImageReference[] images,bool verify,string[] changed,CancellationToken token)
         {
@@ -298,17 +339,42 @@ namespace Game.Media
                 return FileImageVersion.Read(image,token);
             }).ToArray());
         }
-        public IDisposable Watch(ImageLibraryScope scope,Action<ImageLibraryChangeBatch> onChanges)
+        public WatchHandle Watch(ImageLibraryScope scope,Action<ImageLibraryChangeBatch> onChanges)
         {
-            Check();if(onChanges==null) throw new ArgumentNullException(nameof(onChanges));var observer=Observe(scope);
-            if(observer.Subscribers.Count>=32) throw new InvalidOperationException("At most 32 subscriptions per scope are supported.");
-            observer.Subscribers.Add(onChanges);StartDriver();return new Subscription(observer,onChanges);
+            Check();if(onChanges==null)throw new ArgumentNullException(nameof(onChanges));
+            if(scope==null)throw new ArgumentNullException(nameof(scope));
+            if(observers.TryGetValue(scope.Id,out var existing) && existing.Subscribers.Count>=32)
+                throw new InvalidOperationException("At most 32 subscriptions per scope are supported.");
+            var observer=AcquireObserver(scope);var handle=new WatchHandle(this,observer,onChanges);
+            observer.Subscribers.Add(handle);StartDriver();return handle;
         }
-        sealed class Subscription : IDisposable
+        public sealed class WatchHandle
         {
-            Observer owner;readonly Action<ImageLibraryChangeBatch> callback;
-            internal Subscription(Observer owner,Action<ImageLibraryChangeBatch> callback) { this.owner=owner;this.callback=callback; }
-            public void Dispose(){MediaThread.Check();var previous=owner;owner=null;previous?.Subscribers.Remove(callback);}
+            readonly ImageLibraryIndex index;
+            readonly Observer observer;
+            internal readonly Action<ImageLibraryChangeBatch> Callback;
+            internal bool IsClosed {get;private set;}
+            UniTask close;
+            internal WatchHandle(ImageLibraryIndex index,Observer observer,Action<ImageLibraryChangeBatch> callback)
+            {this.index=index;this.observer=observer;Callback=callback;}
+            void Check(){index.Check();if(IsClosed)throw new ObjectDisposedException(nameof(WatchHandle));}
+            public Exception Failure {get{Check();return observer.Failure;}}
+            /// <summary>Resume notifications without replaying a failed batch or forcing a full scan.</summary>
+            public void Resume(){Check();observer.Failure=null;index.StartDriver();}
+            public void RequestRefresh(){Check();observer.Signal(true);Resume();}
+            public UniTask CloseAsync()
+            {
+                MediaThread.Check();if(IsClosed)return close;IsClosed=true;observer.Subscribers.Remove(this);
+                close=CloseCore().Preserve();return close;
+            }
+            async UniTask CloseCore()
+            {
+                await index.ReleaseObserver(observer);
+                // The driver or an admitted refresh may still hold the last
+                // temporary lease. Its release owns native unregistration.
+                while(!observer.Closing && observer.Subscribers.Count==0 && observer.References!=0)await UniTask.Yield();
+                if(observer.Closing)await observer.CloseTask;
+            }
         }
         async UniTask PollNative(Observer observer,CancellationToken token)
         {
@@ -360,7 +426,8 @@ namespace Game.Media
                     lifetime.Token.ThrowIfCancellationRequested();
                     foreach(var observer in observers.Values.ToArray())
                     {
-                        if(observer.Subscribers.Count==0 || observer.Failure!=null)continue;
+                        if(observer.Closing || observer.Subscribers.Count==0 || observer.Failure!=null)continue;
+                        observer.References++;
                         try
                         {
                             if(!refreshing)await PollNative(observer,lifetime.Token);
@@ -373,6 +440,11 @@ namespace Game.Media
                         }
                         catch(OperationCanceledException) when(lifetime.IsCancellationRequested){throw;}
                         catch(Exception error){observer.Failure=error;UnityEngine.Debug.LogException(error);}
+                        finally
+                        {
+                            try{await ReleaseObserver(observer);}
+                            catch(Exception cleanup){observer.Failure=observer.Failure??cleanup;UnityEngine.Debug.LogException(cleanup);}
+                        }
                     }
                     await UniTask.Delay(100,ignoreTimeScale:true,cancellationToken:lifetime.Token);
                 }
@@ -380,9 +452,6 @@ namespace Game.Media
             catch(OperationCanceledException) when(lifetime.IsCancellationRequested) { }
             finally {driving=false;}
         }
-        public Exception GetWatchFailure(ImageLibraryScope scope){Check();return Observe(scope).Failure;}
-        public void RequestRefresh(ImageLibraryScope scope)
-        {Check();var observer=Observe(scope);observer.Failure=null;observer.Signal(true);StartDriver();}
         public async UniTask PruneChangesAsync(long throughSequence,CancellationToken token=default)
         {Check();if(throughSequence<0)throw new ArgumentOutOfRangeException(nameof(throughSequence));work++;try{await repository.PruneChanges(throughSequence,token);}finally{work--;}}
         public async UniTask ShutdownAsync()
@@ -390,12 +459,8 @@ namespace Game.Media
             MediaThread.Check();if(closed)return;if(closing)throw new InvalidOperationException("Library shutdown is already active.");closing=true;
             var cleanup=new UIFrame.CleanupFailure();UnityEngine.Application.focusChanged-=OnFocus;cleanup.Run(lifetime.Cancel);
             while(work!=0 || driving)await UniTask.Yield();
-            foreach(var observer in observers.Values)
-            {
-                cleanup.Run(observer.Dispose);
-                if(observer.NativeAttached)try{await NativeMedia.Request(new MediaRequest {op="unobserve",path=observer.NativeId},default);}catch(Exception error){cleanup.Capture(error);}
-                observer.Subscribers.Clear();
-            }
+            foreach(var observer in observers.Values.ToArray())
+                try{await CloseObserver(observer);}catch(Exception error){cleanup.Capture(error);}
             observers.Clear();
             try {await repository.CloseAsync();}catch(Exception error){cleanup.Capture(error);}
             cleanup.Run(lifetime.Dispose);cleanup.Run(refreshGate.Dispose);closed=true;cleanup.Throw();

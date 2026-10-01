@@ -1,4 +1,5 @@
 using System;
+using System.Buffers;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
@@ -31,8 +32,8 @@ namespace Game.Media.Backup
         CancellationTokenSource processing;
         ServerCapabilities capabilities;
         Exception callbackFailure, capabilityFailure;
-        bool disposed, running, accepting, pausing, paused;
-        int downloads, metadataReads;
+        bool disposed, closing, running, accepting, pausing, paused, refreshingCapabilities;
+        int downloads, metadataReads, operations;
         string activeManagedTask;
         public bool IsRunning => running;
         public bool IsPaused => paused;
@@ -142,6 +143,7 @@ namespace Game.Media.Backup
             cleanupPending=r.Number("file_state")==2 || r.Number("file_state")==4 || r.Number("file_state")==5,cleanupError=r.Text("cleanup_error") };
         public async UniTask<BackupTaskPage> QueryTasksAsync(BackupTaskQuery query=null,CancellationToken cancellationToken=default)
         {
+            using var operation=EnterOperation();
             Check(); query=query??new BackupTaskQuery(); int size=query.PageSize; var state=query.State; var cursor=query.Cursor;
             if(size<1 || size>200 || state.HasValue && !Enum.IsDefined(typeof(BackupState),state.Value)) throw new ArgumentOutOfRangeException(nameof(query));
             if(cursor!=null && (cursor.Store!=StoreId || cursor.State!=state)) throw new ArgumentException("Cursor belongs to another repository or filter.");
@@ -151,11 +153,15 @@ namespace Game.Media.Backup
             return new BackupTaskPage(items,rows.Count==size?new BackupTaskCursor(StoreId,state,items[items.Count-1].sequence,upper):null);
         }
         public async UniTask<BackupTaskInfo> GetTaskAsync(string taskId,CancellationToken cancellationToken=default)
+        {using var operation=EnterOperation();return await GetTaskCoreAsync(taskId,cancellationToken);}
+        async UniTask<BackupTaskInfo> GetTaskCoreAsync(string taskId,CancellationToken cancellationToken=default)
         {
             if(string.IsNullOrEmpty(taskId)) throw new ArgumentException("Task ID required.");
             var rows=(await Db(Command.Task,cancellationToken,taskId)).Rows; return rows.Count==0?null:TaskInfo(rows[0]);
         }
         public async UniTask<BackupSummary> GetSummaryAsync(CancellationToken cancellationToken=default)
+        {using var operation=EnterOperation();return await GetSummaryCoreAsync(cancellationToken);}
+        async UniTask<BackupSummary> GetSummaryCoreAsync(CancellationToken cancellationToken=default)
         {
             var rows=(await Db(Command.Summary,cancellationToken)).Rows; var counts=new long[10];
             foreach(var row in rows) counts[(int)row.Number("state")]=row.Number("count");
@@ -165,6 +171,7 @@ namespace Game.Media.Backup
             Sha256=r.Text("sha256"),ByteCount=r.Number("byte_count"),Name=r.Text("name"),MimeType=r.Text("mime"),ConfirmedUtc=new DateTime(r.Number("confirmed_utc"),DateTimeKind.Utc) };
         public async UniTask<BackupReceiptPage> QueryBackupsAsync(int pageSize=100,BackupReceiptCursor cursor=null,CancellationToken cancellationToken=default)
         {
+            using var operation=EnterOperation();
             if(pageSize<1 || pageSize>200) throw new ArgumentOutOfRangeException(nameof(pageSize));
             if(cursor!=null && cursor.Store!=StoreId) throw new ArgumentException("Cursor belongs to another repository.");
             var rows=(await Db(Command.Receipts,cancellationToken,cursor?.AfterTime??0,cursor?.AfterId??"",pageSize)).Rows;
@@ -178,8 +185,9 @@ namespace Game.Media.Backup
         }
         internal async UniTask<IReadOnlyList<string>> EnqueueBatchAsync(IReadOnlyList<ImageReference> images,CancellationToken token,string operationId=null)
         {
+            using var operation=EnterOperation();
             Check(); if(images==null || images.Count<1 || images.Count>32) throw new ArgumentException("A durable preparation batch contains 1-32 images.");
-            if(accepting || pausing) throw new InvalidOperationException("Another preparation or pause is active.");
+            if(accepting) throw new InvalidOperationException("Another preparation is active.");
             var sources=images.ToArray(); if(sources.Any(x=>x==null || string.IsNullOrEmpty(x.Version))) throw new ArgumentException("Every image needs a current source identity and version.");
             token.ThrowIfCancellationRequested(); accepting=true;
             using var linked=CancellationTokenSource.CreateLinkedTokenSource(token,lifetime.Token); token=linked.Token;
@@ -202,9 +210,9 @@ namespace Game.Media.Backup
                     long free=(await Db(Command.Storage,token)).Single.Number("available_bytes")-16L*1024*1024;
                     long available=Math.Min(budget-occupied,free); if(available<=0 || image.ByteCount>available) throw new BackupBudgetExceededException();
                     await Db(Command.ReservePayload,token,ids[i],owner,Math.Min(maximum,available),budget,Now);
-                    await ValidateSource(image,token);
+                    if(image.Source!="file")await ValidateSource(image,token);
                     var value=await PreparePayload(image,Path.Combine(root,"payloads",ids[i]+".payload"),available,token);
-                    await ValidateSource(image,token);
+                    if(image.Source!="file")await ValidateSource(image,token);
                     await Db(Command.Seal,token,ids[i],owner,value.size,value.hash,Hash(image.Source+":"+image.OriginId+"\n"+value.hash),value.mime,budget,Now);
                 }
                 await Db(Command.Accept,token,batch,owner,Now); accepted=true;
@@ -230,7 +238,8 @@ namespace Game.Media.Backup
             => ProcessTasksAsync(null,cancellationToken,canTransfer);
         internal async UniTask ProcessTasksAsync(IReadOnlyList<string> ids,CancellationToken token,Func<bool> canTransfer=null)
         {
-            Check(); if(running || pausing) throw new InvalidOperationException("A backup pass or pause is already active.");
+            using var operation=EnterOperation();
+            Check(); if(running || pausing || refreshingCapabilities) throw new InvalidOperationException("A backup pass, queue control or capability refresh is already active.");
             if(nativeEnabled && canTransfer!=null) throw new ArgumentException("A managed callback cannot enforce background network policy.");
             if(ids!=null && ids.Count>32) throw new ArgumentException("An explicit processing batch contains at most 32 tasks.");
             token.ThrowIfCancellationRequested();
@@ -240,7 +249,7 @@ namespace Game.Media.Backup
             {
                 passCancellation=CancellationTokenSource.CreateLinkedTokenSource(token,lifetime.Token);
                 processing=passCancellation;token=passCancellation.Token;
-                if((await GetSummaryAsync(token)).QueuePaused) return;
+                if((await GetSummaryCoreAsync(token)).QueuePaused) return;
                 if(!CanTransfer(canTransfer)) return;
                 long upper=(await Db(Command.Info,token)).Single.Number("upper_sequence"),after=0,passTime=Now; int index=0;
                 for(;;)
@@ -250,7 +259,7 @@ namespace Game.Media.Backup
                     else
                     {
                         if(index>=ids.Count) break;
-                        var one=await GetTaskAsync(ids[index++],token); if(one==null) throw new ArgumentException("Task does not exist."); page=new[]{one};
+                        var one=await GetTaskCoreAsync(ids[index++],token); if(one==null) throw new ArgumentException("Task does not exist."); page=new[]{one};
                     }
                     foreach(var candidate in page)
                     {
@@ -369,7 +378,9 @@ namespace Game.Media.Backup
         }
         public async UniTask PauseAsync(CancellationToken cancellationToken=default)
         {
-            Check(); if(pausing || accepting) throw new InvalidOperationException("Await current preparation or pause first."); pausing=true;
+            using var operation=EnterOperation();
+            using var linked=CancellationTokenSource.CreateLinkedTokenSource(cancellationToken,lifetime.Token);cancellationToken=linked.Token;
+            Check(); if(pausing) throw new InvalidOperationException("Another queue control operation is active."); pausing=true;
             try
             {
                 await Db(Command.Pause,cancellationToken,true); paused=true; processing?.Cancel();
@@ -385,7 +396,7 @@ namespace Game.Media.Backup
             for(;;)
             {
                 bool owned;
-                if(taskId!=null)owned=(await GetTaskAsync(taskId,token))?.nativeOwned==true;
+                if(taskId!=null)owned=(await GetTaskCoreAsync(taskId,token))?.nativeOwned==true;
                 else owned=(await Db(Command.Attempts,token,0,Application.platform==RuntimePlatform.Android?1:2,1)).Rows.Count!=0;
                 if(!owned)return;
                 // Wake also surfaces repository/adapter failures; cancellation stops only this wait.
@@ -397,19 +408,27 @@ namespace Game.Media.Backup
         {
             if(activeManagedTask!=null)
             {
-                var current=await GetTaskAsync(activeManagedTask);if(current!=null && current.desiredAction!=0)processing?.Cancel();
+                var current=await GetTaskCoreAsync(activeManagedTask);if(current!=null && current.desiredAction!=0)processing?.Cancel();
             }
             if(nativeEnabled)await Platform(new NativeBackupRequest {op="sync",repository=StoreId});
         }
         public async UniTask ResumeAsync(CancellationToken cancellationToken=default)
         {
-            CheckIdle(); await Db(Command.Pause,cancellationToken,false); paused=false;
-            if(nativeEnabled) await Platform(new NativeBackupRequest { op="wake",repository=StoreId });
+            using var operation=EnterOperation();
+            Check();if(pausing)throw new InvalidOperationException("Another queue control operation is active.");pausing=true;
+            try {
+                await Db(Command.Pause,cancellationToken,false);paused=false;
+                if(nativeEnabled)await Platform(new NativeBackupRequest {op="wake",repository=StoreId});
+            }
+            finally {pausing=false;}
         }
         public async UniTask RetryAsync(string taskId,CancellationToken cancellationToken=default)
-        { Check(); await Db(Command.Action,cancellationToken,taskId,3,Now); }
+        {
+            using var operation=EnterOperation(); Check(); await Db(Command.Action,cancellationToken,taskId,3,Now); }
         public async UniTask CancelAsync(string taskId,CancellationToken cancellationToken=default)
         {
+            using var operation=EnterOperation();
+            using var linked=CancellationTokenSource.CreateLinkedTokenSource(cancellationToken,lifetime.Token);cancellationToken=linked.Token;
             Check(); await Db(Command.Action,cancellationToken,taskId,2,Now);
             if(nativeEnabled) await Platform(new NativeBackupRequest { op="stop",repository=StoreId,id=taskId });
             if(activeManagedTask==taskId)processing?.Cancel();
@@ -418,7 +437,11 @@ namespace Game.Media.Backup
             await CleanupFilesAsync(cancellationToken);
         }
         public async UniTask RetryCleanupAsync(string taskId,CancellationToken cancellationToken=default)
-        { CheckIdle(); await Db(Command.CleanupRetry,cancellationToken,taskId,Now); await CleanupFilesAsync(cancellationToken); }
+        {
+            using var operation=EnterOperation();
+            Check();var row=(await Db(Command.CleanupRetry,cancellationToken,taskId,Now)).Single;
+            await Db(Command.CleanupRun,cancellationToken,row.Text("id"),row.Number("updated_utc"),Now);
+        }
         internal async UniTask<long> CleanupFilesAsync(CancellationToken token=default,int maximumItems=200)
         {
             string after=""; long freed=0; int count=0;
@@ -429,7 +452,10 @@ namespace Game.Media.Backup
                 foreach(var row in rows)
                 {
                     token.ThrowIfCancellationRequested(); after=row.Text("id");count++;
-                    var result=(await Db(Command.CleanupRun,token,after,row.Number("updated_utc"),Now)).Single; freed+=result.Number("freed_bytes");
+                    try {
+                        var result=(await Db(Command.CleanupRun,token,after,row.Number("updated_utc"),Now)).Single;freed+=result.Number("freed_bytes");
+                    }
+                    catch(BackupRepositoryException error) when(error.IsIsolatedCleanupFailure) {Debug.LogException(error);}
                 }
             }
             return freed;
@@ -448,17 +474,34 @@ namespace Game.Media.Backup
         { if(capabilities==null) SetCapabilities(await JsonRequest<ServerCapabilities>(HttpMethod.Get,"/v1/capabilities",null,token)); }
         public async UniTask RefreshServerCapabilitiesAsync(CancellationToken cancellationToken=default)
         {
-            CheckIdle(); metadataReads++; using var linked=CancellationTokenSource.CreateLinkedTokenSource(cancellationToken,lifetime.Token);
+            using var operation=EnterOperation();
+            Check();if(running || refreshingCapabilities)throw new InvalidOperationException("Await the active backup pass or capability refresh.");
+            refreshingCapabilities=true;using var linked=CancellationTokenSource.CreateLinkedTokenSource(cancellationToken,lifetime.Token);
             try { SetCapabilities(await JsonRequest<ServerCapabilities>(HttpMethod.Get,"/v1/capabilities",null,linked.Token)); }
-            finally { metadataReads--; }
+            finally { refreshingCapabilities=false; }
         }
         string Payload(BackupTaskInfo task) => Path.Combine(root,task.relativePath);
         internal static string Hash(string text) { using var sha=SHA256.Create();return Hex(sha.ComputeHash(Encoding.UTF8.GetBytes(text))); }
         static string Hex(byte[] bytes) => BitConverter.ToString(bytes).Replace("-","").ToLowerInvariant();
         void Check() { MediaThread.Check();if(disposed) throw new ObjectDisposedException(nameof(ImageBackupService)); }
-        void CheckIdle() { Check();if(running || accepting || pausing || drivingOperations || downloads!=0 || metadataReads!=0) throw new InvalidOperationException("Cancel and await active service operations first."); }
+        void CheckIdle() { Check();if(running || accepting || pausing || refreshingCapabilities || drivingOperations || downloads!=0 || metadataReads!=0 || operations!=0) throw new InvalidOperationException("Cancel and await active service operations first."); }
+        internal OperationLease EnterOperation()
+        {
+            Check();if(closing)throw new ObjectDisposedException(nameof(ImageBackupService));operations++;return new OperationLease(this);
+        }
+        internal readonly struct OperationLease:IDisposable
+        {
+            readonly ImageBackupService owner;
+            internal OperationLease(ImageBackupService owner){this.owner=owner;}
+            public void Dispose(){owner.operations--;}
+        }
         public async UniTask ShutdownAsync()
-        { Check();lifetime.Cancel();while(running || accepting || pausing || drivingOperations || downloads!=0 || metadataReads!=0) await UniTask.Yield();Dispose(); }
+        {
+            Check();if(closing)throw new InvalidOperationException("Backup shutdown is already active.");closing=true;
+            var cleanup=new UIFrame.CleanupFailure();cleanup.Run(lifetime.Cancel);
+            while(running || accepting || pausing || refreshingCapabilities || drivingOperations || downloads!=0 || metadataReads!=0 || operations!=0)await UniTask.Yield();
+            cleanup.Run(Dispose);cleanup.Throw();
+        }
         public void Dispose()
         {
             if(disposed) return;CheckIdle();disposed=true;var cleanup=new UIFrame.CleanupFailure();
@@ -481,25 +524,32 @@ namespace Game.Media.Backup
                 return await UniTask.RunOnThreadPool(() =>
                 {
                     FileStream input;
-                    try { input = File.OpenRead(source.Id); }
+                    try { FileImageVersion.ValidateMetadata(source);input = File.OpenRead(source.Id); }
+                    catch (GalleryException error) { throw new BackupSourceFailure(error); }
                     catch (IOException error) { throw new BackupSourceFailure(error); }
                     catch (UnauthorizedAccessException error) { throw new BackupSourceFailure(error); }
                     using (input)
                     using (var output = new FileStream(destination, FileMode.CreateNew, FileAccess.Write, FileShare.None))
                     using (var sha = SHA256.Create())
                     {
-                        var buffer = new byte[128 * 1024]; long size = 0;
-                        for (;;)
-                        {
+                        var buffer = ArrayPool<byte>.Shared.Rent(128 * 1024); long size = 0;
+                        try {
+                        for (;;) {
                             token.ThrowIfCancellationRequested(); int count;
-                            try { count = input.Read(buffer, 0, buffer.Length); }
+                            try { count = input.Read(buffer, 0, 128*1024); }
                             catch (IOException error) { throw new BackupSourceFailure(error); }
                             if (count == 0) break;
                             CheckSize(size + count); output.Write(buffer, 0, count);
                             sha.TransformBlock(buffer, 0, count, null, 0); size += count;
                         }
-                        sha.TransformFinalBlock(Array.Empty<byte>(), 0, 0); output.Flush(true);
-                        return (size, source.MimeType, Hex(sha.Hash));
+                        token.ThrowIfCancellationRequested();sha.TransformFinalBlock(Array.Empty<byte>(), 0, 0);
+                        string hash=Hex(sha.Hash);
+                        try {FileImageVersion.ValidateCopy(source,hash);}
+                        catch(Exception error) when(error is GalleryException || error is IOException || error is UnauthorizedAccessException){throw new BackupSourceFailure(error);}
+                        // Dispose flushes the stream buffer; native Seal owns durable publication.
+                        return (size, source.MimeType, hash);
+                        }
+                        finally {ArrayPool<byte>.Shared.Return(buffer);}
                     }
                 });
             }
@@ -538,6 +588,7 @@ namespace Game.Media.Backup
 
         public async UniTask DownloadBackupAndVerifyAsync(string backupId, string destination, CancellationToken cancellationToken = default)
         {
+            using var operation=EnterOperation();
             Check(); if (!Path.IsPathRooted(destination)) throw new ArgumentException("Absolute destination required.");
             var rows=(await Db(Command.Receipt,cancellationToken,backupId)).Rows;
             if(rows.Count!=1) throw new ArgumentException("Confirmed backup receipt not found.",nameof(backupId));

@@ -55,6 +55,7 @@ namespace Game.Media.Backup
     {
         public async UniTask<BackupChangePage> ReadChangesAsync(BackupChangeCursor cursor=null,int pageSize=100,CancellationToken cancellationToken=default)
         {
+            using var operation=EnterOperation();
             if(pageSize<1 || pageSize>199)throw new ArgumentOutOfRangeException(nameof(pageSize));
             if(cursor!=null && cursor.Store!=StoreId)throw new ArgumentException("Cursor belongs to another backup repository.");
             long after=cursor?.Sequence??0;var result=await Db(Command.Changes,cancellationToken,after,pageSize);
@@ -64,7 +65,7 @@ namespace Game.Media.Backup
         }
         public async UniTask RecoverNativeAsync(CancellationToken cancellationToken=default)
         {
-            CheckIdle();cancellationToken.ThrowIfCancellationRequested();if(!nativeEnabled)throw new InvalidOperationException("Native background transfer is not enabled.");
+            using var operation=EnterOperation();cancellationToken.ThrowIfCancellationRequested();if(!nativeEnabled)throw new InvalidOperationException("Native background transfer is not enabled.");
             await Platform(new NativeBackupRequest {op="recover",repository=StoreId});
         }
         bool drivingOperations;
@@ -84,6 +85,7 @@ namespace Game.Media.Backup
         /// <summary>Reconcile an uncertain acceptance using the original caller-owned ID, including after task history is pruned.</summary>
         public async UniTask<BackupPreparationStatus> QueryPreparationAsync(string operationId,CancellationToken cancellationToken=default)
         {
+            using var operation=EnterOperation();
             ValidateId(operationId,nameof(operationId));var result=await Db(Command.Preparation,cancellationToken,operationId);
             if(result.Tables[0].Count==0)return null;var row=result.Tables[0][0];
             return new BackupPreparationStatus { OperationId=operationId,Accepted=row.Number("phase")==1,Abandoned=row.Number("phase")==2,
@@ -96,6 +98,7 @@ namespace Game.Media.Backup
         /// <summary>Durable admission. The caller owns OperationId before this call; cancellation after admission cannot undo it.</summary>
         public async UniTask<string> SubmitOperationAsync(BackupOperationCommand command,CancellationToken cancellationToken=default)
         {
+            using var operation=EnterOperation();
             Check();if(command==null)throw new ArgumentNullException(nameof(command));ValidateId(command.OperationId,nameof(command.OperationId));
             if(!Enum.IsDefined(typeof(BackupAction),command.Action) || command.State.HasValue && !Enum.IsDefined(typeof(BackupState),command.State.Value))throw new ArgumentOutOfRangeException(nameof(command));
             if(command.TaskIds!=null && (command.TaskIds.Count<1 || command.TaskIds.Count>128 || command.State.HasValue))throw new ArgumentException("Use either a state filter or 1-128 explicit task identities.");
@@ -110,6 +113,8 @@ namespace Game.Media.Backup
             await Db(Command.Operation,cancellationToken,values.ToArray());StartOperationDriver();return id;
         }
         public async UniTask<BackupOperationStatus> QueryOperationAsync(string operationId,BackupOperationCursor cursor=null,int pageSize=100,CancellationToken cancellationToken=default)
+        {using var operation=EnterOperation();return await QueryOperationCoreAsync(operationId,cursor,pageSize,cancellationToken);}
+        async UniTask<BackupOperationStatus> QueryOperationCoreAsync(string operationId,BackupOperationCursor cursor,int pageSize,CancellationToken cancellationToken)
         {
             ValidateId(operationId,nameof(operationId));if(pageSize<1 || pageSize>200)throw new ArgumentOutOfRangeException(nameof(pageSize));
             if(cursor!=null && (cursor.Store!=StoreId || cursor.Operation!=operationId))throw new ArgumentException("Cursor belongs to another operation.");
@@ -122,9 +127,11 @@ namespace Game.Media.Backup
         }
         public async UniTask<BackupOperationStatus> WaitOperationAsync(string operationId,CancellationToken cancellationToken=default)
         {
+            using var operation=EnterOperation();
+            using var linked=CancellationTokenSource.CreateLinkedTokenSource(cancellationToken,lifetime.Token);cancellationToken=linked.Token;
             Check();for(;;)
             {
-                var result=await QueryOperationAsync(operationId,null,1,cancellationToken);
+                var result=await QueryOperationCoreAsync(operationId,null,1,cancellationToken);
                 if(result==null)throw new ArgumentException("Operation does not exist.",nameof(operationId));if(result.IsFinished)return result;
                 if(operationDriveFailure!=null)System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(operationDriveFailure).Throw();
                 await UniTask.Delay(100,ignoreTimeScale:true,cancellationToken:cancellationToken);
@@ -170,7 +177,7 @@ namespace Game.Media.Backup
                                 {
                                     if(activeManagedTask!=null)
                                     {
-                                        var current=await GetTaskAsync(activeManagedTask,lifetime.Token);
+                                        var current=await GetTaskCoreAsync(activeManagedTask,lifetime.Token);
                                         if(current!=null && current.desiredAction!=0)processing?.Cancel();
                                     }
                                     if(nativeEnabled)await Platform(new NativeBackupRequest {op="sync",repository=StoreId});
@@ -191,7 +198,9 @@ namespace Game.Media.Backup
         /// <summary>Checks the existing server identity, then atomically abandons an incomplete session before allowing local cancellation.</summary>
         public async UniTask ReconcileTaskAsync(string taskId,CancellationToken cancellationToken=default)
         {
-            Check();var record=await GetTaskAsync(taskId,cancellationToken);
+            using var operation=EnterOperation();
+            using var linked=CancellationTokenSource.CreateLinkedTokenSource(cancellationToken,lifetime.Token);cancellationToken=linked.Token;
+            Check();var record=await GetTaskCoreAsync(taskId,cancellationToken);
             if(record==null || record.state!=BackupState.NeedsAttention || record.nativeOwned)throw new InvalidOperationException("A released task with unknown server outcome is required.");
             metadataReads++;
             try

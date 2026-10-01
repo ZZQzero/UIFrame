@@ -14,6 +14,9 @@
 extern "C" {
 #endif
 #define UFB_ABI 1u
+// The file effect failed and its failure was durably isolated. Other commands
+// may continue; only an explicit cleanup retry may select this file again.
+#define UFB_CLEANUP_FILE_FAILED 1001
 enum ufb_command {
     UFB_INFO=1, UFB_PREPARE=2, UFB_SEAL=3, UFB_ACCEPT=4, UFB_ABANDON=5,
     UFB_TASKS=6, UFB_TASK=7, UFB_SUMMARY=8, UFB_CLAIM=9, UFB_SUBMITTED=10,

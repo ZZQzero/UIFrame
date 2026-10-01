@@ -346,6 +346,7 @@ namespace UIFrame.Regression
             var stamp=new DateTime(2026,9,1,12,0,0,DateTimeKind.Utc);File.SetLastWriteTimeUtc(path,stamp);
             var metadata=ImageReference.FromFile(path);var scope=new ImageLibraryScope(ImageLibrarySourceKind.Directory,root);
             var library=await ImageLibraryIndex.OpenAsync(Path.Combine(root,"content.sqlite"));
+            var watch=library.Watch(scope,_=>{});
             try {
                 await library.RefreshAsync(scope);var before=await library.GetPositionAsync(scope);
                 var old=(await library.QueryAsync(scope)).Items.Single(i=>i.Id==path);
@@ -384,15 +385,16 @@ namespace UIFrame.Regression
         {
             var library=await ImageLibraryIndex.OpenAsync(Path.Combine(root,"library.sqlite"));
             var shallow=new ImageLibraryScope(ImageLibrarySourceKind.Directory,root);var deep=new ImageLibraryScope(ImageLibrarySourceKind.Directory,root,true);
+            var shallowWatch=library.Watch(shallow,_=>{});var deepWatch=library.Watch(deep,_=>{});
             try
             {
                 await library.RefreshAsync(shallow);await library.RefreshAsync(deep);var before=await library.GetPositionAsync(deep);
                 var bytes=File.ReadAllBytes(imagePath);File.AppendAllText(imagePath,"version");
-                library.RequestRefresh(shallow);await library.RefreshAsync(shallow);library.RequestRefresh(deep);await library.RefreshAsync(deep);
+                shallowWatch.RequestRefresh();await library.RefreshAsync(shallow);deepWatch.RequestRefresh();await library.RefreshAsync(deep);
                 var changes=await library.ReadChangesAsync(deep,before);Assert.IsTrue(changes.Items.Any(c=>c.Kind==ImageLibraryChangeKind.ContentChanged));
                 var page=await library.QueryAsync(shallow,1);Assert.AreEqual(1,page.Items.Count);Assert.IsNotNull(page.Next);
                 Assert.IsEmpty((await library.QueryAsync(shallow,1,page.Next)).Items);
-                File.Delete(imagePath);library.RequestRefresh(shallow);await library.RefreshAsync(shallow);Assert.IsEmpty((await library.QueryAsync(shallow)).Items);
+                File.Delete(imagePath);shallowWatch.RequestRefresh();await library.RefreshAsync(shallow);Assert.IsEmpty((await library.QueryAsync(shallow)).Items);
                 var position=await library.GetPositionAsync(deep);await library.PruneChangesAsync(position.Sequence);
                 Assert.IsTrue((await library.ReadChangesAsync(deep,before)).RequiresRefresh);
                 Assert.GreaterOrEqual((await library.GetPositionAsync(deep)).Sequence,position.Sequence);
@@ -407,7 +409,7 @@ namespace UIFrame.Regression
                 var automatic=await AutomaticImageBackup.CreateAsync(service,library);
                 await automatic.ConfigureAsync(new AutomaticBackupPolicy {enabled=true,source=root,sourceKind=BackupSourceKind.Directory,includeExisting=false,wifiOnly=false});
                 await automatic.ScanOnceAsync();Assert.IsEmpty((await service.QueryTasksAsync()).Items);
-                File.Copy(imagePath,Path.Combine(root,"new.png"));library.RequestRefresh(new ImageLibraryScope(ImageLibrarySourceKind.Directory,root));
+                File.Copy(imagePath,Path.Combine(root,"new.png"));
                 await automatic.ScanOnceAsync();Assert.AreEqual(1,(await service.QueryTasksAsync()).Items.Count);
                 await automatic.ScanOnceAsync();Assert.AreEqual(1,(await service.QueryTasksAsync()).Items.Count);
             }

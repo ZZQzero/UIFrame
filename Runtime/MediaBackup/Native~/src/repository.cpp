@@ -234,8 +234,8 @@ struct Repository {
             auto relative=selected[0][0].text;
             require(relative=="payloads/"+id+".payload","Unexpected owned payload path",UF_STATE);
             auto payload=std::filesystem::u8path(path).parent_path()/relative;
+            int64_t bytes=0;
             try {
-                int64_t bytes=0;
                 if(std::filesystem::exists(payload)) {
                     require(!std::filesystem::is_symlink(payload),"Owned payload is a symbolic link",UF_IO);
                     bytes=int64_t(std::filesystem::file_size(payload)); std::filesystem::remove(payload);
@@ -249,25 +249,27 @@ struct Repository {
                     }
                     std::filesystem::remove(exported);
                 }
-                // Drop metadata when its final file owner is released. Accepted
-                // tasks retain their record until history pruning deletes them.
-                return db.batch({{"UPDATE file_records SET state=3,cleanup_error=NULL,updated_utc=? WHERE id=? AND state=5",{now,id},1},
-                    {"DELETE FROM file_records WHERE id=? AND NOT EXISTS(SELECT 1 FROM tasks WHERE file_id=file_records.id)",{id}},
-                    {"SELECT 1 AS deleted,? AS freed_bytes",{bytes}}},capacity);
-            } catch(...) {
+            } catch(const std::exception &failure) {
                 auto primary=std::current_exception();
-                try { std::rethrow_exception(primary); }
-                catch(const Error &e) { if(e.committed<0) { faulted=true; throw; } }
-                catch(...) {}
-                try { std::rethrow_exception(primary); }
-                catch(const std::exception &e) {
-                    try { db.batch({{"UPDATE file_records SET state=4,cleanup_error=?,updated_utc=? WHERE id=? AND state=5",{std::string(e.what()),now,id},1}}); }
-                    catch(const std::exception &cleanup) { std::fprintf(stderr,"Backup cleanup recording failed: %s\n",cleanup.what()); }
+                try { db.batch({{"UPDATE file_records SET state=4,cleanup_error=?,updated_utc=? WHERE id=? AND state=5",{std::string(failure.what()),now,id},1}}); }
+                catch(...) {
+                    try { throw; }
+                    catch(const Error &error) { if(error.committed<0 || error.code==UF_FAULTED)faulted=true;std::fprintf(stderr,"Backup cleanup recording failed: %s\n",error.what()); }
+                    catch(const std::exception &error) { std::fprintf(stderr,"Backup cleanup recording failed: %s\n",error.what()); }
+                    catch(...) { std::fprintf(stderr,"Backup cleanup recording failed\n"); }
+                    std::rethrow_exception(primary);
                 }
-                std::rethrow_exception(primary);
+                throw Error(UFB_CLEANUP_FILE_FAILED,failure.what());
             }
+            // A persistence failure is a repository error, never an isolated
+            // file failure. Keep it outside the filesystem failure boundary.
+            return db.batch({{"UPDATE file_records SET state=3,cleanup_error=NULL,updated_utc=? WHERE id=? AND state=5",{now,id},1},
+                {"DELETE FROM file_records WHERE id=? AND NOT EXISTS(SELECT 1 FROM tasks WHERE file_id=file_records.id)",{id}},
+                {"SELECT 1 AS deleted,? AS freed_bytes",{bytes}}},capacity);
         }
-        case UFB_CLEANUP_RETRY: a.count(2); commands.emplace_back("UPDATE file_records SET state=2,cleanup_error=NULL,updated_utc=? WHERE id=? AND state=4",std::vector<Value>{a.number(1),a.id(0)},1); break;
+        case UFB_CLEANUP_RETRY:
+            a.count(2);commands.emplace_back("UPDATE file_records SET state=2,cleanup_error=NULL,updated_utc=? WHERE id=? AND state=4",std::vector<Value>{a.number(1),a.id(0)},1);
+            commands.emplace_back("SELECT id,updated_utc FROM file_records WHERE id=?",std::vector<Value>{a.id(0)});break;
         case UFB_SCHEDULABLE:
         case UFB_ATTEMPTS: a.count(3); read=true; commands.emplace_back(TaskColumns+"WHERE t.sequence>? AND a.executor=? AND (a.payload_released=0 OR a.credential_released=0) "+std::string(command==UFB_SCHEDULABLE?"AND (a.submission_state>0 OR a.execution_state>=2) ":"")+"ORDER BY t.sequence LIMIT ?",std::vector<Value>{a.number(0),a.number(1,0,2),a.number(2,1,200)}); break;
         case UFB_CHANGES: {

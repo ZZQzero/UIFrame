@@ -264,7 +264,14 @@ public final class BackupBridge {
         String cursor="";int processed=0;
         while(processed<200) {
             List<BackupRepository.Row> rows=repository.call(BackupRepository.CLEANUP_PAGE,cursor,Math.min(100,200-processed));if(rows.isEmpty())break;
-            for(BackupRepository.Row row:rows){cursor=row.text("id");repository.call(BackupRepository.CLEANUP_RUN,cursor,row.number("updated_utc"),utcTicks());processed++;}
+            for(BackupRepository.Row row:rows){
+                cursor=row.text("id");processed++;
+                try {repository.call(BackupRepository.CLEANUP_RUN,cursor,row.number("updated_utc"),utcTicks());}
+                catch(BackupRepository.Failure error) {
+                    if(error.code!=BackupRepository.CLEANUP_FILE_FAILED)throw error;
+                    android.util.Log.e("UIFrameBackup","File cleanup failed: "+cursor,error);
+                }
+            }
         }
     }
     private static long utcTicks(){return 621355968000000000L+System.currentTimeMillis()*10000L;}

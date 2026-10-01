@@ -15,6 +15,7 @@ namespace Game.Media.Backup
         public int SqliteCode { get; }
         public int Phase { get; }
         public bool CommitOutcomeUnknown { get; }
+        public bool IsIsolatedCleanupFailure => Code == 1001;
         internal BackupRepositoryException(int code, int sqlite, int phase, int committed, string message) : base(message)
         { Code = code; SqliteCode = sqlite; Phase = phase; CommitOutcomeUnknown = committed < 0; }
     }
