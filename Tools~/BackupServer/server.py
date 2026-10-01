@@ -35,6 +35,16 @@ def sync_directory(path):
         os.close(descriptor)
 
 
+class CleanupFileError(Exception):
+    """A filesystem failure whose item has been durably isolated."""
+    def __init__(self, account, filename, error):
+        super().__init__(str(error))
+        self.account, self.filename, self.error = account, filename, error
+
+    def describe(self):
+        return dict(account=self.account, filename=self.filename, error=str(self.error))
+
+
 class Store:
     def __init__(self, root, credentials):
         self.root = Path(root).resolve()
@@ -125,22 +135,26 @@ class Store:
             size = file.stat().st_size if file.exists() else 0
             file.unlink(missing_ok=True)
             sync_directory(self.directory(account))
-            with self.lock, self.db:
-                self.db.execute('DELETE FROM incoming WHERE filename=?', (filename,))
-            return size
-        except Exception as primary:
+        except OSError as primary:
             try:
                 with self.lock, self.db:
-                    self.db.execute('UPDATE incoming SET cleanup_state=2,cleanup_error=? WHERE filename=?', (str(primary), filename))
+                    changed = self.db.execute('UPDATE incoming SET cleanup_state=2,cleanup_error=? WHERE filename=?', (str(primary), filename)).rowcount
+                    if changed != 1:
+                        raise RuntimeError('Incoming cleanup owner disappeared')
             except Exception as secondary:
                 print('Recording incoming cleanup failure also failed: ' + repr(secondary), file=sys.stderr)
-            raise
+                raise primary
+            raise CleanupFileError(account, filename, primary) from primary
+        with self.lock, self.db:
+            self.db.execute('DELETE FROM incoming WHERE filename=?', (filename,))
+        return size
 
     def cleanup_expired(self, ttl_seconds, maximum=200, retry_failed=False):
         if ttl_seconds <= 0 or not 1 <= maximum <= 200:
             raise ValueError('Positive TTL and 1-200 cleanup page size required')
         cutoff = time.time() - ttl_seconds
         deleted = freed = skipped = 0
+        failures = []
         with self.lock:
             incoming = self.db.execute('SELECT account,upload_id,filename FROM incoming WHERE '
                 'cleanup_state=1 OR (cleanup_state=0 AND created_at<?) OR (cleanup_state=2 AND ?) '
@@ -155,7 +169,10 @@ class Store:
                         (current['cleanup_state'] == 0 and current['created_at'] >= cutoff)):
                         skipped += 1
                         continue
-                freed += self.remove_incoming(account, item['filename'])
+                try:
+                    freed += self.remove_incoming(account, item['filename'])
+                except CleanupFileError as error:
+                    failures.append(error.describe())
         # Count both kinds of persisted cleanup work against the same page budget.
         remaining = maximum - len(incoming)
         with self.lock:
@@ -180,17 +197,21 @@ class Store:
                         file.unlink()
                         freed += size
                     sync_directory(self.directory(account))
-                    with self.lock, self.db:
-                        self.db.execute('UPDATE uploads SET cleanup_state=2 WHERE account=? AND id=? AND cleanup_state=1', (account, key))
-                    deleted += 1
-                except Exception as primary:
+                except OSError as primary:
                     try:
                         with self.lock, self.db:
-                            self.db.execute('UPDATE uploads SET cleanup_state=3,cleanup_error=? WHERE account=? AND id=?', (str(primary), account, key))
+                            changed = self.db.execute('UPDATE uploads SET cleanup_state=3,cleanup_error=? WHERE account=? AND id=?', (str(primary), account, key)).rowcount
+                            if changed != 1:
+                                raise RuntimeError('Upload cleanup owner disappeared')
                     except Exception as secondary:
                         print('Recording cleanup failure also failed: ' + repr(secondary), file=sys.stderr)
-                    raise
-        return dict(expired=deleted, freedBytes=freed, skipped=skipped)
+                        raise primary
+                    failures.append(CleanupFileError(account, key + '.part', primary).describe())
+                    continue
+                with self.lock, self.db:
+                    self.db.execute('UPDATE uploads SET cleanup_state=2 WHERE account=? AND id=? AND cleanup_state=1', (account, key))
+                deleted += 1
+        return dict(expired=deleted, freedBytes=freed, skipped=skipped, failures=failures)
 
     def close(self):
         self.db.close()
@@ -503,11 +524,15 @@ def main():
     stop_cleanup = threading.Event()
     cleaner = None
     if args.upload_ttl_days is not None:
-        store.cleanup_expired(args.upload_ttl_days * 86400, retry_failed=args.retry_failed_cleanup)
+        def cleanup_sessions(retry_failed=False):
+            result = store.cleanup_expired(args.upload_ttl_days * 86400, retry_failed=retry_failed)
+            if result['failures']:
+                print('Session cleanup isolated file failures: ' + json.dumps(result['failures']), file=sys.stderr)
+        cleanup_sessions(args.retry_failed_cleanup)
         def maintenance():
             while not stop_cleanup.wait(60):
                 try:
-                    store.cleanup_expired(args.upload_ttl_days * 86400)
+                    cleanup_sessions()
                 except Exception as error:
                     print('Session cleanup stopped: ' + repr(error), file=sys.stderr)
                     return

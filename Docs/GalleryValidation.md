@@ -12,7 +12,7 @@
 
 - Unity 6000.3.19f1、macOS Apple Silicon；独立隔离工程验证，未重启用户主工程。
 - SQLite 3.53.4 / ABI 3；核心 build ID：`cc2af4a34676c4a76a07358b30d6c4351d4b22a8bdba0f2c9c2e0954fdbbc305`。
-- 共享仓库 ABI 1；四平台同源 build ID：`f26a1fed7e9052a44dab366c05bc503d906e7b9043bbb70fe57e4e6d97bb3ace`。
+- 共享仓库 ABI 1；四平台同源 build ID：`db07b9720d698d9cc3d7fa60a83cb317b3ef28fe2eef9577e1d68d30b146fe0d`。
 - Android ARM64，宿主最低API25，NDK27.2.12479018、CMake3.22.1、JDK17。NDK把native API25规范化为24，不改变宿主最低版本。
 - iOS arm64设备目标、最低15.0、Xcode / SDK27.0；macOS库为arm64+x86_64、最低11.0。
 - Windows x64用LLVM-MinGW 20260922 UCRT交叉构建；没有Windows实际运行结果。
@@ -156,3 +156,7 @@ python3 Tests/Native~/prepare_media_validation.py --project <isolated-project> -
 正式用例包括 `Tests/Editor/Media/MediaTests.cs`、`Tests/Editor/Media/MediaLifecycleTests.cs`、`Tests/Editor/Media/MediaFlowTests.cs`、共享仓库 `tests/repository_tests.cpp`、`tests/scope_reconciliation.py`、`Tests/Native~/android_backup_binding.py` 和 `Tools~/BackupServer/test_server.py`。最终Unity及移动构建证据均在上述本次目录。主Unity未重启，若它已经加载旧原生库，需重新打开工程后才加载新二进制。
 
 内存回归覆盖已有合并、取消、租约及清理路径；新增在途解码值为估算，待销毁值覆盖管线的统一Destroy出口。尚未测量真机解码内部峰值或运行5000张/10轮与24小时负载。文件刷盘回归和进程中断不能证明真实设备掉电可靠性。
+
+## 完整范围审查修复（2026-10-01）
+
+准备失权、核对与重试的远端归属、图片交付失败资源回收、服务器清理隔离及活动尝试查询已逐项修复。Unity 74/74、服务器25/25、原生Release与ASAN/UBSAN、原有13加新增2个进程窗口、Android Java/JNI、Android发布与iOS无签名设备构建均通过；四平台产物已更新。最终实现、查询测量及准确验证边界见[本轮修复记录](GalleryCompleteReviewFix.md)。本页前文各轮数量和产物哈希保留对应轮次，不代表重复运行；真机、Windows运行和长时验收仍未完成。

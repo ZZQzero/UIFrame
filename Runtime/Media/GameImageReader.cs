@@ -21,17 +21,45 @@ namespace Game.Media
             options ??= new ImagePreviewOptions(); options.Validate(); cancellationToken.ThrowIfCancellationRequested();
             using var admission=ImageWorkBudget.Acquire(image,true,true);
             int edge = options.MaxEdge, pixels = options.MaxPixels; bool readable = options.Readable;
-            using var lease = image.Acquire();
-            await processingGate.WaitAsync(cancellationToken);
-            try { return await LoadPreviewCore(image, edge, pixels, readable, cancellationToken); }
-            finally { await ReleaseProcessing(); }
+            IDisposable lease=null;ImageTexture result=null;bool entered=false;var cleanup=new UIFrame.CleanupFailure();
+            try
+            {
+                lease=image.Acquire();
+                await processingGate.WaitAsync(cancellationToken);entered=true;
+                result=await LoadPreviewCore(image,edge,pixels,readable,cancellationToken);
+            }
+            catch(Exception error){cleanup.Capture(error);}
+            finally
+            {
+                if(entered)try{await ReleaseProcessing();}catch(Exception error){cleanup.Capture(error);}
+                if(lease!=null)cleanup.Run(lease.Dispose);
+            }
+            return Deliver(result,ref cleanup);
         }
 
         internal static async UniTask<ImageTexture> LoadAdmittedPreviewAsync(ImageReference image,ImagePreviewOptions options,CancellationToken token)
         {
-            await processingGate.WaitAsync(token);
-            try { return await LoadPreviewCore(image,options.MaxEdge,options.MaxPixels,options.Readable,token); }
-            finally { await ReleaseProcessing(); }
+            ImageTexture result=null;bool entered=false;var cleanup=new UIFrame.CleanupFailure();
+            try
+            {
+                await processingGate.WaitAsync(token);entered=true;
+                result=await LoadPreviewCore(image,options.MaxEdge,options.MaxPixels,options.Readable,token);
+            }
+            catch(Exception error){cleanup.Capture(error);}
+            finally {if(entered)try{await ReleaseProcessing();}catch(Exception error){cleanup.Capture(error);}}
+            return Deliver(result,ref cleanup);
+        }
+
+        // The operation owns its result until all required source/decoder
+        // cleanup succeeds. A failed handoff must not orphan that result.
+        static T Deliver<T>(T result,ref UIFrame.CleanupFailure cleanup) where T:class,IDisposable
+        {
+            try {cleanup.Throw();return result;}
+            catch
+            {
+                if(result!=null)cleanup.Run(result.Dispose);
+                throw;
+            }
         }
 
         static async UniTask ReleaseProcessing()
@@ -98,11 +126,21 @@ namespace Game.Media
             using var admission=ImageWorkBudget.Acquire(image,true,true);
             var copy = new ImageExportOptions { Mode = options.Mode, MaxEdge = options.MaxEdge, MaxPixels = options.MaxPixels,
                 JpegQuality = options.JpegQuality, JpegBackground = options.JpegBackground };
-            using var lease = image.Acquire();
-            if (copy.Mode == ImageExportMode.PreserveProvidedBytes) return await ExportCore(image, copy, cancellationToken);
-            await processingGate.WaitAsync(cancellationToken);
-            try { return await ExportCore(image, copy, cancellationToken); }
-            finally { await ReleaseProcessing(); }
+            IDisposable lease=null;ImageFile result=null;bool entered=false;var cleanup=new UIFrame.CleanupFailure();
+            try
+            {
+                lease=image.Acquire();
+                if(copy.Mode!=ImageExportMode.PreserveProvidedBytes)
+                {await processingGate.WaitAsync(cancellationToken);entered=true;}
+                result=await ExportCore(image,copy,cancellationToken);
+            }
+            catch(Exception error){cleanup.Capture(error);}
+            finally
+            {
+                if(entered)try{await ReleaseProcessing();}catch(Exception error){cleanup.Capture(error);}
+                if(lease!=null)cleanup.Run(lease.Dispose);
+            }
+            return Deliver(result,ref cleanup);
         }
 
         static async UniTask<ImageFile> ExportCore(ImageReference image, ImageExportOptions options, CancellationToken cancellationToken)

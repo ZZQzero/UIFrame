@@ -172,13 +172,101 @@ server.serve_forever()
             self.store.db.execute('INSERT INTO incoming(account,upload_id,filename,created_at) VALUES(?,?,?,0)',
                 ('alice', 'removed-upload', file.name))
         with patch.object(Path, 'unlink', side_effect=OSError('injected deletion failure')):
-            with self.assertRaisesRegex(OSError, 'injected deletion failure'):
-                self.store.cleanup_expired(1)
+            result = self.store.cleanup_expired(1)
+            self.assertEqual(1, len(result['failures']))
+            self.assertEqual('injected deletion failure', result['failures'][0]['error'])
         self.assertEqual(2, self.store.db.execute('SELECT cleanup_state FROM incoming').fetchone()[0])
         self.assertEqual(0, self.store.cleanup_expired(1)['freedBytes'])
         self.assertTrue(file.exists())
         self.assertEqual(4, self.store.cleanup_expired(1, retry_failed=True)['freedBytes'])
         self.assertFalse(file.exists())
+
+    def test_isolated_cleanup_failures_do_not_stop_other_files_or_uploads(self):
+        from unittest.mock import patch
+        incoming = self.store.directory('alice') / 'failed.incoming'
+        healthy = self.store.directory('bob') / 'healthy.incoming'
+        incoming.write_bytes(b'bad'); healthy.write_bytes(b'good')
+        bad_key, _, _ = self.create(b'failed part', identity='failed-part')
+        good_key, _, _ = self.create(b'healthy part', identity='healthy-part')
+        self.call('PUT', '/v1/uploads/' + bad_key + '?offset=0', b'failed part')
+        self.call('PUT', '/v1/uploads/' + good_key + '?offset=0', b'healthy part')
+        with self.store.lock, self.store.db:
+            self.store.db.execute('UPDATE uploads SET last_activity=0')
+            self.store.db.executemany('INSERT INTO incoming(account,upload_id,filename,created_at) VALUES(?,?,?,?)',
+                [('alice', 'old-a', incoming.name, 0), ('bob', 'old-b', healthy.name, 1)])
+        original = Path.unlink
+        def remove(path, *args, **kwargs):
+            if path in (incoming, self.store.part('alice', bad_key)):
+                raise PermissionError('fixture file is locked')
+            return original(path, *args, **kwargs)
+        with patch.object(Path, 'unlink', remove):
+            result = self.store.cleanup_expired(1)
+        self.assertEqual(2, len(result['failures']))
+        self.assertEqual(1, result['expired'])
+        self.assertFalse(healthy.exists())
+        self.assertFalse(self.store.part('alice', good_key).exists())
+        self.assertEqual(2, self.store.db.execute('SELECT cleanup_state FROM incoming').fetchone()[0])
+        self.assertEqual(3, self.store.get('alice', bad_key)['cleanup_state'])
+        self.assertEqual([], self.store.cleanup_expired(1)['failures'])
+        self.assertTrue(incoming.exists()); self.assertTrue(self.store.part('alice', bad_key).exists())
+        result = self.store.cleanup_expired(1, retry_failed=True)
+        self.assertEqual([], result['failures']); self.assertEqual(1, result['expired'])
+        self.assertFalse(incoming.exists()); self.assertFalse(self.store.part('alice', bad_key).exists())
+        key, body, _ = self.create(b'normal', identity='new-independent')
+        self.assertEqual(200, self.call('PUT', '/v1/uploads/' + key + '?offset=0', b'normal')[0])
+        self.assertEqual(200, self.call('POST', '/v1/uploads/' + key + '/commit')[0])
+
+    def test_cleanup_recording_failure_preserves_primary_and_stops_batch(self):
+        from unittest.mock import patch
+        for table in ('incoming', 'uploads'):
+            with self.subTest(table=table):
+                if table == 'incoming':
+                    file = self.store.directory('alice') / 'record-failure.incoming'
+                    file.write_bytes(b'data')
+                    with self.store.db:
+                        self.store.db.execute('INSERT INTO incoming(account,upload_id,filename,created_at) VALUES(?,?,?,0)', ('alice', 'old', file.name))
+                    failed_state = 2
+                else:
+                    key, _, _ = self.create(b'data', identity='record-failure')
+                    self.call('PUT', '/v1/uploads/' + key + '?offset=0', b'data')
+                    with self.store.db: self.store.db.execute('UPDATE uploads SET last_activity=0')
+                    failed_state = 3
+                with self.store.db:
+                    self.store.db.execute(f"CREATE TEMP TRIGGER reject_cleanup BEFORE UPDATE ON {table} WHEN new.cleanup_state={failed_state} BEGIN SELECT RAISE(ABORT,'fixture persistence failure'); END")
+                failure = PermissionError('fixture primary failure')
+                try:
+                    with patch.object(Path, 'unlink', side_effect=failure):
+                        with self.assertRaises(PermissionError) as caught:
+                            self.store.cleanup_expired(1)
+                    self.assertIs(failure, caught.exception)
+                finally:
+                    with self.store.db: self.store.db.execute('DROP TRIGGER reject_cleanup')
+                    self.store.cleanup_expired(1)
+
+    @unittest.skipIf(sys.platform == 'win32', 'Requires POSIX directory permissions')
+    def test_server_starts_with_an_isolated_stale_file_failure(self):
+        import os
+        import select
+        if os.geteuid() == 0:
+            self.skipTest('Root bypasses directory permission checks')
+        with tempfile.TemporaryDirectory() as directory:
+            credentials = [{'account': 'a', 'token': 'fixture-token'}]
+            root = Path(directory); (root / 'credentials.json').write_text(json.dumps(credentials))
+            store = Store(root, credentials); folder = store.directory('a')
+            (folder / 'old.incoming').write_bytes(b'data')
+            with store.db:
+                store.db.execute('INSERT INTO incoming(account,upload_id,filename,created_at) VALUES(?,?,?,0)', ('a', 'old', 'old.incoming'))
+            store.close(); os.chmod(folder, 0o500)
+            process = subprocess.Popen([sys.executable, '-u', str(Path(__file__).with_name('server.py')), 'serve', '--root', directory, '--port', '0', '--upload-ttl-days', '1'], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            try:
+                readable, _, _ = select.select([process.stdout], [], [], 10)
+                self.assertTrue(readable, 'Server did not finish startup')
+                self.assertIn('Backup service listening', process.stdout.readline())
+                self.assertIsNone(process.poll())
+                with __import__('sqlite3').connect(root / 'backup.sqlite3') as db:
+                    self.assertEqual(2, db.execute('SELECT cleanup_state FROM incoming').fetchone()[0])
+            finally:
+                process.terminate(); process.communicate(timeout=5); os.chmod(folder, 0o700)
 
     def test_cleanup_rechecks_failure_recorded_after_candidate_selection(self):
         from contextlib import contextmanager

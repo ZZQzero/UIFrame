@@ -11,6 +11,7 @@ namespace Game.Media
     public sealed class GalleryException : Exception
     {
         public string Code { get; }
+        internal bool IsScopeAccessFailure => Code == "PermissionDenied" || Code == "ScopeConfirmationRequired";
         public GalleryException(string code, string message) : base(message) { Code = code; }
     }
 

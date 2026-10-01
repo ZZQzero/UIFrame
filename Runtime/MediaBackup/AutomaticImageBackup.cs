@@ -218,8 +218,9 @@ namespace Game.Media.Backup
             catch(Exception error)
             {
                 primary=error;LastError=error.Message;
-                if(error is GalleryException gallery && (gallery.Code=="PermissionDenied" || gallery.Code=="ScopeConfirmationRequired"))
+                if(error is GalleryException gallery && gallery.IsScopeAccessFailure)
                 {
+                    try {await library.RecordSourceAccessFailureAsync(Scope,gallery);}catch(Exception secondary){UnityEngine.Debug.LogException(secondary);}
                     try {await SuspendScopeAsync(default);}catch(Exception secondary){UnityEngine.Debug.LogException(secondary);}
                 }
                 throw;
@@ -287,7 +288,7 @@ namespace Game.Media.Backup
                         var failure=watch.Failure;
                         if(failure!=null)
                         {
-                            if(failure is GalleryException gallery && (gallery.Code=="PermissionDenied" || gallery.Code=="ScopeConfirmationRequired"))
+                            if(failure is GalleryException gallery && gallery.IsScopeAccessFailure)
                                 try{await SuspendScopeAsync(default);}catch(Exception secondary){UnityEngine.Debug.LogException(secondary);}
                             System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(failure).Throw();
                         }

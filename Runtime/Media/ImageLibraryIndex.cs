@@ -203,6 +203,20 @@ namespace Game.Media
             try {await repository.RevokeAccess(scope.Id);}
             catch(Exception persistence){UnityEngine.Debug.LogException(persistence);}
         }
+        // Preparation can observe access loss after a successful refresh. Record
+        // that observation through the same serialized permission boundary.
+        internal async UniTask RecordSourceAccessFailureAsync(ImageLibraryScope scope,GalleryException error)
+        {
+            if(scope.Kind!=ImageLibrarySourceKind.PhotoLibrary || error.Code!="PermissionDenied")return;
+            Check();work++;bool acquired=false;
+            try
+            {
+                await refreshGate.WaitAsync();acquired=true;
+                await RecordAccessFailure(scope,error);
+                if(observers.TryGetValue(scope.Id,out var observer))observer.Signal(true);
+            }
+            finally {if(acquired)refreshGate.Release();work--;}
+        }
         public async UniTask<ImageLibraryPosition> GetPositionAsync(ImageLibraryScope scope,CancellationToken token=default)
         {
             Check();if(scope==null)throw new ArgumentNullException(nameof(scope));work++;

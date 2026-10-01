@@ -246,6 +246,53 @@ int main() {
             store.call(UFB_ACTION,{"cc",int64_t(2),int64_t(14)});
             expect(store.call(UFB_TASK,{"cc"}).back().rows[0][5].integer==8,"Authoritative reconciliation did not allow cancellation");
         }
+        {
+            auto lease_id=std::string(64,'6');
+            Store store(root.u8string(),lease_id,true);store.call(UFB_BIND_PREPARER,{"aa"});
+            auto prepare=[&](const std::string &id,const std::string &key) {
+                store.call(UFB_PREPARE,{id+"a","aa",int64_t(1),int64_t(1),id,"file:"+id,"v1","photo.jpg","image/jpeg",int64_t(4)});
+                std::ofstream(root/lease_id/"payloads"/(id+".payload"))<<"data";
+                store.call(UFB_SEAL,{id,"aa",int64_t(4),hash,key,"image/jpeg",int64_t(4096),int64_t(2)});
+                store.call(UFB_ACCEPT,{id+"a","aa",int64_t(3)});
+            };
+            auto unknown=[&](const std::string &id) {
+                store.call(UFB_CLAIM,{id,int64_t(0),int64_t(0),int64_t(4),"aa"});
+                store.call(UFB_FINISH,{id,int64_t(1),int64_t(3),"","unknown",int64_t(5),int64_t(4),hash});
+                store.call(UFB_RELEASE,{id,int64_t(1),int64_t(1),int64_t(1)});
+            };
+            prepare("cc",hash);prepare("dd",hash);prepare("ee",std::string(64,'c'));
+            unknown("cc");unknown("dd");
+            Store other(root.u8string(),lease_id,false);
+            expect(store.call(UFB_BEGIN_RECONCILE,{"cc"}).back().rows.size()==1,"Reconcile did not acquire task");
+            other.call(UFB_BEGIN_RECONCILE,{"dd"},UF_STATE);
+            other.call(UFB_END_RECONCILE,{hash},UF_STATE);
+            store.call(UFB_ACTION,{"cc",int64_t(3),int64_t(6)});
+            store.call(UFB_ACTION,{"dd",int64_t(3),int64_t(6)});
+            for(auto task:{"cc","dd"})expect(other.call(UFB_CLAIM,{task,int64_t(1),int64_t(0),int64_t(7),"aa"}).back().rows.empty(),"Reconcile allowed a competing remote identity claim");
+            expect(other.call(UFB_CLAIM,{"ee",int64_t(0),int64_t(0),int64_t(7),"aa"}).back().rows.size()==1,"Reconcile blocked unrelated upload");
+            store.call(UFB_FINISH,{"cc",int64_t(1),int64_t(3),"","interrupted check",int64_t(8),int64_t(4),hash});
+            store.call(UFB_END_RECONCILE,{hash});
+            expect(other.call(UFB_CLAIM,{"dd",int64_t(1),int64_t(0),int64_t(9),"aa"}).back().rows.size()==1,"Released lease still blocked claim");
+            store.call(UFB_BEGIN_RECONCILE,{"cc"},UF_STATE);
+            other.call(UFB_FINISH,{"dd",int64_t(2),int64_t(3),"","unknown",int64_t(10),int64_t(4),hash});
+            other.call(UFB_RELEASE,{"dd",int64_t(2),int64_t(1),int64_t(1)});
+            other.call(UFB_BEGIN_RECONCILE,{"cc"});other.close();
+            store.call(UFB_BEGIN_RECONCILE,{"cc"});store.call(UFB_END_RECONCILE,{hash});
+            store.call(UFB_FINISH,{"ee",int64_t(1),int64_t(4),"","not transferred",int64_t(10),int64_t(4),hash});
+            store.call(UFB_RELEASE,{"ee",int64_t(1),int64_t(1),int64_t(1)});
+            for(int executor=0;executor<=2;++executor) {
+                auto id=std::string("f")+char('a'+executor);prepare(id,std::string(64,char('d'+executor)));
+                store.call(UFB_CLAIM,{id,int64_t(executor),int64_t(0),int64_t(11),"aa"});
+                auto attempts=store.call(UFB_ATTEMPTS,{int64_t(0),int64_t(executor),int64_t(1)}).back().rows;
+                expect(attempts.size()==1 && attempts[0][1].text==id,"Attempt page mixed executors or released history");
+                expect(store.call(UFB_ATTEMPTS,{attempts[0][0].integer,int64_t(executor),int64_t(1)}).back().rows.empty(),"Attempt cursor repeated a row");
+                expect(store.call(UFB_SCHEDULABLE,{int64_t(0),int64_t(executor),int64_t(1)}).back().rows.empty(),"Unhanded attempt became schedulable");
+                store.call(UFB_FINISH,{id,int64_t(1),int64_t(4),"","not transferred",int64_t(12),int64_t(4),hash});
+                expect(store.call(UFB_SCHEDULABLE,{int64_t(0),int64_t(executor),int64_t(1)}).back().rows.size()==1,"Terminal ownership was omitted from cleanup scheduling");
+                store.call(UFB_RELEASE,{id,int64_t(1),int64_t(1),int64_t(1)});
+                expect(store.call(UFB_ATTEMPTS,{int64_t(0),int64_t(executor),int64_t(1)}).back().rows.empty(),"Released attempt retained in inventory");
+            }
+        }
         uf_diagnostics diagnostics{}; diagnostics.size=sizeof(diagnostics); diagnostics.abi=UFSQLITE_ABI;
         expect(ufsqlite_get_diagnostics(&diagnostics)==0,"Diagnostics unavailable");
         expect(!diagnostics.databases && !diagnostics.operations && !diagnostics.reserved_bytes,"Native resources leaked");

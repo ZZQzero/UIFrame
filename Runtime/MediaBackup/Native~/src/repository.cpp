@@ -55,14 +55,20 @@ std::string sha(const Args &a,size_t index) {
     }
     return bytes;
 }
-const std::string TaskColumns=
+const std::string TaskFields=
     "SELECT t.sequence,t.id,t.batch_id,t.source_id,t.content_version,t.state,t.desired_action,t.current_generation,"
     "t.created_utc,t.updated_utc,t.error,t.backup_id,m.name,m.mime,m.idempotency_key,m.confirmed_bytes,m.retries,"
     "f.byte_count,lower(hex(f.sha256)) AS sha256,f.relative_path,f.state AS file_state,f.cleanup_error,"
     "a.executor,a.submission_state,a.execution_state,a.payload_released,a.credential_released,a.system_task_id,"
-    "a.session_id,a.credential_reference,a.wifi_only,t.next_attempt_utc,a.generation AS attempt_generation "
+    "a.session_id,a.credential_reference,a.wifi_only,t.next_attempt_utc,a.generation AS attempt_generation ";
+const std::string TaskColumns=TaskFields+
     "FROM tasks t JOIN task_metadata m ON m.task_id=t.id JOIN file_records f ON f.id=t.file_id "
     "LEFT JOIN task_attempts a ON a.task_id=t.id AND a.generation=t.current_generation ";
+// Drive ownership inventory from the sparse live set, including when it is empty.
+const std::string AttemptColumns=TaskFields+
+    "FROM task_attempts a INDEXED BY attempts_unreleased "
+    "CROSS JOIN tasks t ON t.id=a.task_id AND t.current_generation=a.generation "
+    "CROSS JOIN task_metadata m ON m.task_id=t.id CROSS JOIN file_records f ON f.id=t.file_id ";
 const std::string ReceiptColumns="SELECT backup_id,source_id,content_version,lower(hex(sha256)) AS sha256,byte_count,name,mime,confirmed_utc FROM backup_receipts ";
 const std::string Unreleased="EXISTS(SELECT 1 FROM task_attempts a WHERE a.task_id=tasks.id AND (a.payload_released=0 OR a.credential_released=0))";
 const std::string UnknownOutcome="EXISTS(SELECT 1 FROM task_attempts a WHERE a.task_id=tasks.id AND a.generation=tasks.current_generation AND a.server_outcome=0)";
@@ -105,6 +111,9 @@ struct Repository {
     unsigned attachments=0;
     uint64_t preparer_handle=0;
     std::string preparer;
+    // A remote check has no new upload attempt. Its lease belongs to the calling
+    // attachment and protects the shared server identity until HTTP has ended.
+    std::map<std::string,uint64_t> reconciliations;
     bool closed=false, faulted=false;
     Repository(const std::string &p,const std::string &identity,const std::string &s,const std::string &a,bool create):path(p),id(identity),server(s),account(a) {
         db.open(path,create);
@@ -122,7 +131,12 @@ struct Repository {
         server=settings[0][1].text; account=settings[0][2].text;
     }
     Command task(const std::string &id) { return {TaskColumns+"WHERE t.id=?",{id}}; }
-    Bytes execute(unsigned command,const Args &a,unsigned capacity) {
+    Bytes execute(unsigned command,const Args &a,unsigned capacity,uint64_t attachment) {
+        if(command==UFB_END_RECONCILE) {
+            a.count(1);auto key=a.id(0);auto found=reconciliations.find(key);
+            require(found!=reconciliations.end() && found->second==attachment,"Reconciliation lease owner mismatch",UF_STATE);
+            reconciliations.erase(found);return {};
+        }
         require(!closed && !faulted,"Backup repository is closed or faulted",UF_STATE);
         std::vector<Command> commands;
         bool read=false;
@@ -168,9 +182,25 @@ struct Repository {
         case UFB_SUMMARY: a.count(0); read=true; commands.emplace_back("SELECT state,count,(SELECT paused FROM store_settings WHERE singleton=1) AS paused FROM task_counts ORDER BY state"); break;
         case UFB_CLAIM: {
             a.count(5); auto id=a.id(0); auto executor=a.number(1,0,2),wifi=a.number(2,0,1),now=a.number(3); auto session=a.id(4);
+            if(!reconciliations.empty()) {
+                auto key=decode(db.query({"SELECT idempotency_key FROM task_metadata WHERE task_id=?",{id}})).back().rows;
+                if(!key.empty() && reconciliations.count(key[0][0].text))return db.query({TaskColumns+"WHERE 0"},capacity);
+            }
             commands.emplace_back("UPDATE tasks SET current_generation=current_generation+1,state=1,error=NULL,updated_utc=? WHERE id=? AND state IN(0,5) AND next_attempt_utc<=? AND desired_action=0 AND NOT "+Unreleased+" AND (SELECT paused FROM store_settings WHERE singleton=1)=0",std::vector<Value>{now,id,now});
             commands.emplace_back("INSERT INTO task_attempts(task_id,generation,session_id,idempotency_key,submission_state,execution_state,server_outcome,payload_released,credential_released,executor,wifi_only) SELECT t.id,t.current_generation,?,t.id||':'||t.current_generation,0,0,0,0,0,?,? FROM tasks t JOIN task_metadata m ON m.task_id=t.id WHERE t.id=? AND changes()=1",std::vector<Value>{session,executor,wifi,id});
             commands.emplace_back(TaskColumns+"WHERE t.id=? AND changes()=1",std::vector<Value>{id}); break;
+        }
+        case UFB_BEGIN_RECONCILE: {
+            a.count(1);auto id=a.id(0);
+            auto result=db.query({TaskColumns+"WHERE t.id=? AND t.state=6 AND NOT EXISTS("
+                "SELECT 1 FROM task_attempts held INDEXED BY attempts_unreleased "
+                "CROSS JOIN task_metadata other ON other.task_id=held.task_id "
+                "WHERE (held.payload_released=0 OR held.credential_released=0) AND other.idempotency_key=m.idempotency_key)",{id}},capacity);
+            auto table=decode(result).back();
+            require(table.rows.size()==1,"A released task with an idle server identity and unknown outcome is required",UF_STATE);
+            auto key=table.rows[0][std::find(table.columns.begin(),table.columns.end(),"idempotency_key")-table.columns.begin()].text;
+            require(reconciliations.emplace(key,attachment).second,"The server identity is already being reconciled",UF_STATE);
+            return result;
         }
         case UFB_HANDOFF: {
             a.count(3); auto id=a.id(0); auto generation=a.number(1,1); auto credential=a.text(2,16384);
@@ -283,7 +313,7 @@ struct Repository {
             a.count(2);commands.emplace_back("UPDATE file_records SET state=2,cleanup_error=NULL,updated_utc=? WHERE id=? AND state=4",std::vector<Value>{a.number(1),a.id(0)},1);
             commands.emplace_back("SELECT id,updated_utc FROM file_records WHERE id=?",std::vector<Value>{a.id(0)});break;
         case UFB_SCHEDULABLE:
-        case UFB_ATTEMPTS: a.count(3); read=true; commands.emplace_back(TaskColumns+"WHERE t.sequence>? AND a.executor=? AND (a.payload_released=0 OR a.credential_released=0) "+std::string(command==UFB_SCHEDULABLE?"AND (a.submission_state>0 OR a.execution_state>=2) ":"")+"ORDER BY t.sequence LIMIT ?",std::vector<Value>{a.number(0),a.number(1,0,2),a.number(2,1,200)}); break;
+        case UFB_ATTEMPTS: a.count(3); read=true; commands.emplace_back(AttemptColumns+"WHERE t.sequence>? AND a.executor=? AND (a.payload_released=0 OR a.credential_released=0) "+std::string(command==UFB_SCHEDULABLE?"AND (a.submission_state>0 OR a.execution_state>=2) ":"")+"ORDER BY t.sequence LIMIT ?",std::vector<Value>{a.number(0),a.number(1,0,2),a.number(2,1,200)}); break;
         case UFB_CHANGES: {
             a.count(2); auto after=a.number(0),limit=a.number(1,1,199);
             commands.emplace_back("SELECT store_id,retained_after_seq,? < retained_after_seq AS requires_refresh FROM store_settings WHERE singleton=1",std::vector<Value>{after});
@@ -659,6 +689,8 @@ int ufbackup_close(uint64_t handle,ufb_status *status) {
         std::lock_guard<std::mutex> lock(repository->gate);
         require(!attachment->closed,"Backup attachment is already closed",UF_HANDLE);
         attachment->closed=true;
+        for(auto i=repository->reconciliations.begin();i!=repository->reconciliations.end();)
+            if(i->second==handle)i=repository->reconciliations.erase(i);else ++i;
         if(repository->preparer_handle==handle) { repository->preparer_handle=0; repository->preparer.clear(); }
         { std::lock_guard<std::mutex> registry(registry_gate); handles.erase(handle); }
         if(--repository->attachments==0) {
@@ -686,7 +718,7 @@ int ufbackup_call(uint64_t handle,uint32_t command,const uint8_t *input,uint32_t
             require(repository->preparer==owner,"Preparation owner mismatch",UF_STATE);
         }
         try {
-            auto result=repository->execute(command,arguments,capacity);
+            auto result=repository->execute(command,arguments,capacity,handle);
             if(!result.empty()) std::memcpy(output,result.data(),result.size());
             status->length=uint32_t(result.size());
         } catch(const Error &error) { if(error.committed<0 || error.code==UF_FAULTED) repository->faulted=true; throw; }

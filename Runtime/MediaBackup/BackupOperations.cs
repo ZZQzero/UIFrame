@@ -190,14 +190,13 @@ namespace Game.Media.Backup
             catch(Exception error){operationDriveFailure=error;throw;}
             finally {drivingOperations=false;}
         }
-        /// <summary>Checks the existing server identity, then atomically abandons an incomplete session before allowing local cancellation.</summary>
+        /// <summary>Owns the server identity while checking and closing an incomplete session. Retry intent may be queued; a new attempt waits for this check to end.</summary>
         public async UniTask ReconcileTaskAsync(string taskId,CancellationToken cancellationToken=default)
         {
             using var operation=EnterOperation();
             using var linked=CancellationTokenSource.CreateLinkedTokenSource(cancellationToken,lifetime.Token);cancellationToken=linked.Token;
-            Check();var record=await GetTaskCoreAsync(taskId,cancellationToken);
-            if(record==null || record.state!=BackupState.NeedsAttention || record.nativeOwned)throw new InvalidOperationException("A released task with unknown server outcome is required.");
-            metadataReads++;
+            Check();var record=TaskInfo((await Db(Command.BeginReconcile,cancellationToken,taskId)).Single);
+            metadataReads++;var cleanup=new UIFrame.CleanupFailure();
             try
             {
                 UploadResponse response=null;
@@ -206,14 +205,22 @@ namespace Game.Media.Backup
                 if(response!=null)
                 {
                     ValidateResponse(record,response);
-                    if(response.completed){await Confirm(record,response);await CleanupFilesAsync(cancellationToken);return;}
-                    // Server DELETE shares the session/commit lock; conflict preserves unknown outcome.
-                    await JsonRequest<UploadResponse>(System.Net.Http.HttpMethod.Delete,"/v1/uploads/"+record.key,null,cancellationToken);
+                    if(response.completed)await Confirm(record,response);
+                    else
+                        // The repository lease prevents a new attempt using this
+                        // identity for the entire remote check, including DELETE.
+                        await JsonRequest<UploadResponse>(System.Net.Http.HttpMethod.Delete,"/v1/uploads/"+record.key,null,cancellationToken);
                 }
-                await Finish(record,5,"Server confirmed no committed backup; previous session closed");
+                if(response==null || !response.completed)await Finish(record,5,"Server confirmed no committed backup; previous session closed");
                 await CleanupFilesAsync(cancellationToken);
             }
-            finally {metadataReads--;}
+            catch(Exception error){cleanup.Capture(error);}
+            finally
+            {
+                try{await Db(Command.EndReconcile,default,record.key);}catch(Exception error){cleanup.Capture(error);}
+                metadataReads--;
+            }
+            cleanup.Throw();
         }
     }
 }

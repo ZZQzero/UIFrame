@@ -2,7 +2,7 @@
   "abi": 1,
   "sqlite_build_id": "cc2af4a34676c4a76a07358b30d6c4351d4b22a8bdba0f2c9c2e0954fdbbc305",
   "binary": "uiframe_backup.dll",
-  "sha256": "4df6026cfc4f338e634cf57c54ba72a8149864a57dce2d86cc0a022d22b41d80",
+  "sha256": "2a092d54bae0998a43d114d582bceb0bc6538bbd92bd0cd8ad6d4771c92e3c34",
   "sources": [
     {
       "path": "CMakeLists.txt",
@@ -14,11 +14,11 @@
     },
     {
       "path": "src/repository.cpp",
-      "sha256": "a191cd22bcd7110860c5abb149cde798f87dc34d1a09feb4cca37d61a5775699"
+      "sha256": "1a8cbd5f27ff1a8b911a6992859b33ddff42be043ff14865fa920d27e2c02e4e"
     },
     {
       "path": "include/ufbackup.h",
-      "sha256": "6ab35022679095a5ba6fa997b7c34bd6130b1a709f028196ee975f758c459d09"
+      "sha256": "713b4de4dc3e9607b9af67b2eba8ee8c56ee0eb1ee46e4e88b4ebc9f1ac7df37"
     },
     {
       "path": "schema/catalog.sql",

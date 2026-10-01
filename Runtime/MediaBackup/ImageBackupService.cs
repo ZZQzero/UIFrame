@@ -543,7 +543,7 @@ namespace Game.Media.Backup
         static async UniTask ValidateSource(ImageReference image,CancellationToken token)
         {
             try {await GameGallery.ValidateVersionAsync(image,token);}
-            catch(Exception error) when(error is GalleryException || error is IOException || error is UnauthorizedAccessException){throw new BackupSourceFailure(error);}
+            catch(Exception error) when(error is GalleryException gallery && !gallery.IsScopeAccessFailure || error is IOException || error is UnauthorizedAccessException){throw new BackupSourceFailure(error);}
         }
         async UniTask<(long size, string mime, string hash)> PreparePayload(ImageReference source, string destination, long available, CancellationToken token)
         {
@@ -599,7 +599,7 @@ namespace Game.Media.Backup
                 if (maximum <= available) throw new BackupSourceFailure(error);
                 throw new BackupBudgetExceededException();
             }
-            catch (GalleryException error) when (error.Code == "SourceUnavailable" || error.Code == "PermissionDenied" || error.Code == "ReadFailed" || error.Code == "UnsupportedFormat")
+            catch (GalleryException error) when (error.Code == "SourceUnavailable" || error.Code == "ReadFailed" || error.Code == "UnsupportedFormat")
             { throw new BackupSourceFailure(error); }
             string path = response.items[0].path;
             long length = new FileInfo(path).Length; CheckSize(length);

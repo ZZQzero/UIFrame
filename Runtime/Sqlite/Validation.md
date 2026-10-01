@@ -91,3 +91,5 @@ S0–S2已有实现与桌面证据，**阶段验收仍未完成**：没有连接
 本轮未修改SQLite通用核心；此前核心ABI3、独立托管回归和性能结果保留其原验证时间。照片业务的共享仓库已重新构建四目标，图库日志单SQL快照使用既有只读接口。新业务回归、ASAN/UBSAN、进程中断和移动构建结果见 [GalleryValidation.md](../../Docs/GalleryValidation.md)。
 
 新增 `.github/workflows/native-storage.yml`，执行四目标原生构建、macOS/Windows宿主契约及来源清单/二进制/符号归档。Windows仓库构建入口支持本机MSVC；本地仅完成LLVM-MinGW交叉构建，不能据此标记Windows/MSVC运行通过。工作流尚未在GitHub实际运行；Unity/设备/运营接入仍待项目环境。
+
+2026-10-01完整范围审查后，照片共享仓库已完成核对归属与调度查询修复并重新构建四目标；通用核心未改。8份安装产物及两端发布链接重新核对通过；本轮没有重复运行独立核心17项托管套件。照片回归与未验收项见[本轮修复记录](../../Docs/GalleryCompleteReviewFix.md)。
