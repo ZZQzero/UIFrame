@@ -2,6 +2,8 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using System.Security.Cryptography;
+using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 using UIFrame.Sqlite;
@@ -42,11 +44,11 @@ namespace Game.Media.Storage
             => database.QueryPageAsync(command,new SqliteQueryBudget(),map,token);
         internal async Task Commit(IReadOnlyList<SqliteCommand> commands,CancellationToken token=default)
         { using(await database.ExecuteTransactionAsync(new SqliteBatch(new SqliteQueryBudget(),commands.ToArray()),token).ConfigureAwait(false)) {} }
-        internal async Task<LibraryScopeState> Scope(ImageLibraryScope scope,long permission,CancellationToken token,bool accessChanged=false)
+        internal async Task<LibraryScopeState> Scope(ImageLibraryScope scope,long permission,CancellationToken token)
         {
             await Commit(new[]{
                 new SqliteCommand("INSERT INTO library_scopes(id,provider,source_identity,revision,permission_generation,access_state,requires_reconcile) VALUES(?,?,?,1,0,?,1) ON CONFLICT(id) DO NOTHING",scope.Id,scope.Kind.ToString(),scope.Source,permission),
-                new SqliteCommand("UPDATE library_scopes SET revision=revision+CASE WHEN (access_state<>? OR ?=1) THEN 1 ELSE 0 END,requires_reconcile=CASE WHEN (access_state<>? OR ?=1) THEN 1 ELSE requires_reconcile END,permission_generation=permission_generation+CASE WHEN (access_state<>? OR ?=1) THEN 1 ELSE 0 END,access_state=? WHERE id=? AND provider=? AND source_identity=?",permission,accessChanged?1:0,permission,accessChanged?1:0,permission,accessChanged?1:0,permission,scope.Id,scope.Kind.ToString(),scope.Source).ExpectAffectedRows(1)
+                new SqliteCommand("UPDATE library_scopes SET revision=revision+CASE WHEN access_state<>? THEN 1 ELSE 0 END,requires_reconcile=CASE WHEN access_state<>? THEN 1 ELSE requires_reconcile END,permission_generation=permission_generation+CASE WHEN access_state<>? THEN 1 ELSE 0 END,access_fingerprint=CASE WHEN access_state<>? THEN NULL ELSE access_fingerprint END,access_state=? WHERE id=? AND provider=? AND source_identity=?",permission,permission,permission,permission,permission,scope.Id,scope.Kind.ToString(),scope.Source).ExpectAffectedRows(1)
             },token).ConfigureAwait(false);
             return await State(scope.Id,token).ConfigureAwait(false);
         }
@@ -54,6 +56,9 @@ namespace Game.Media.Storage
         {
             return await FindState(scope,token).ConfigureAwait(false)??throw new ArgumentException("Library scope not registered.");
         }
+        internal Task RevokeAccess(string scope)
+            => Commit(new[]{new SqliteCommand("UPDATE library_scopes SET revision=revision+1,permission_generation=permission_generation+1,requires_reconcile=1,access_state=?,access_fingerprint=NULL WHERE id=? AND access_state IN(?,?)",
+                (long)LibraryAccess.Denied,scope,(long)LibraryAccess.Authorized,(long)LibraryAccess.Limited)});
         internal async Task<LibraryScopeState> FindState(string scope,CancellationToken token=default)
         {
             var rows=await Query(new SqliteCommand("SELECT id,revision,permission_generation,requires_reconcile,access_state FROM library_scopes WHERE id=?",scope),
@@ -111,11 +116,34 @@ namespace Game.Media.Storage
                 cursor=missing[missing.Count-1]; commands.Add(new SqliteCommand("UPDATE scan_runs SET missing_cursor=? WHERE id=? AND phase=1",cursor,run).ExpectAffectedRows(1));
                 await Commit(commands,token).ConfigureAwait(false);
             }
+            // Compare completed visible membership, never observer lifetime or an
+            // ambiguous platform notification. Paging bounds memory for large scopes.
+            string fingerprint=scope.Access==(long)LibraryAccess.Limited?await AccessFingerprint(scope.Scope,token).ConfigureAwait(false):null;
             await Commit(new[]{
                 new SqliteCommand("UPDATE library_scopes SET completed_scan_id=?,platform_cursor=(SELECT platform_upper_bound FROM scan_runs WHERE id=?),requires_reconcile=0 WHERE id=? AND revision=? AND permission_generation=?",run,run,scope.Scope,scope.Revision,scope.Permission).ExpectAffectedRows(1),
+                new SqliteCommand("UPDATE library_scopes SET revision=revision+1,permission_generation=permission_generation+1 WHERE id=? AND ? IS NOT NULL AND access_fingerprint IS NOT NULL AND access_fingerprint<>?",scope.Scope,fingerprint,fingerprint),
+                new SqliteCommand("UPDATE library_scopes SET access_fingerprint=? WHERE id=?",fingerprint,scope.Scope).ExpectAffectedRows(1),
                 new SqliteCommand("UPDATE scan_runs SET phase=2 WHERE id=? AND phase=1",run).ExpectAffectedRows(1)
             },token).ConfigureAwait(false);
             await PruneScans(token).ConfigureAwait(false);
+        }
+        async Task<string> AccessFingerprint(string scope,CancellationToken token)
+        {
+            using var sha=SHA256.Create();string after="";
+            for(;;)
+            {
+                var page=await Query(new SqliteCommand("SELECT source_id FROM scope_assets WHERE scope_id=? AND present=1 AND source_id>? ORDER BY source_id LIMIT 200",scope,after),r=>r.GetString(0),token).ConfigureAwait(false);
+                foreach(string source in page)
+                {
+                    // Length-prefix identities so adjacent strings cannot collide.
+                    byte[] bytes=Encoding.UTF8.GetBytes(source);int length=bytes.Length;
+                    byte[] prefix={(byte)length,(byte)(length>>8),(byte)(length>>16),(byte)(length>>24)};
+                    sha.TransformBlock(prefix,0,prefix.Length,null,0);sha.TransformBlock(bytes,0,bytes.Length,null,0);after=source;
+                }
+                if(page.Count<200)break;
+            }
+            token.ThrowIfCancellationRequested();sha.TransformFinalBlock(Array.Empty<byte>(),0,0);
+            return BitConverter.ToString(sha.Hash).Replace("-","").ToLowerInvariant();
         }
         static void AppendRemoval(List<SqliteCommand> commands,LibraryScopeState scope,string source,int kind)
         {

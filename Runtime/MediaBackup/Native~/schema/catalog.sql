@@ -101,7 +101,7 @@ CREATE TABLE file_records (
     updated_utc INTEGER NOT NULL
 ) STRICT;
 CREATE INDEX files_preparation ON file_records(preparation_id,state);
-CREATE INDEX files_cleanup ON file_records(state,updated_utc,id);
+CREATE INDEX files_cleanup ON file_records(state,id);
 CREATE TABLE file_counts (
     state INTEGER PRIMARY KEY CHECK(state BETWEEN 0 AND 5),
     count INTEGER NOT NULL CHECK(count>=0),

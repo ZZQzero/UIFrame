@@ -377,7 +377,7 @@ namespace UIFrame.Regression
                 var batch=await reading;await pruning;
                 Assert.IsTrue(batch.Items.Count==12 || batch.Position.RetainedAfter>=12);
                 var pruned=await repository.Changes(scope.Id,0,200,default);Assert.AreEqual(12,pruned.Position.RetainedAfter);
-                var changed=await repository.Scope(scope,0,default,true);Assert.AreEqual(state.Permission+1,changed.Permission);
+                var changed=await repository.Scope(scope,1,default);Assert.AreEqual(state.Permission+1,changed.Permission);
                 Assert.IsTrue(changed.RequiresReconcile);
             } finally {await repository.CloseAsync();}
         });
@@ -424,7 +424,7 @@ namespace UIFrame.Regression
                 await automatic.ScanOnceAsync();var task=(await service.QueryTasksAsync()).Items.Single();
                 var field=typeof(ImageLibraryIndex).GetField("repository",System.Reflection.BindingFlags.Instance|System.Reflection.BindingFlags.NonPublic);
                 var repository=(Game.Media.Storage.LibraryRepository)field.GetValue(library);
-                await repository.Scope(new ImageLibraryScope(ImageLibrarySourceKind.Directory,root),0,default,true);
+                await repository.Scope(new ImageLibraryScope(ImageLibrarySourceKind.Directory,root),1,default);
                 try {await automatic.ScanOnceAsync();Assert.Fail("Changed scope continued without confirmation");}
                 catch(GalleryException error){Assert.AreEqual("ScopeConfirmationRequired",error.Code);}
                 Assert.AreEqual(BackupState.Paused,(await service.GetTaskAsync(task.id)).state);
@@ -442,7 +442,7 @@ namespace UIFrame.Regression
                 await automatic.ScanOnceAsync();var task=(await service.QueryTasksAsync()).Items.Single();
                 var field=typeof(ImageLibraryIndex).GetField("repository",System.Reflection.BindingFlags.Instance|System.Reflection.BindingFlags.NonPublic);
                 var repository=(Game.Media.Storage.LibraryRepository)field.GetValue(library);
-                await repository.Scope(new ImageLibraryScope(ImageLibrarySourceKind.Directory,root),0,default,true);
+                await repository.Scope(new ImageLibraryScope(ImageLibrarySourceKind.Directory,root),1,default);
                 using var timeout=new CancellationTokenSource(TimeSpan.FromSeconds(10));
                 Exception failure=null;try{await automatic.RunAsync(timeout.Token);}catch(Exception error){failure=error;}
                 Assert.IsInstanceOf<GalleryException>(failure);
@@ -724,7 +724,7 @@ namespace UIFrame.Regression
             await service.EnqueueAsync(new[] { ImageReference.FromFile(imagePath), ImageReference.FromFile(imagePath) });
             Exception observed = null; try { await service.ProcessAsync(); } catch (Exception error) { observed = error; }
             Assert.AreSame(original, observed); Assert.AreEqual(2, calls);
-            Assert.AreEqual(1, (await service.QueryTasksAsync()).Items.Count(x => x.state == BackupState.NeedsAttention)); Assert.AreEqual(1, (await service.QueryTasksAsync()).Items.Count(x => x.state == BackupState.Queued));
+            Assert.AreEqual(1, (await service.QueryTasksAsync()).Items.Count(x => x.state == BackupState.Failed)); Assert.AreEqual(1, (await service.QueryTasksAsync()).Items.Count(x => x.state == BackupState.Queued));
         });
 
         [UnityTest,Category("MediaIntegration"),Explicit("Requires integration_server.py")]

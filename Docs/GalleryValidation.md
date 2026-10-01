@@ -6,13 +6,13 @@
 
 共享 BackupRepository、C# 图库索引、增量变化、共享缩略图、持久批量操作、分批清理及本机服务器 TTL 已接入。任务 / 策略 / 基线 / 回执没有旧 JSON 读取、格式探测、迁移、双写或全量 GetTasks 兼容接口。HTTP、平台桥接和构建清单仍使用 JSON。
 
-复审F1–F7、继续审查R1–R12及本轮六项失败边界 / 生命周期简化已完成代码修复，桌面 / 发布构建验证已有证据，**两份实施计划的商业发布验收仍未全部完成**。没有真机、Windows运行、24小时稳定性及最低设备帧预算的证据；不能从构建或桌面数字推定。
+复审F1–F7、继续审查R1–R12、六项失败边界 / 生命周期简化及后续流程根因问题已完成代码修复，桌面 / 发布构建验证已有证据，**两份实施计划的商业发布验收仍未全部完成**。没有真机、Windows运行、24小时稳定性及最低设备帧预算的证据；不能从构建或桌面数字推定。
 
 ## 环境与版本
 
 - Unity 6000.3.19f1、macOS Apple Silicon；独立隔离工程验证，未重启用户主工程。
 - SQLite 3.53.4 / ABI 3；核心 build ID：`cc2af4a34676c4a76a07358b30d6c4351d4b22a8bdba0f2c9c2e0954fdbbc305`。
-- 共享仓库 ABI 1；四平台同源 build ID：`20930774efc528f533217a58c29dfedcf0f242310b4b059d82da2335efc93bc3`。
+- 共享仓库 ABI 1；四平台同源 build ID：`f26a1fed7e9052a44dab366c05bc503d906e7b9043bbb70fe57e4e6d97bb3ace`。
 - Android ARM64，宿主最低API25，NDK27.2.12479018、CMake3.22.1、JDK17。NDK把native API25规范化为24，不改变宿主最低版本。
 - iOS arm64设备目标、最低15.0、Xcode / SDK27.0；macOS库为arm64+x86_64、最低11.0。
 - Windows x64用LLVM-MinGW 20260922 UCRT交叉构建；没有Windows实际运行结果。
@@ -24,7 +24,7 @@
 | 共享仓库原生契约 | Release通过；同源ASAN / UBSAN通过。覆盖准备原子性、预算、认领与开始竞态、代次、确认胜过取消、原生Handoff/系统绑定前拒绝Start、凭据由实际持有者释放、Seal缺失/长度错误与正常刷盘、实际释放前禁止清理、独立回执、基线连续性、批量操作幂等与上界、暂停 / 范围重置、保留数量及过期明细 |
 | 实际进程中断 | 13/13通过：准备完成、接受、认领、开始、确认、释放、文件已删除7个窗口，另加Android/iOS执行者各自认领/Handoff/系统绑定后中断的6个窗口。强制结束子进程后经生产仓库ABI重开，检查准备ID、回执、未知结果和清理归属；没有用测试SQLite替代 |
 | 两库schema | 通过同一核心建表、标识 / 约束及删除历史不丢操作结果检查；trigger按完整SQL语句解析 |
-| Unity图片回归 | 最终50/50通过（约61.2秒），Android活动目标，启用图形设备；41项原有回归及9项生命周期、清理隔离、版本校验回归全部通过。新增覆盖下载中恢复 / 清理、能力刷新双向互斥、准备中暂停、关闭拒绝新受理并等待已受理查询、单文件清理故障与定向重试、通知异常与等待取消不重扫、连续切换24个范围、共享及在途观察释放、相同文件stat下的内容变化 |
+| Unity图片回归 | 最终60/60通过（约73.3秒），Android活动目标，启用图形设备；50项已有回归与10项新增流程回归全部通过。包括原生注册/取消时序、Limited确认与重开、部分刷新通知、自动操作准入、单项/排队取消、凭据失败与跨尝试未知结果、孤立文件清理故障；详细范围见下表 |
 | HTTP与错误身份 | 真实本机上传、幂等重提、清历史后下载校验；能力缓存与无效能力终止批次；凭据 / 策略回调保留异常身份；响应 / 下载大小边界、超时、取消、已有目标不覆盖 |
 | 图库与缓存 | 分页、跨范围内容版本、首次基线、关闭排空；100等待者只处理一次、独立取消、失效不破坏已交付租约、来源释放、旧完成隔离、交付失败所有等待者结束与准入归还 |
 | 批量操作与维护 | 持久ID、重复参数、全局 / 单项暂停关系；35个连续提交及过期清理；修复驱动退出时新提交错过唤醒，修复已过期头阻塞后续明细 |
@@ -36,13 +36,13 @@
 | iOS发布 | IL2CPP、High裁剪导出及Xcode Release无签名设备构建成功；19个ABI导出（15核心+4仓库）、当前核心build ID及原始sqlite3符号隔离通过 |
 | 来源和导入 | 四目标产物校验值与锁定源码一致；Unity可见资源meta齐全；主Editor仍可能映射旧动态库，重新打开主工程后才使用新原生实现 |
 
-Android最终APK SHA-256：`09d8137437c00ce995d1bd0f565b0c91ce03cded1a90dcf31c45e441afa74306`。iOS最终UnityFramework SHA-256：`2dafc7471eda85d88c1ae562115ed49504207675e151c5762552e187f9587f59`。
+Android最终APK SHA-256：`d889a0db87186bc6c632c0b67cc685686918f910fa53f727fbdc3158b1396a1a`。iOS最终UnityFramework SHA-256：`555d6c006114da0362d2458b251ab8573ab20486af16a459e0bb60983b8b2df3`。
 
 iOS验证期间发现并修复导出工程关闭Objective-C异常的问题，构建处理器现在同时配置异常及ARC异常收尾。Android构建处理器保留JNI使用的内部Failure类型。平台适配不再自动重新上传已消失执行者的未知结果；该任务需要按旧幂等身份核对。iOS回调使用attempt_generation，容量释放后按等待仓库顺序继续调度。
 
 原生内存工具仅覆盖共享仓库和核心，未覆盖手机PhotoKit / Bitmap / URLSession内部，也不代表线程竞争或长期泄漏矩阵已完成。旧Foundation持久化替身已移除；当前进程中断测试针对真实共享仓库，仍需系统适配的无Unity运行测试。
 
-## 本轮六项修复的验证范围
+## 前轮六项修复的验证范围
 
 | 修复 | 实现与验证 |
 | --- | --- |
@@ -53,9 +53,47 @@ iOS验证期间发现并修复导出工程关闭Objective-C异常的问题，构
 | 复制与哈希 | 目录复制只读取源文件一次并同时计算哈希，复制前后校验元数据；同size/mtime但内容不同的索引引用被拒绝；原生Seal仍负责最终刷盘。减少了完整读取次数，但未提供最低设备耗时 / 峰值内存基准 |
 | 图库字段收敛 | 删除未使用占位字段，同步单一SQL源和生成文件；两库schema检查与Unity索引 / 自动备份回归通过；无旧schema兼容或迁移 |
 
-本轮证据位于执行环境 `/tmp/uiframe-design-fix-20261001/`：Unity XML结果、四平台仓库构建、ASAN / UBSAN、13个真实进程中断窗口、范围核对、两库schema、Android Java/JNI、Android发布APK、iOS导出及Xcode Release无签名构建日志，以及 `artifacts.json`。四平台仓库产物与源码清单一致；Android打包前原库与安装产物一致、APK与去除调试符号后的库一致；iOS最终框架19个ABI导出、核心build ID及sqlite3符号隔离通过。
+前轮六项修复证据位于执行环境 `/tmp/uiframe-design-fix-20261001/`：Unity XML结果、四平台仓库构建、ASAN / UBSAN、13个真实进程中断窗口、范围核对、两库schema、Android Java/JNI、Android发布APK、iOS导出及Xcode Release无签名构建日志，以及 `artifacts.json`。四平台仓库产物与源码清单一致；Android打包前原库与安装产物一致、APK与去除调试符号后的库一致；iOS最终框架19个ABI导出、核心build ID及sqlite3符号隔离通过。
 
-以下规模性能数字保留各自历史版本说明，不作为本轮重新测量结果。真机系统行为、Windows实际运行、24小时稳定性及最低设备性能验收仍待执行。
+下方“实际仓库性能”中的历史数字保留各自版本说明；本轮新增查询测量另列。真机系统行为、Windows实际运行、24小时稳定性及最低设备性能验收仍待执行。
+
+## 本轮流程根因修复的验证范围
+
+| 修复 | 实现与正式回归 |
+| --- | --- |
+| 原生注册与取消 | Watch 后立即 Refresh 等待 observe 完成；取消未完成 imagesOpen 后等待原生结束，再关闭扫描。测试通过内部传输接口运行生产生命周期，不在生产源码插入临时探针 |
+| Limited 范围确认 | 成员摘要在完整核对后持久保存；确认后再扫描、观察重建、内容变化和索引重开不重复确认；真实成员变化继续要求确认 |
+| 部分刷新通知 | 第一批已提交、后续枚举失败时，下次刷新仍通知之前尚未交付的变化；已尝试失败回调页不重放 |
+| 自动备份准入 | 配置、扫描、循环、确认、重置、准备重试共用准入；回归覆盖双向冲突及操作结束后正常调用 |
+| 单任务取消 | 取消当前上传后其他任务继续；已选页面中的后续任务被取消时，认领返回空并跳过，不使整轮失败 |
+| 请求边界与未知结果 | 发请求前凭据失败保留原异常、零上传且任务 Failed；重试的新本地失败仍保留前次未知结果，服务器核对后可取消。前次未知结果由共享仓库判断，原生契约覆盖两个平台执行者，不依赖 C# 内存标记 |
+| 重试前取消 | 重试入队后立即取消、暂停后取消及批量取消都保留未知结果并转回 NeedsAttention；保存的取消意图在服务器证明未提交后完成，其他批量目标继续 |
+| 无任务清理故障 | 准备残留清理失败在重开后仍可独立分页查询；按 FileId 重试只处理该文件，其余故障保留 |
+| Android 空闲轮询 | 空闲 drain 复用平台边界，脏事件、显式刷新或10秒周期再查询版本/generation；编译验证不等同真机功耗验收 |
+
+`flow_query_benchmark.py` 从生产源码提取 SQL，使用发布核心和共享仓库检查清理故障页与 Limited 成员页。初次执行暴露旧清理索引被选中并产生临时排序；最终复用 `(state,id)` 索引，移除多余索引，验证故障分页使用 `files_cleanup`、任务关联使用 `tasks_file`、成员分页使用覆盖索引 `assets_page`。三档数据均无临时排序，成员完整遍历不超过每页200项；这些是桌面热查询与分页证据，不包含手机扫描、哈希或图片解码耗时。
+
+本轮宿主测量（每组预热5次、采样25次；不同组同时运行的构建负载可能不同，不作跨组速度提升结论）：
+
+| 记录数 | 清理故障页100项 p50 | 成员页200项 p50 | 完整成员分页遍历 | 最大页 |
+| --- | --- | --- | --- | --- |
+| 10,000 | 0.399 ms | 0.238 ms | 0.011 s | 200 |
+| 100,000 | 0.255 ms | 0.112 ms | 0.066 s | 200 |
+| 1,000,000 | 0.224 ms | 0.108 ms | 0.680 s | 200 |
+
+本轮证据目录为 `/tmp/uiframe-flow-fix-20261001/`，包含正式Unity结果、共享仓库Release/ASAN/UBSAN、进程恢复、schema、Android Java/JNI、规模查询计划、移动构建及产物清单；修复前原生跨代次复现保留为 `native-retry-before.log`，取消语义以正式回归的状态断言为准。没有新增旧格式探测、迁移或自动故障重试。
+
+## 权限与收尾遗漏修复验证（2026-10-01）
+
+Unity 正式图库、备份与清理回归共67项通过（81.38秒），其中新增7项：权限撤销后的索引重开与显式确认；observe / drain / imagesOpen / imagesNext 拒绝访问后立即恢复；观察驱动失权后的停止与显式恢复；权限记录失败仍保留原访问错误；Start前暂停且释放失败；正常暂停收尾后继续其他任务；凭据主异常与释放次级错误同时发生。
+
+同一组17项流程测试在修复前有5项失败，修复后全部通过。权限替身现在与实际Android / iOS一致：未授权的观察与枚举直接返回 PermissionDenied。释放故障通过临时数据库触发器模拟，生产代码没有测试专用分支；验证异常、任务状态、资源释放标记与后续独立任务，不只检查日志。测试触发器不进入发布schema。
+
+本轮仅修改托管业务逻辑与测试，原生核心、共享BackupRepository、schema和平台二进制沿用前轮产物；未把前轮移动构建算作本轮新构建。权限事实通过同一刷新串行入口记录，正常空闲轮询没有新增数据库操作。
+
+`flow_query_benchmark.py` 在同一发布引擎上补验新增权限更新：1万 / 10万 / 100万条图片记录均使用 `library_scopes` 的主键索引定位单个范围，没有图片表扫描。Authorized / Limited 的重复拒绝只推进一次代次并清除成员摘要，Restricted保持原值，其他范围不受影响；原有清理与成员分页验证同时通过，每页仍不超过200项。这是SQL行为与查询计划证据，不代表手机权限切换耗时或长期性能验收。
+
+证据目录 `/tmp/uiframe-permission-cleanup-fix-20261001/` 保留修复前后XML、完整回归日志及查询计划。`before-final-results.xml` 是完成故障夹具校正后的修复前基线，`fixed-flow-results.xml` 与 `unity-results.xml` 为最终通过结果。真机权限交互、Windows运行及长期性能门槛仍需独立验收。
 
 ## 实际仓库性能
 
@@ -91,14 +129,15 @@ python3 Tests/Native~/run_backup_persistence.py --cmake <cmake> --build <test-bu
 python3 Runtime/MediaBackup/Native~/tests/process_windows.py --core <core-library> --repository <backup-library>
 python3 Runtime/MediaBackup/Native~/tests/scope_reconciliation.py --core <core-library> --repository <backup-library>
 python3 Tests/Native~/android_backup_binding.py --jdk <jdk-home> --android-jar <android-sdk-jar> --core <macOS-core-library> --repository <macOS-backup-library>
+python3 Runtime/MediaBackup/Native~/tests/flow_query_benchmark.py --core <core-library> --repository <backup-library> --rows 10000 100000 1000000 --output <flow-queries.json>
 python3 Runtime/MediaBackup/Native~/tests/maintenance_benchmark.py --core <core-library> --repository <backup-library> --rows 10000 100000 1000000 --output <maintenance.json>
 python3 Runtime/MediaBackup/Native~/tests/benchmark.py --core <core-library> --repository <backup-library> --rows 10000 100000 1000000 --output <result.json>
 python3 Tests/Native~/prepare_media_validation.py --project <isolated-project> --host-project <host-project>
 ```
 
-先运行 `Tools~/BackupServer/integration_server.py`，再在隔离Unity工程运行 `UIFrame.Regression.MediaTests`。`MediaBuildSmoke.Android` / `Ios` 创建发布构建，`MediaSmoke`提供设备运行入口。真实设备成功标记需在设备上取得，不能由构建日志代替。
+先运行 `Tools~/BackupServer/integration_server.py`，再在隔离Unity工程运行 `UIFrame.Regression`，覆盖 MediaTests、MediaLifecycleTests 和 MediaFlowTests。`MediaBuildSmoke.Android` / `Ios` 创建发布构建，`MediaSmoke`提供设备运行入口。真实设备成功标记需在设备上取得，不能由构建日志代替。
 
-本次最终证据位于 `/tmp/uiframe-followup-fix-20261001`，包括 `media-final-results.xml`、`server-tests.log`、`scope-reconciliation.log`、`android-binding.log`、`process-recovery.log`、`asan-build.log`、`final-performance.json`、`maintenance-performance.json`、移动发布日志及 `artifacts.json`。隔离工程仍为 `/tmp/uiframe-media-plan-android`、`/tmp/uiframe-media-plan-ios`；临时工程和日志不作为包内产物提交。核心独立验证详见 [SQLite验证记录](../Runtime/Sqlite/Validation.md)。
+此前R1–R12证据位于 `/tmp/uiframe-followup-fix-20261001`，包括 `media-final-results.xml`、`server-tests.log`、`scope-reconciliation.log`、`android-binding.log`、`process-recovery.log`、`asan-build.log`、`final-performance.json`、`maintenance-performance.json`、移动发布日志及 `artifacts.json`。隔离工程仍为 `/tmp/uiframe-media-plan-android`、`/tmp/uiframe-media-plan-ios`；临时工程和日志不作为包内产物提交。核心独立验证详见 [SQLite验证记录](../Runtime/Sqlite/Validation.md)。
 
 ## 仍未验收
 
@@ -114,6 +153,6 @@ python3 Tests/Native~/prepare_media_validation.py --project <isolated-project> -
 
 当前继续审查映射见 [GallerySqliteFollowupAudit.md](GallerySqliteFollowupAudit.md)，此前F1–F7见 [GallerySqlitePlanAudit.md](GallerySqlitePlanAudit.md)。没有保留临时审查钩子或增加旧格式识别。仓库四平台来源/安装二进制校验一致；库和C#门面仍依赖原有ABI3核心，本轮未修改通用核心源文件。PhotoKit的无相关变化分支已修复并编译/链接，系统通知仍需真机验证。
 
-正式用例包括 `Tests/Editor/Media/MediaTests.cs`、`Tests/Editor/Media/MediaLifecycleTests.cs`、共享仓库 `tests/repository_tests.cpp`、`tests/scope_reconciliation.py`、`Tests/Native~/android_backup_binding.py` 和 `Tools~/BackupServer/test_server.py`。最终Unity及移动构建证据均在上述本次目录。主Unity未重启，若它已经加载旧原生库，需重新打开工程后才加载新二进制。
+正式用例包括 `Tests/Editor/Media/MediaTests.cs`、`Tests/Editor/Media/MediaLifecycleTests.cs`、`Tests/Editor/Media/MediaFlowTests.cs`、共享仓库 `tests/repository_tests.cpp`、`tests/scope_reconciliation.py`、`Tests/Native~/android_backup_binding.py` 和 `Tools~/BackupServer/test_server.py`。最终Unity及移动构建证据均在上述本次目录。主Unity未重启，若它已经加载旧原生库，需重新打开工程后才加载新二进制。
 
 内存回归覆盖已有合并、取消、租约及清理路径；新增在途解码值为估算，待销毁值覆盖管线的统一Destroy出口。尚未测量真机解码内部峰值或运行5000张/10轮与24小时负载。文件刷盘回归和进程中断不能证明真实设备掉电可靠性。

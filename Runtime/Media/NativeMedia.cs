@@ -13,7 +13,7 @@ namespace Game.Media
         public float backgroundR = 1, backgroundG = 1, backgroundB = 1;
         public int count = 1, edge = 2048, quality = 90, maxPixels = 4 * 1024 * 1024;
         public long maxBytes;
-        public bool recursive;
+        public bool recursive,verifyBoundary;
     }
     [Serializable] internal sealed class MediaItem
     {
@@ -28,9 +28,25 @@ namespace Game.Media
         public MediaItem[] items;
     }
 
+    internal interface IMediaTransport
+    {
+        void Start(string json);
+        string Poll(string id);
+        void Cancel(string id);
+        bool Pending(string id);
+    }
+
     internal static class NativeMedia
     {
-        static readonly HashSet<string> active = new HashSet<string>();
+        static readonly Dictionary<string,IMediaTransport> active = new Dictionary<string,IMediaTransport>();
+        internal static IMediaTransport Transport { get; set; } = new PlatformTransport();
+        sealed class PlatformTransport : IMediaTransport
+        {
+            public void Start(string json) => NativeMedia.Start(json);
+            public string Poll(string id) => NativeMedia.Poll(id);
+            public void Cancel(string id) => NativeMedia.Cancel(id);
+            public bool Pending(string id) => NativeMedia.Pending(id);
+        }
         static bool quitRegistered;
         internal static bool Available
         {
@@ -55,21 +71,22 @@ namespace Game.Media
         {
             MediaThread.Check();
             request.id = Guid.NewGuid().ToString("N");
+            var transport = Transport;
             try
             {
                 token.ThrowIfCancellationRequested();
                 if (!quitRegistered) { Application.quitting += CancelAll; quitRegistered = true; }
                 if(active.Count>=32)throw new GalleryException("MediaQueueFull","At most 32 native media requests may be active.");
-                Start(JsonUtility.ToJson(request)); active.Add(request.id);
+                transport.Start(JsonUtility.ToJson(request)); active.Add(request.id,transport);
             }
             catch { if (!string.IsNullOrEmpty(request.output)) ImagePaths.CleanAfterFailure(request.output); throw; }
-            bool finished = false;
+            bool finished = false;Exception primary=null;
             try
             {
                 while (true)
                 {
                     token.ThrowIfCancellationRequested();
-                    string json = Poll(request.id);
+                    string json = transport.Poll(request.id);
                     if (!string.IsNullOrEmpty(json))
                     {
                         var result = JsonUtility.FromJson<MediaResponse>(json);
@@ -93,23 +110,28 @@ namespace Game.Media
                     await UniTask.Yield(PlayerLoopTiming.Update, token);
                 }
             }
+            catch(Exception error){primary=error;throw;}
             finally
             {
-                active.Remove(request.id);
-                if (!finished)
+                try
                 {
-                    Cancel(request.id);
-                    // A caller may own the parent of output. Do not release that parent while native code can still write.
-                    if (!string.IsNullOrEmpty(request.output))
-                        while (Pending(request.id)) await UniTask.Yield(PlayerLoopTiming.Update);
+                    if (!finished)
+                    {
+                        transport.Cancel(request.id);
+                        // Cancellation is a request. Resource owners may close only
+                        // after native registration, enumeration or file work ends.
+                        while (transport.Pending(request.id)) await UniTask.Yield(PlayerLoopTiming.Update);
+                    }
                 }
+                catch(Exception cleanup){if(primary==null)throw;Debug.LogException(cleanup);}
+                finally {active.Remove(request.id);}
             }
         }
         static void CancelAll()
         {
-            foreach (var id in active)
+            foreach (var item in active)
             {
-                try { Cancel(id); }
+                try { item.Value.Cancel(item.Key); }
                 catch (Exception error) { Debug.LogException(error); }
             }
             active.Clear();

@@ -22,7 +22,8 @@ def main():
     (sample/'GalleryDemo.Samples.asmdef').write_text(json.dumps({'name':'GalleryDemo.Samples','references':['UIFrame.Runtime','UniTask','Unity.ugui']}))
     shutil.copytree(package/'Editor/Media',target/'Assets/UIFrame/Editor/Media',dirs_exist_ok=True)
     shutil.copyfile(package/'Editor/UIFrame.Editor.asmdef',target/'Assets/UIFrame/Editor/UIFrame.Editor.asmdef')
-    shutil.copyfile(package/'Tests/Editor/Media/MediaTests.cs',target/'Assets/UIFrame/Tests/Editor/MediaTests.cs')
+    for source in (package/'Tests/Editor/Media').iterdir():
+        if source.is_file():shutil.copyfile(source,target/'Assets/UIFrame/Tests/Editor'/source.name)
     (target/'Assets/UIFrame/Tests/Editor/UIFrame.Regression.Editor.asmdef').write_text(json.dumps({'name':'UIFrame.Regression.Editor','references':['UIFrame.Runtime','UIFrame.Editor','UniTask','UIFrame.Sqlite'],'optionalUnityReferences':['TestAssemblies'],'includePlatforms':['Editor']}))
     shutil.copyfile(package/'Tests/Native~/UnitySmoke/MediaBuildSmoke.cs',target/'Assets/UIFrame/Editor/MediaBuildSmoke.cs')
     shutil.copyfile(package/'Tests/Native~/UnitySmoke/MediaSmoke.cs',target/'Assets/UIFrame/Runtime/MediaSmoke.cs')

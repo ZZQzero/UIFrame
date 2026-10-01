@@ -84,7 +84,7 @@ namespace Game.Media
         readonly CancellationTokenSource lifetime=new CancellationTokenSource();
         readonly string observerOwner=Guid.NewGuid().ToString("N");
         readonly SemaphoreSlim refreshGate=new SemaphoreSlim(1,1);
-        bool refreshing,closed,closing,driving;
+        bool closed,closing,driving;
         int work;
         ImageLibraryIndex(LibraryRepository repository) { this.repository=repository;UnityEngine.Application.focusChanged+=OnFocus; }
         public static async UniTask<ImageLibraryIndex> OpenAsync(string absoluteDatabasePath,CancellationToken token=default)
@@ -104,7 +104,7 @@ namespace Game.Media
             internal UniTask CloseTask;
             internal bool Reconcile=true,NativeAttached;
             internal string NativeId,PlatformBoundary;
-            internal bool AccessUncertain;
+            internal ImageLibraryPosition NotificationPosition;
             internal readonly Dictionary<string,MediaItem> NativeItems=new Dictionary<string,MediaItem>(StringComparer.Ordinal);
             internal long FirstSignal=System.Diagnostics.Stopwatch.GetTimestamp(),LastSignal=System.Diagnostics.Stopwatch.GetTimestamp();
             internal long Serial;
@@ -112,7 +112,7 @@ namespace Game.Media
             internal Exception Failure;
             internal Observer(ImageLibraryScope scope)
             {
-                Scope=scope;AccessUncertain=scope.Kind==ImageLibrarySourceKind.PhotoLibrary;
+                Scope=scope;
                 if(scope.Kind==ImageLibrarySourceKind.Directory)
                 {
                     try {
@@ -195,6 +195,14 @@ namespace Game.Media
             }
             return (long)access;
         }
+        async UniTask RecordAccessFailure(ImageLibraryScope scope,Exception error)
+        {
+            if(scope.Kind!=ImageLibrarySourceKind.PhotoLibrary || !(error is GalleryException gallery) || gallery.Code!="PermissionDenied")return;
+            // The failed operation observed lost access even if permission is
+            // restored before another query. Preserve that fact without retrying.
+            try {await repository.RevokeAccess(scope.Id);}
+            catch(Exception persistence){UnityEngine.Debug.LogException(persistence);}
+        }
         public async UniTask<ImageLibraryPosition> GetPositionAsync(ImageLibraryScope scope,CancellationToken token=default)
         {
             Check();if(scope==null)throw new ArgumentNullException(nameof(scope));work++;
@@ -246,9 +254,11 @@ namespace Game.Media
             bool acquired=false,updating=false;Exception primary=null;
             try
             {
-                await refreshGate.WaitAsync(token);acquired=true;refreshing=true;updating=true;
-                await PollNative(observer,token);
-                var state=await repository.Scope(scope,await Permission(scope,token),token); var start=await repository.Position(token);
+                await refreshGate.WaitAsync(token);acquired=true;updating=true;
+                var state=await repository.Scope(scope,await Permission(scope,token),token);
+                await PollNative(observer,token,true);
+                var start=await repository.Position(token);
+                observer.NotificationPosition??=Position(state,start.sequence,start.retained);
                 bool complete,verifyContents;long serial;string[] paths;MediaItem[] changes;
                 lock(observer.Gate)
                 {
@@ -280,7 +290,7 @@ namespace Game.Media
                         await repository.Scope(scope,access,token);
                         throw new GalleryException("ScopeConfirmationRequired","Photo access changed during reconciliation.");
                     }
-                    await PollNative(observer,token);
+                    await PollNative(observer,token,true);
                     if((await repository.State(scope.Id,token)).Permission!=state.Permission)
                         throw new GalleryException("ScopeConfirmationRequired","Photo access changed during reconciliation.");
                     if(scope.Kind==ImageLibrarySourceKind.PhotoLibrary && boundary!=observer.PlatformBoundary)
@@ -309,10 +319,13 @@ namespace Game.Media
                 // is a new operation and never replays the failed change batch.
                 if(observer.Subscribers.Count!=0)
                 {
-                    var cursor=Position(state,start.sequence,start.retained);
+                    var cursor=observer.NotificationPosition;
                     for(;;)
                     {
                         var batch=await ReadChangesCore(scope,cursor,200,token);
+                        // An attempted notification batch is not replayed. Changes
+                        // committed before an earlier scan failed remain pending.
+                        observer.NotificationPosition=batch.Position;
                         foreach(var subscriber in observer.Subscribers.ToArray())if(!subscriber.IsClosed)subscriber.Callback(batch);
                         if(batch.RequiresRefresh || batch.Position.Sequence>=position.Sequence) break;cursor=batch.Position;
                     }
@@ -320,10 +333,15 @@ namespace Game.Media
                 return new ImageLibraryRefresh { Kind=complete?ImageLibraryRefreshKind.CompleteReconciliation:examined==0?ImageLibraryRefreshKind.Current:ImageLibraryRefreshKind.Incremental,
                     Examined=examined,HasPendingChanges=pending,Position=position };
             }
-            catch(Exception error) {primary=error;if(updating)observer.Signal(true);throw;}
+            catch(Exception error)
+            {
+                primary=error;
+                if(updating){observer.Signal(true);await RecordAccessFailure(scope,error);}
+                throw;
+            }
             finally
             {
-                if(acquired){refreshing=false;refreshGate.Release();}
+                if(acquired)refreshGate.Release();
                 try{await ReleaseObserver(observer);}
                 catch(Exception cleanup){if(primary==null)throw;UnityEngine.Debug.LogException(cleanup);}
                 finally {work--;}
@@ -376,13 +394,12 @@ namespace Game.Media
                 if(observer.Closing)await observer.CloseTask;
             }
         }
-        async UniTask PollNative(Observer observer,CancellationToken token)
+        async UniTask PollNative(Observer observer,CancellationToken token,bool verifyBoundary=false)
         {
             if(observer.Scope.Kind!=ImageLibrarySourceKind.PhotoLibrary)return;
             if(!observer.NativeAttached)
             {
-                observer.NativeAttached=true;
-                try {await NativeMedia.Request(new MediaRequest {op="observe",path=observer.NativeId,album=observer.Scope.Source},token);}
+                try {await NativeMedia.Request(new MediaRequest {op="observe",path=observer.NativeId,album=observer.Scope.Source},token);observer.NativeAttached=true;}
                 catch
                 {
                     observer.NativeAttached=false;
@@ -391,17 +408,11 @@ namespace Game.Media
             }
             for(;;)
             {
-                var response=await NativeMedia.Request(new MediaRequest {op="drain",path=observer.NativeId},token);
-                bool accessChanged=response.accessChanged;
-                if(observer.AccessUncertain) {
-                    accessChanged|=await Permission(observer.Scope,token)==(long)LibraryAccess.Limited;
-                    observer.AccessUncertain=false;
-                }
-                if(accessChanged)await repository.Scope(observer.Scope,await Permission(observer.Scope,token),token,true);
+                var response=await NativeMedia.Request(new MediaRequest {op="drain",path=observer.NativeId,verifyBoundary=verifyBoundary},token);
                 observer.PlatformBoundary=response.boundary;
                 lock(observer.Gate)
                 {
-                    if(response.requiresReconcile || accessChanged)observer.Signal(true);
+                    if(response.requiresReconcile || response.accessChanged)observer.Signal(true);
                     foreach(var item in response.items??Array.Empty<MediaItem>())
                     {
                         observer.Stamp();if(observer.Reconcile)continue;
@@ -413,7 +424,7 @@ namespace Game.Media
             }
         }
         void OnFocus(bool focused)
-        {if(!focused || closing || closed)return;foreach(var observer in observers.Values){observer.AccessUncertain=true;observer.Signal(true);}StartDriver();}
+        {if(!focused || closing || closed)return;foreach(var observer in observers.Values)observer.Signal(true);StartDriver();}
         void StartDriver()
         {if(driving || closing || closed)return;Drive().Forget(error=>UnityEngine.Debug.LogException(error));}
         async UniTask Drive()
@@ -430,13 +441,19 @@ namespace Game.Media
                         observer.References++;
                         try
                         {
-                            if(!refreshing)await PollNative(observer,lifetime.Token);
+                            if(observer.Scope.Kind==ImageLibrarySourceKind.PhotoLibrary)
+                            {
+                                await refreshGate.WaitAsync(lifetime.Token);
+                                try {await PollNative(observer,lifetime.Token);}
+                                catch(Exception error){await RecordAccessFailure(observer.Scope,error);throw;}
+                                finally {refreshGate.Release();}
+                            }
                             bool due;lock(observer.Gate)
                             {
                                 long now=System.Diagnostics.Stopwatch.GetTimestamp(),frequency=System.Diagnostics.Stopwatch.Frequency;
                                 due=observer.FirstSignal!=0 && (now-observer.LastSignal>=frequency*3/10 || now-observer.FirstSignal>=frequency*2);
                             }
-                            if(due && !refreshing)await RefreshAsync(observer.Scope,lifetime.Token);
+                            if(due)await RefreshAsync(observer.Scope,lifetime.Token);
                         }
                         catch(OperationCanceledException) when(lifetime.IsCancellationRequested){throw;}
                         catch(Exception error){observer.Failure=error;UnityEngine.Debug.LogException(error);}

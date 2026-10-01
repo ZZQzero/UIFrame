@@ -41,9 +41,9 @@ final class GalleryIndex {
         final String album;
         final LinkedHashSet<String> paths=new LinkedHashSet<>();
         boolean reconcile=true,accessChanged;
-        long serial;
+        long serial,nextBoundaryCheck;
         String version,boundary,access;
-        Watch(String album){super(null);this.album=album;version=version();boundary=boundary();access=GalleryBridge.access();}
+        Watch(String album){super(null);this.album=album;version=version();boundary=boundary(version);access=GalleryBridge.access();nextBoundaryCheck=android.os.SystemClock.elapsedRealtime()+10000;}
         void reset(){reconcile=true;paths.clear();}
         @Override public void onChange(boolean self,Uri uri){synchronized(GalleryIndex.class){
             serial++;if(GalleryBridge.access().equals("Limited"))accessChanged=true;
@@ -60,8 +60,8 @@ final class GalleryIndex {
             result.append(volume).append('=').append(MediaStore.getVersion(GalleryBridge.context,volume)).append(';');
         return result.toString();
     }
-    private static String boundary(){
-        StringBuilder result=new StringBuilder(version());
+    private static String boundary(String version){
+        StringBuilder result=new StringBuilder(version);
         if(Build.VERSION.SDK_INT>=30)for(String volume:new TreeSet<>(MediaStore.getExternalVolumeNames(GalleryBridge.context)))result.append(volume).append('@').append(MediaStore.getGeneration(GalleryBridge.context,volume)).append(';');
         return result.toString();
     }
@@ -88,7 +88,10 @@ final class GalleryIndex {
         }
         if(op.equals("drain")) {
             Watch watch=watches.get(id);if(watch==null)throw new IllegalStateException("Photo observer no longer exists");
-            String version=version(),boundary=boundary(),access=GalleryBridge.access();
+            long now=android.os.SystemClock.elapsedRealtime();String version=watch.version,boundary=watch.boundary,access=GalleryBridge.access();
+            if(request.optBoolean("verifyBoundary") || watch.reconcile || !watch.paths.isEmpty() || now>=watch.nextBoundaryCheck) {
+                version=version();boundary=boundary(version);watch.nextBoundaryCheck=now+10000;
+            }
             if(!version.equals(watch.version) || !access.equals(watch.access) || (!boundary.equals(watch.boundary) && watch.paths.isEmpty()))watch.reset();
             if(!access.equals(watch.access) || (!version.equals(watch.version) && access.equals("Limited")))watch.accessChanged=true;
             watch.version=version;watch.boundary=boundary;watch.access=access;

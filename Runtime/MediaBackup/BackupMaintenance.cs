@@ -49,6 +49,25 @@ namespace Game.Media.Backup
         public BackupRepositoryException Error { get; }
         internal BackupFileCleanupFailure(string id,BackupRepositoryException error){FileId=id;Error=error;}
     }
+    public sealed class BackupFileCleanupInfo
+    {
+        public string FileId { get; internal set; }
+        /// <summary>Null when preparation ended before task acceptance.</summary>
+        public string TaskId { get; internal set; }
+        /// <summary>Bytes accounted against the staging budget; interrupted preparations may retain a reservation.</summary>
+        public long AccountedBytes { get; internal set; }
+        public string Error { get; internal set; }
+        public DateTime UpdatedUtc { get; internal set; }
+    }
+    public sealed class BackupFileCleanupCursor
+    {
+        internal string Store,After;
+    }
+    public sealed class BackupFileCleanupPage
+    {
+        public IReadOnlyList<BackupFileCleanupInfo> Items { get; internal set; }
+        public BackupFileCleanupCursor Next { get; internal set; }
+    }
     public sealed class BackupCleanupException : Exception
     {
         public BackupCleanupResult Result { get; }

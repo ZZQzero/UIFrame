@@ -65,6 +65,7 @@ const std::string TaskColumns=
     "LEFT JOIN task_attempts a ON a.task_id=t.id AND a.generation=t.current_generation ";
 const std::string ReceiptColumns="SELECT backup_id,source_id,content_version,lower(hex(sha256)) AS sha256,byte_count,name,mime,confirmed_utc FROM backup_receipts ";
 const std::string Unreleased="EXISTS(SELECT 1 FROM task_attempts a WHERE a.task_id=tasks.id AND (a.payload_released=0 OR a.credential_released=0))";
+const std::string UnknownOutcome="EXISTS(SELECT 1 FROM task_attempts a WHERE a.task_id=tasks.id AND a.generation=tasks.current_generation AND a.server_outcome=0)";
 const std::string CleanupEligible="NOT EXISTS(SELECT 1 FROM tasks t JOIN task_attempts a ON a.task_id=t.id WHERE t.file_id=file_records.id AND (a.payload_released=0 OR a.credential_released=0))";
 
 // Publish payload durability before committing the database fact. No database
@@ -167,9 +168,9 @@ struct Repository {
         case UFB_SUMMARY: a.count(0); read=true; commands.emplace_back("SELECT state,count,(SELECT paused FROM store_settings WHERE singleton=1) AS paused FROM task_counts ORDER BY state"); break;
         case UFB_CLAIM: {
             a.count(5); auto id=a.id(0); auto executor=a.number(1,0,2),wifi=a.number(2,0,1),now=a.number(3); auto session=a.id(4);
-            commands.emplace_back("UPDATE tasks SET current_generation=current_generation+1,state=1,error=NULL,updated_utc=? WHERE id=? AND state IN(0,5) AND next_attempt_utc<=? AND desired_action=0 AND NOT "+Unreleased+" AND (SELECT paused FROM store_settings WHERE singleton=1)=0",std::vector<Value>{now,id,now},1);
-            commands.emplace_back("INSERT INTO task_attempts(task_id,generation,session_id,idempotency_key,submission_state,execution_state,server_outcome,payload_released,credential_released,executor,wifi_only) SELECT t.id,t.current_generation,?,t.id||':'||t.current_generation,0,0,0,0,0,?,? FROM tasks t JOIN task_metadata m ON m.task_id=t.id WHERE t.id=?",std::vector<Value>{session,executor,wifi,id},1);
-            commands.push_back(task(id)); break;
+            commands.emplace_back("UPDATE tasks SET current_generation=current_generation+1,state=1,error=NULL,updated_utc=? WHERE id=? AND state IN(0,5) AND next_attempt_utc<=? AND desired_action=0 AND NOT "+Unreleased+" AND (SELECT paused FROM store_settings WHERE singleton=1)=0",std::vector<Value>{now,id,now});
+            commands.emplace_back("INSERT INTO task_attempts(task_id,generation,session_id,idempotency_key,submission_state,execution_state,server_outcome,payload_released,credential_released,executor,wifi_only) SELECT t.id,t.current_generation,?,t.id||':'||t.current_generation,0,0,0,0,0,?,? FROM tasks t JOIN task_metadata m ON m.task_id=t.id WHERE t.id=? AND changes()=1",std::vector<Value>{session,executor,wifi,id});
+            commands.emplace_back(TaskColumns+"WHERE t.id=? AND changes()=1",std::vector<Value>{id}); break;
         }
         case UFB_HANDOFF: {
             a.count(3); auto id=a.id(0); auto generation=a.number(1,1); auto credential=a.text(2,16384);
@@ -192,8 +193,16 @@ struct Repository {
             commands.emplace_back("UPDATE tasks SET state=?,updated_utc=? WHERE id=? AND current_generation=?",std::vector<Value>{int64_t(verifying?2:1),now,id,generation},1); break;
         }
         case UFB_FINISH: {
-            // outcome: 1 confirmed, 2 definitive failure, 3 interrupted/unknown.
-            a.count(8); auto id=a.id(0); auto generation=a.number(1,1),outcome=a.number(2,1,4); auto backup=a.text(3,256),error=a.text(4); auto now=a.number(5),size=a.number(6); auto hash=Value::blob(sha(a,7));
+            // 1 confirmed, 2 local definitive failure, 3 unknown, 4 no new
+            // transfer, 5 authoritative server proof of no committed backup.
+            a.count(8); auto id=a.id(0); auto generation=a.number(1,1),outcome=a.number(2,1,5); auto backup=a.text(3,256),error=a.text(4); auto now=a.number(5),size=a.number(6); auto hash=Value::blob(sha(a,7));
+            if(outcome==5)outcome=4;
+            else if((outcome==2 || outcome==4) && generation>1) {
+                // Queue state and a new executor's local result cannot resolve
+                // the preceding attempt's remote outcome. All platforms agree.
+                auto previous=decode(db.query({"SELECT server_outcome FROM task_attempts WHERE task_id=? AND generation=?",{id,generation-1}})).back().rows;
+                if(!previous.empty() && previous[0][0].integer==0)outcome=3;
+            }
             if(outcome==1) {
                 require(!backup.empty(),"Confirmed backup ID is required");
                 commands.emplace_back("UPDATE task_attempts SET execution_state=2,server_outcome=1,error=NULL WHERE task_id=? AND generation=? AND execution_state IN(0,1,2,4) AND EXISTS(SELECT 1 FROM tasks t JOIN file_records f ON f.id=t.file_id WHERE t.id=task_id AND t.current_generation=generation AND f.sha256=? AND f.byte_count=?)",std::vector<Value>{id,generation,hash,size},1);
@@ -226,6 +235,9 @@ struct Repository {
         case UFB_RECEIPTS: a.count(3); read=true; commands.emplace_back(ReceiptColumns+"WHERE (confirmed_utc,backup_id)>(?,?) ORDER BY confirmed_utc,backup_id LIMIT ?",std::vector<Value>{a.number(0),a.text(1,256),a.number(2,1,200)}); break;
         case UFB_RECEIPT: a.count(1); read=true; commands.emplace_back(ReceiptColumns+"WHERE backup_id=?",std::vector<Value>{a.text(0,256)}); break;
         case UFB_CLEANUP_PAGE: a.count(2); read=true; commands.emplace_back("SELECT id,relative_path,byte_count,state,updated_utc FROM file_records WHERE state IN(2,5) AND id>? AND "+CleanupEligible+" ORDER BY id LIMIT ?",std::vector<Value>{a.text(0,64),a.number(1,1,200)}); break;
+        case UFB_CLEANUP_FAILURES:
+            a.count(2);read=true;
+            commands.emplace_back("SELECT f.id,f.byte_count,f.cleanup_error,f.updated_utc,(SELECT t.id FROM tasks t WHERE t.file_id=f.id LIMIT 1) AS task_id FROM file_records f WHERE f.state=4 AND f.id>? ORDER BY f.id LIMIT ?",std::vector<Value>{a.text(0,64),a.number(1,1,200)});break;
         case UFB_CLEANUP_RUN: {
             a.count(3); auto id=a.id(0); auto version=a.number(1),now=a.number(2);
             auto selected=decode(db.batch({{"UPDATE file_records SET state=5 WHERE id=? AND state IN(2,5) AND updated_utc=? AND "+CleanupEligible+" RETURNING relative_path",{id,version}}})).back().rows;
@@ -390,7 +402,7 @@ struct Repository {
             require(op.size()==1,"Operation not found",UF_STATE);
             if(op[0][1].integer!=1)return db.query({"SELECT * FROM operations WHERE id=?",{id}},capacity);
             auto action=op[0][0].integer;
-            auto selected=decode(db.query({"SELECT i.task_id,t.state,EXISTS(SELECT 1 FROM task_attempts a WHERE a.task_id=t.id AND (a.payload_released=0 OR a.credential_released=0)),f.state,i.outcome,t.desired_action FROM operation_items i LEFT JOIN tasks t ON t.id=i.task_id LEFT JOIN file_records f ON f.id=t.file_id WHERE i.operation_id=? AND i.outcome IN(0,5) ORDER BY i.outcome,i.task_id LIMIT ?",{id,limit}})).back().rows;
+            auto selected=decode(db.query({"SELECT i.task_id,tasks.state,"+Unreleased+",f.state,i.outcome,tasks.desired_action,"+UnknownOutcome+" FROM operation_items i LEFT JOIN tasks ON tasks.id=i.task_id LEFT JOIN file_records f ON f.id=tasks.file_id WHERE i.operation_id=? AND i.outcome IN(0,5) ORDER BY i.outcome,i.task_id LIMIT ?",{id,limit}})).back().rows;
             int64_t applied=0;
             for(auto &row:selected) {
                 auto task_id=row[0].text;auto state=row[1].integer;bool exists=row[1].type!=0,free=row[2].integer==0;
@@ -406,7 +418,7 @@ struct Repository {
                 } else if((action==0 && state==0) || (action==1 && state==4 && free) || (action==2 && (state==3 || state==8) && free)) {
                     outcome=6;reason=state==3?"Backup already confirmed":"Requested state already satisfied";
                 } else {
-                    bool eligible=action==0?(state==4 && free):action==1?(state==0 || state==1 || state==2 || state==4 || state==5):action==2?(state==0 || state==1 || state==2 || state==4 || state==5 || state==7 || state==8):action==3?((state==5 || state==6 || state==7) && free):action==4?row[3].integer==4:((state==3 || state==8) && free && row[3].integer==3);
+                    bool eligible=action==0?(state==4 && free):action==1?(state==0 || state==1 || state==2 || state==4 || state==5):action==2?(state==0 || state==1 || state==2 || state==4 || state==5 || state==6 || state==7 || state==8):action==3?((state==5 || state==6 || state==7) && free):action==4?row[3].integer==4:((state==3 || state==8) && free && row[3].integer==3);
                     if(eligible) {
                         if(action==4)commands.emplace_back("UPDATE file_records SET state=2,cleanup_error=NULL,updated_utc=? WHERE id=(SELECT file_id FROM tasks WHERE id=?) AND state=4",std::vector<Value>{now,task_id},1);
                         else if(action==5) {
@@ -415,6 +427,7 @@ struct Repository {
                             commands.emplace_back("DELETE FROM file_records WHERE id=? AND state=3",std::vector<Value>{task_id},1);
                         } else append_action(commands,task_id,action,now,true);
                         outcome=(action==1 || action==2) && !free?5:1;reason=outcome==5?"Waiting for executor release":"";
+                        if(action==2 && free && row[6].integer) {outcome=2;reason="Cancellation requested; reconcile the server outcome before completion";}
                     }
                 }
                 if(outcome==1 || outcome==6)++applied;
@@ -562,7 +575,7 @@ struct Repository {
         } else if(action==1) {
             commands.emplace_back("UPDATE tasks SET desired_action=1,state=CASE WHEN state IN(0,5) THEN 4 ELSE state END,updated_utc=? WHERE id=? AND state IN(0,1,2,4,5)",std::vector<Value>{now,id},strict?1:-1);
         } else {
-            commands.emplace_back("UPDATE tasks SET desired_action=2,state=CASE WHEN state IN(0,4,5,7) AND NOT "+Unreleased+" THEN 8 ELSE state END,updated_utc=? WHERE id=? AND state IN(0,1,2,4,5,7,8)",std::vector<Value>{now,id},strict?1:-1);
+            commands.emplace_back("UPDATE tasks SET desired_action=2,state=CASE WHEN state IN(0,4,5,6,7) AND NOT "+Unreleased+" THEN CASE WHEN "+UnknownOutcome+" THEN 6 ELSE 8 END ELSE state END,updated_utc=? WHERE id=? AND state IN(0,1,2,4,5,6,7,8)",std::vector<Value>{now,id},strict?1:-1);
             commands.emplace_back("UPDATE file_records SET state=2,updated_utc=? WHERE id=(SELECT file_id FROM tasks WHERE id=? AND state=8) AND state=1",std::vector<Value>{now,id});
             commands.emplace_back("UPDATE discoveries SET disposition=5 WHERE task_id=? AND EXISTS(SELECT 1 FROM tasks WHERE id=? AND state=8)",std::vector<Value>{id,id});
         }

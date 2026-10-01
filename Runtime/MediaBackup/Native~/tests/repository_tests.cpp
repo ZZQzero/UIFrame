@@ -42,10 +42,10 @@ int main() {
             auto page=store.call(UFB_TASKS,{int64_t(0),int64_t(100),int64_t(-1),int64_t(10)}).back();
             expect(page.rows.size()==1 && page.rows[0][5].integer==0,"Prepared batch not accepted");
             store.call(UFB_PAUSE,{int64_t(1)});
-            store.call(UFB_CLAIM,{"cc",int64_t(0),int64_t(0),int64_t(4),"dd"},UF_CONDITION);
+            expect(store.call(UFB_CLAIM,{"cc",int64_t(0),int64_t(0),int64_t(4),"dd"}).back().rows.empty(),"Ineligible task was claimed");
             store.call(UFB_PAUSE,{int64_t(0)});
             store.call(UFB_CLAIM,{"cc",int64_t(0),int64_t(0),int64_t(4),"dd"});
-            store.call(UFB_CLAIM,{"cc",int64_t(0),int64_t(0),int64_t(4),"dd"},UF_CONDITION);
+            expect(store.call(UFB_CLAIM,{"cc",int64_t(0),int64_t(0),int64_t(4),"dd"}).back().rows.empty(),"Ineligible task was claimed");
             store.call(UFB_START,{"cc",int64_t(1)});
             store.call(UFB_ACTION,{"cc",int64_t(2),int64_t(5)});
             store.call(UFB_FINISH,{"cc",int64_t(1),int64_t(1),hash,"",int64_t(6),int64_t(16),hash});
@@ -110,7 +110,8 @@ int main() {
             background.call(UFB_START,{"55",int64_t(2)});
             background.call(UFB_FINISH,{"55",int64_t(2),int64_t(3),"","response lost",int64_t(43),int64_t(1),hash});
             background.call(UFB_RELEASE,{"55",int64_t(2),int64_t(1),int64_t(1)});
-            background.call(UFB_ACTION,{"55",int64_t(2),int64_t(44)},UF_CONDITION);
+            background.call(UFB_ACTION,{"55",int64_t(2),int64_t(44)});
+            expect(background.call(UFB_TASK,{"55"}).back().rows[0][5].integer==6,"Cancellation discarded an unknown server result");
             background.call(UFB_RESTART,{"55",int64_t(2)},UF_CONDITION);
             // Preparation bytes are reserved before copying; partial exported files
             // belong to the same intent and are reclaimed after abandonment.
@@ -162,6 +163,9 @@ int main() {
             store.call(UFB_ABANDON,{"bb","aa",int64_t(2),"fixture cleanup"});
             auto files=store.call(UFB_CLEANUP_PAGE,{"",int64_t(10)}).back();expect(files.rows.size()==2,"Missing cleanup candidates");
             store.call(UFB_CLEANUP_RUN,{"a1",files.rows[0][4],int64_t(3)},UFB_CLEANUP_FILE_FAILED);
+            auto failed=store.call(UFB_CLEANUP_FAILURES,{"",int64_t(1)}).back();
+            expect(failed.rows.size()==1 && failed.rows[0][0].text=="a1" && !failed.rows[0][2].text.empty() && failed.rows[0][4].type==0,"Abandoned cleanup failure cannot be queried without a task");
+            expect(store.call(UFB_CLEANUP_FAILURES,{"a1",int64_t(1)}).back().rows.empty(),"Cleanup failure cursor repeated a file");
             auto remaining=store.call(UFB_CLEANUP_PAGE,{"",int64_t(10)}).back();
             expect(remaining.rows.size()==1 && remaining.rows[0][0].text=="a2","Failed file was not isolated");
             store.call(UFB_CLEANUP_RUN,{"a2",remaining.rows[0][4],int64_t(4)});
@@ -171,6 +175,38 @@ int main() {
             auto retry=store.call(UFB_CLEANUP_RETRY,{"a1",int64_t(5)}).back();
             expect(retry.rows.size()==1 && retry.rows[0][0].text=="a1","Retry lost its file identity");
             store.call(UFB_CLEANUP_RUN,{"a1",retry.rows[0][1],int64_t(6)});
+        }
+        {
+            Store store(root.u8string(),std::string(64,'b'),true);store.call(UFB_BIND_PREPARER,{"aa"});
+            store.call(UFB_PREPARE,{"bb","aa",int64_t(1),int64_t(2),"b1","file:unknown","v1","unknown.jpg","image/jpeg",int64_t(4),"b2","file:queued","v1","queued.jpg","image/jpeg",int64_t(4)});
+            for(auto id:{"b1","b2"}) {
+                std::ofstream(root/store.id/"payloads"/(std::string(id)+".payload"))<<"data";
+                store.call(UFB_SEAL,{id,"aa",int64_t(4),hash,hash,"image/jpeg",int64_t(1024),int64_t(2)});
+            }
+            store.call(UFB_ACCEPT,{"bb","aa",int64_t(3)});
+            store.call(UFB_CLAIM,{"b1",int64_t(0),int64_t(0),int64_t(4),"aa"});
+            store.call(UFB_START,{"b1",int64_t(1)});
+            store.call(UFB_FINISH,{"b1",int64_t(1),int64_t(3),"","response lost",int64_t(5),int64_t(4),hash});
+            store.call(UFB_RELEASE,{"b1",int64_t(1),int64_t(1),int64_t(1)});
+            store.call(UFB_ACTION,{"b1",int64_t(3),int64_t(6)});
+            store.call(UFB_ACTION,{"b1",int64_t(2),int64_t(7)});
+            expect(store.call(UFB_TASK,{"b1"}).back().rows[0][5].integer==6,"Cancel before retry claim must require reconciliation");
+            store.call(UFB_ACTION,{"b1",int64_t(3),int64_t(8)});
+            store.call(UFB_ACTION,{"b1",int64_t(1),int64_t(8)});
+            store.call(UFB_ACTION,{"b1",int64_t(2),int64_t(9)});
+            expect(store.call(UFB_TASK,{"b1"}).back().rows[0][5].integer==6,"Pause discarded unresolved server outcome");
+            store.call(UFB_ACTION,{"b1",int64_t(3),int64_t(10)});
+            store.call(UFB_OPERATION,{"cc",int64_t(2),int64_t(0),int64_t(11),int64_t(0),Value::blob(std::string(32,'c'))});
+            store.call(UFB_SELECT_OPERATION,{"cc",int64_t(12),int64_t(128)});
+            store.call(UFB_APPLY_OPERATION,{"cc",int64_t(13),int64_t(32)});
+            auto items=store.call(UFB_OPERATION_ITEMS,{"cc","",int64_t(100)}).back().rows;
+            expect(items.size()==2 && items[0][1].integer==2 && items[1][1].integer==1,"Batch cancellation must isolate unresolved outcomes");
+            expect(store.call(UFB_TASK,{"b1"}).back().rows[0][5].integer==6,"Batch cancel must leave unknown task available for reconciliation");
+            expect(store.call(UFB_TASK,{"b2"}).back().rows[0][5].integer==8,"Unrelated queued task was not canceled");
+            auto cleanup=store.call(UFB_CLEANUP_PAGE,{"",int64_t(10)}).back().rows;
+            expect(cleanup.size()==1 && cleanup[0][0].text=="b2","Unresolved payload became reclaimable");
+            store.call(UFB_FINISH,{"b1",int64_t(1),int64_t(5),"","Server confirmed no commit",int64_t(14),int64_t(4),hash});
+            expect(store.call(UFB_TASK,{"b1"}).back().rows[0][5].integer==8,"Reconciliation did not fulfill saved cancellation intent");
         }
         for(int executor=1;executor<=2;++executor) {
             Store store(root.u8string(),std::string(64,char('c'+executor)),true);
@@ -198,6 +234,17 @@ int main() {
             auto released=store.call(UFB_TASK,{"cc"}).back().rows[0];
             expect(released[25].integer==1 && released[26].integer==0,"Recovery falsely released native credentials");
             store.call(UFB_RELEASE,{"cc",int64_t(1),int64_t(1),int64_t(1)});
+            int64_t generation=1;
+            for(int64_t outcome:{2,4}) {
+                store.call(UFB_ACTION,{"cc",int64_t(3),int64_t(10)});
+                store.call(UFB_CLAIM,{"cc",int64_t(executor),int64_t(0),int64_t(11),"bb"});
+                store.call(UFB_FINISH,{"cc",++generation,outcome,"","Stopped before new network work",int64_t(12),int64_t(4),hash});
+                store.call(UFB_RELEASE,{"cc",generation,int64_t(1),int64_t(1)});
+                expect(store.call(UFB_TASK,{"cc"}).back().rows[0][5].integer==6,"New local failure erased previous unknown server outcome");
+            }
+            store.call(UFB_FINISH,{"cc",generation,int64_t(5),"","Server confirmed session closed without commit",int64_t(13),int64_t(4),hash});
+            store.call(UFB_ACTION,{"cc",int64_t(2),int64_t(14)});
+            expect(store.call(UFB_TASK,{"cc"}).back().rows[0][5].integer==8,"Authoritative reconciliation did not allow cancellation");
         }
         uf_diagnostics diagnostics{}; diagnostics.size=sizeof(diagnostics); diagnostics.abi=UFSQLITE_ABI;
         expect(ufsqlite_get_diagnostics(&diagnostics)==0,"Diagnostics unavailable");

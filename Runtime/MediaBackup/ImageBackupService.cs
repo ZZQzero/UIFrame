@@ -34,7 +34,17 @@ namespace Game.Media.Backup
         Exception callbackFailure, capabilityFailure;
         bool disposed, closing, running, accepting, pausing, paused, refreshingCapabilities;
         int downloads, metadataReads, operations;
-        string activeManagedTask;
+        TransferAttempt activeTransfer;
+        sealed class TransferAttempt : IDisposable
+        {
+            internal readonly string TaskId;
+            internal readonly CancellationTokenSource Cancellation;
+            internal bool OutcomeUnknown;
+            internal TransferAttempt(string id,CancellationToken token)
+            {TaskId=id;Cancellation=CancellationTokenSource.CreateLinkedTokenSource(token);}
+            internal void PendingResponse(){OutcomeUnknown=false;}
+            public void Dispose(){Cancellation.Dispose();}
+        }
         public bool IsRunning => running;
         public bool IsPaused => paused;
         public bool SupportsNativeBackgroundTransfer => nativeAvailable;
@@ -266,19 +276,23 @@ namespace Game.Media.Backup
                         after=candidate.sequence; if(candidate.state!=BackupState.Queued && candidate.state!=BackupState.RetryScheduled || candidate.nextAttemptUtcTicks>passTime) continue;
                         if(!CanTransfer(canTransfer)) return;
                         await EnsureCapabilities(token);
-                        var record=TaskInfo((await Db(Command.Claim,token,candidate.id,nativeEnabled?(Application.platform==RuntimePlatform.Android?1:2):0,nativeWifiOnly,Now,owner)).Single);
-                        bool handedOff=false,determined=false,networkStarted=false; ExceptionDispatchInfo primary=null; Exception retryFailure=null;
+                        var claim=await Db(Command.Claim,token,candidate.id,nativeEnabled?(Application.platform==RuntimePlatform.Android?1:2):0,nativeWifiOnly,Now,owner);
+                        if(claim.Rows.Count==0)continue;
+                        var record=TaskInfo(claim.Single);
+                        using var transfer=new TransferAttempt(record.id,token);
+                        activeTransfer=transfer;var transferToken=transfer.Cancellation.Token;
+                        bool handedOff=false,determined=false; ExceptionDispatchInfo primary=null; Exception retryFailure=null;
                         try
                         {
                             if(record.size>capabilities.maxFileBytes) throw new IOException("Image exceeds server file limit.");
                             if(nativeEnabled)
                             {
-                                networkStarted=true;var session=await CreateSession(record,token);
+                                var session=await CreateSession(record,transferToken,transfer);
                                 if(session.completed) { await Confirm(record,session); determined=true; }
                                 else
                                 {
                                     string credential=GetAccessToken(); if(string.IsNullOrWhiteSpace(credential)) throw new InvalidOperationException("No access token available.");
-                                    token.ThrowIfCancellationRequested(); handedOff=true;
+                                    transferToken.ThrowIfCancellationRequested(); handedOff=true;
                                     try { await Platform(new NativeBackupRequest { op="submit",repository=StoreId,id=record.id,generation=record.generation,token=credential }); }
                                     catch {
                                         try { handedOff=(await Db(Command.Attempt,default,record.id,record.generation)).Single.Number("submission_state")>0; }
@@ -289,11 +303,14 @@ namespace Game.Media.Backup
                             }
                             else
                             {
-                                var started=await Db(Command.Start,token,record.id,record.generation);
-                                if(started.Rows.Count==0) { await Finish(record,4,"Execution stopped before network admission");determined=true;continue; }
-                                activeManagedTask=record.id;networkStarted=true;var response=await Upload(record,token,canTransfer);
-                                if(response==null) await Finish(record,4,"Transfer deferred before commit");
-                                else await Confirm(record,response);
+                                var started=await Db(Command.Start,transferToken,record.id,record.generation);
+                                if(started.Rows.Count==0) await Finish(record,4,"Execution stopped before network admission");
+                                else
+                                {
+                                    var response=await Upload(record,transferToken,canTransfer,transfer);
+                                    if(response==null) await Finish(record,transfer.OutcomeUnknown?3:4,"Transfer deferred before commit");
+                                    else await Confirm(record,response);
+                                }
                                 determined=true;
                             }
                         }
@@ -302,26 +319,29 @@ namespace Game.Media.Backup
                             if(error is BackupRepositoryException || handedOff) { primary=ExceptionDispatchInfo.Capture(error); }
                             else
                             {
-                            int outcome=networkStarted?3:2;
+                            int outcome=transfer.OutcomeUnknown?3:transferToken.IsCancellationRequested?4:2;
                             try { await Finish(record,outcome,error.ToString()); determined=true; }
                             catch(Exception persistence) { Debug.LogException(persistence); primary=ExceptionDispatchInfo.Capture(error); }
                             if(token.IsCancellationRequested || ReferenceEquals(error,callbackFailure) || ReferenceEquals(error,capabilityFailure)) primary=ExceptionDispatchInfo.Capture(error);
-                            if(retryEnabled && Transient(error)) retryFailure=error;
+                            if(retryEnabled && !transferToken.IsCancellationRequested && Transient(error)) retryFailure=error;
                             }
                         }
                         finally
                         {
-                            activeManagedTask=null;
-                            if(!handedOff)
+                            try
                             {
-                                try
+                                if(!handedOff)
                                 {
-                                    if(determined) await Db(Command.Release,default,record.id,record.generation,true,!nativeEnabled);
-                                    else await Db(Command.RecoverAttempt,default,record.id,record.generation,Now);
-                                    if(nativeEnabled)await Platform(new NativeBackupRequest {op="sync",repository=StoreId});
+                                    try
+                                    {
+                                        if(determined) await Db(Command.Release,default,record.id,record.generation,true,!nativeEnabled);
+                                        else await Db(Command.RecoverAttempt,default,record.id,record.generation,Now);
+                                        if(nativeEnabled)await Platform(new NativeBackupRequest {op="sync",repository=StoreId});
+                                    }
+                                    catch(Exception cleanup) { if(primary==null) primary=ExceptionDispatchInfo.Capture(cleanup); else Debug.LogException(cleanup); }
                                 }
-                                catch(Exception cleanup) { if(primary==null) primary=ExceptionDispatchInfo.Capture(cleanup); else Debug.LogException(cleanup); }
                             }
+                            finally {activeTransfer=null;}
                         }
                         primary?.Throw();
                         if(retryFailure!=null)
@@ -336,16 +356,17 @@ namespace Game.Media.Backup
             }
             finally { processing=null;running=false;callbackFailure=null;capabilityFailure=null;passCancellation?.Dispose(); }
         }
-        async UniTask<UploadResponse> CreateSession(BackupTaskInfo record,CancellationToken token)
+        async UniTask<UploadResponse> CreateSession(BackupTaskInfo record,CancellationToken token,TransferAttempt transfer)
         {
             var response=await JsonRequest<UploadResponse>(HttpMethod.Post,"/v1/uploads",new UploadRequest {
-                key=record.key,sha256=record.sha256,size=record.size,name=record.name,mime=record.mime,source=record.source },token);
-            ValidateResponse(record,response); if(response.capabilities!=null) SetCapabilities(response.capabilities); return response;
+                key=record.key,sha256=record.sha256,size=record.size,name=record.name,mime=record.mime,source=record.source },token,transfer);
+            ValidateResponse(record,response);if(response.capabilities!=null)SetCapabilities(response.capabilities);
+            if(!response.completed)transfer.PendingResponse();return response;
         }
-        async UniTask<UploadResponse> Upload(BackupTaskInfo record,CancellationToken token,Func<bool> canTransfer)
+        async UniTask<UploadResponse> Upload(BackupTaskInfo record,CancellationToken token,Func<bool> canTransfer,TransferAttempt transfer)
         {
             if(!CanTransfer(canTransfer)) return null;
-            var session=await CreateSession(record,token); if(session.completed) return session;
+            var session=await CreateSession(record,token,transfer); if(session.completed) return session;
             using var input=File.OpenRead(Payload(record)); if(input.Length!=record.size) throw new IOException("Staged backup size changed.");
             string actual=await UniTask.RunOnThreadPool(()=>HashFile(input,token)); if(actual!=record.sha256) throw new IOException("Staged backup checksum changed.");
             input.Position=session.offset; var buffer=new byte[capabilities.chunkBytes];
@@ -355,13 +376,14 @@ namespace Game.Media.Backup
                 int length=await input.ReadAsync(buffer,0,buffer.Length,token); long previous=session.offset;
                 if(length==0) throw new EndOfStreamException("Staged backup was truncated.");
                 using var body=new ByteArrayContent(buffer,0,length);
-                session=await Send<UploadResponse>(HttpMethod.Put,"/v1/uploads/"+record.key+"?offset="+previous,body,token);
+                session=await Send<UploadResponse>(HttpMethod.Put,"/v1/uploads/"+record.key+"?offset="+previous,body,token,transfer);
                 ValidateResponse(record,session); if(session.offset!=previous+length) throw new InvalidOperationException("Unexpected server upload position.");
+                if(!session.completed)transfer.PendingResponse();
                 await Db(Command.Progress,token,record.id,record.generation,session.offset,false,Now);
             }
             if(!CanTransfer(canTransfer)) return null;
             await Db(Command.Progress,token,record.id,record.generation,record.size,true,Now);
-            session=await JsonRequest<UploadResponse>(HttpMethod.Post,"/v1/uploads/"+record.key+"/commit",null,token); ValidateResponse(record,session); return session;
+            session=await JsonRequest<UploadResponse>(HttpMethod.Post,"/v1/uploads/"+record.key+"/commit",null,token,transfer); ValidateResponse(record,session); return session;
         }
         UniTask<BackupRepository.Result> Finish(BackupTaskInfo record,int outcome,string error)
             => Db(Command.Finish,default,record.id,record.generation,outcome,"",error,Now,record.size,record.sha256);
@@ -406,9 +428,11 @@ namespace Game.Media.Backup
         }
         internal async UniTask SynchronizeNativeAsync()
         {
-            if(activeManagedTask!=null)
+            var transfer=activeTransfer;
+            if(transfer!=null)
             {
-                var current=await GetTaskCoreAsync(activeManagedTask);if(current!=null && current.desiredAction!=0)processing?.Cancel();
+                var current=await GetTaskCoreAsync(transfer.TaskId);
+                if(ReferenceEquals(activeTransfer,transfer) && current!=null && current.desiredAction!=0)transfer.Cancellation.Cancel();
             }
             if(nativeEnabled)await Platform(new NativeBackupRequest {op="sync",repository=StoreId});
         }
@@ -431,15 +455,24 @@ namespace Game.Media.Backup
             using var linked=CancellationTokenSource.CreateLinkedTokenSource(cancellationToken,lifetime.Token);cancellationToken=linked.Token;
             Check(); await Db(Command.Action,cancellationToken,taskId,2,Now);
             if(nativeEnabled) await Platform(new NativeBackupRequest { op="stop",repository=StoreId,id=taskId });
-            if(activeManagedTask==taskId)processing?.Cancel();
-            while(activeManagedTask==taskId)await UniTask.Yield(PlayerLoopTiming.Update,cancellationToken);
+            if(activeTransfer?.TaskId==taskId)activeTransfer.Cancellation.Cancel();
+            while(activeTransfer?.TaskId==taskId)await UniTask.Yield(PlayerLoopTiming.Update,cancellationToken);
             await WaitNativeRelease(taskId,cancellationToken);
             await CleanupFilesAsync(cancellationToken);
         }
-        public async UniTask RetryCleanupAsync(string taskId,CancellationToken cancellationToken=default)
+        public async UniTask<BackupFileCleanupPage> QueryCleanupFailuresAsync(int pageSize=100,BackupFileCleanupCursor cursor=null,CancellationToken cancellationToken=default)
         {
             using var operation=EnterOperation();
-            Check();var row=(await Db(Command.CleanupRetry,cancellationToken,taskId,Now)).Single;
+            if(pageSize<1 || pageSize>200)throw new ArgumentOutOfRangeException(nameof(pageSize));
+            if(cursor!=null && cursor.Store!=StoreId)throw new ArgumentException("Cursor belongs to another repository.");
+            var rows=(await Db(Command.CleanupFailures,cancellationToken,cursor?.After??"",pageSize)).Rows;
+            var items=rows.Select(r=>new BackupFileCleanupInfo {FileId=r.Text("id"),TaskId=r.Text("task_id"),AccountedBytes=r.Number("byte_count"),Error=r.Text("cleanup_error"),UpdatedUtc=new DateTime(r.Number("updated_utc"),DateTimeKind.Utc)}).ToList().AsReadOnly();
+            return new BackupFileCleanupPage {Items=items,Next=items.Count==pageSize?new BackupFileCleanupCursor {Store=StoreId,After=items[items.Count-1].FileId}:null};
+        }
+        public async UniTask RetryCleanupAsync(string fileId,CancellationToken cancellationToken=default)
+        {
+            using var operation=EnterOperation();
+            Check();ValidateId(fileId,nameof(fileId));var row=(await Db(Command.CleanupRetry,cancellationToken,fileId,Now)).Single;
             await Db(Command.CleanupRun,cancellationToken,row.Text("id"),row.Number("updated_utc"),Now);
         }
         internal async UniTask<long> CleanupFilesAsync(CancellationToken token=default,int maximumItems=200)
@@ -635,26 +668,28 @@ namespace Game.Media.Backup
             if (IPAddress.IsLoopback(ip)) return true;
             var b = ip.GetAddressBytes(); return b.Length == 4 && (b[0] == 10 || b[0] == 192 && b[1] == 168 || b[0] == 172 && b[1] >= 16 && b[1] <= 31);
         }
-        async UniTask<T> JsonRequest<T>(HttpMethod method, string path, object data, CancellationToken token)
+        async UniTask<T> JsonRequest<T>(HttpMethod method, string path, object data, CancellationToken token,TransferAttempt transfer=null)
         {
             using var body = data == null ? null : new StringContent(JsonUtility.ToJson(data), Encoding.UTF8, "application/json");
-            return await Send<T>(method, path, body, token);
+            return await Send<T>(method, path, body, token,transfer);
         }
-        async UniTask<T> Send<T>(HttpMethod method, string path, HttpContent content, CancellationToken token)
+        async UniTask<T> Send<T>(HttpMethod method, string path, HttpContent content, CancellationToken token,TransferAttempt transfer=null)
         {
             using var request = Request(method, path); request.Content = content;
             return await WithResponse(request, async (response, requestToken) =>
             {
                 string text = await ReadResponse(response, requestToken); await CheckResponse(response, requestToken, text);
                 return JsonUtility.FromJson<T>(text);
-            }, token);
+            }, token,transfer);
         }
-        async UniTask<T> WithResponse<T>(HttpRequestMessage request, Func<HttpResponseMessage, CancellationToken, UniTask<T>> consume, CancellationToken token)
+        async UniTask<T> WithResponse<T>(HttpRequestMessage request, Func<HttpResponseMessage, CancellationToken, UniTask<T>> consume, CancellationToken token,TransferAttempt transfer=null)
         {
             using var deadline = CancellationTokenSource.CreateLinkedTokenSource(token);
             deadline.CancelAfter(requestTimeout);
             try
             {
+                token.ThrowIfCancellationRequested();
+                if(transfer!=null)transfer.OutcomeUnknown=true;
                 using var response = await client.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, deadline.Token);
                 // Disposing also interrupts response streams that do not implement cancellation themselves.
                 using var interruption = deadline.Token.Register(response.Dispose);

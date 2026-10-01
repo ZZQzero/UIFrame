@@ -13,6 +13,7 @@ CREATE TABLE library_scopes (
     revision INTEGER NOT NULL CHECK(revision>0),
     permission_generation INTEGER NOT NULL CHECK(permission_generation>=0),
     access_state INTEGER NOT NULL DEFAULT 0,
+    access_fingerprint TEXT,
     completed_scan_id TEXT,
     platform_cursor TEXT,
     requires_reconcile INTEGER NOT NULL CHECK(requires_reconcile IN(0,1))

@@ -175,12 +175,7 @@ namespace Game.Media.Backup
                                 }
                                 if(phase==1)
                                 {
-                                    if(activeManagedTask!=null)
-                                    {
-                                        var current=await GetTaskCoreAsync(activeManagedTask,lifetime.Token);
-                                        if(current!=null && current.desiredAction!=0)processing?.Cancel();
-                                    }
-                                    if(nativeEnabled)await Platform(new NativeBackupRequest {op="sync",repository=StoreId});
+                                    await SynchronizeNativeAsync();
                                 }
                                 await UniTask.Yield(PlayerLoopTiming.Update,lifetime.Token);
                             }
@@ -215,7 +210,7 @@ namespace Game.Media.Backup
                     // Server DELETE shares the session/commit lock; conflict preserves unknown outcome.
                     await JsonRequest<UploadResponse>(System.Net.Http.HttpMethod.Delete,"/v1/uploads/"+record.key,null,cancellationToken);
                 }
-                await Finish(record,4,"Server confirmed no committed backup; previous session closed");
+                await Finish(record,5,"Server confirmed no committed backup; previous session closed");
                 await CleanupFilesAsync(cancellationToken);
             }
             finally {metadataReads--;}
