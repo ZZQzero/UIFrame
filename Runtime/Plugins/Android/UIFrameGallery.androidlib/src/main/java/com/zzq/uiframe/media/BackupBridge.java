@@ -53,6 +53,13 @@ public final class BackupBridge {
         return new String(cipher.doFinal(Base64.decode(parts[1],Base64.NO_WRAP)),StandardCharsets.UTF_8);
     }
     private static int jobId(String repository){return 0x20000000|(int)(Long.parseLong(repository.substring(0,7),16)&0x0fffffff);}
+    static void bindSystemTask(BackupRepository repository,BackupRepository.Row task) throws IOException {
+        String system=Integer.toString(jobId(repository.id));
+        if(task.number("submission_state")==1)
+            repository.call(BackupRepository.SUBMITTED,task.text("id"),task.number("current_generation"),system,task.text("credential_reference"));
+        else if(task.number("submission_state")!=2 || !system.equals(task.text("system_task_id")))
+            throw new IllegalStateException("Backup system task association mismatch");
+    }
     private static void schedule(Context context,BackupRepository repository) throws Exception {
         synchronized(LOCK){if(failures.containsKey(repository.id))throw failures.get(repository.id);}
         if(repository.call(BackupRepository.INFO).get(0).flag("paused"))return;
@@ -61,7 +68,9 @@ public final class BackupBridge {
             List<BackupRepository.Row> page=repository.call(BackupRepository.SCHEDULABLE,cursor,1,100);
             for(BackupRepository.Row row:page) {
                 cursor=row.number("sequence");
-                if(row.number("state")==1 && row.number("execution_state")<=1 && row.number("desired_action")==0) {pending=true;any|=!row.flag("wifi_only");}
+                if(row.number("state")==1 && row.number("execution_state")<=1 && row.number("desired_action")==0) {
+                    bindSystemTask(repository,row);pending=true;any|=!row.flag("wifi_only");
+                }
             }
             if(page.size()<100)break;
         }
@@ -122,7 +131,7 @@ public final class BackupBridge {
                             credential=encrypt(token);
                             repository.call(BackupRepository.HANDOFF,id,task.number("current_generation"),credential);
                         }
-                        repository.call(BackupRepository.SUBMITTED,id,task.number("current_generation"),Integer.toString(jobId(repository.id)),credential);
+                        bindSystemTask(repository,repository.call(BackupRepository.TASK,id).get(0));
                         if(running==null)schedule(app,repository);
                     } else if(op.equals("wake") || op.equals("sync") || op.equals("recover")) {
                         if(running!=null && running.task!=null) {
@@ -163,6 +172,7 @@ public final class BackupBridge {
                             if(candidate.number("desired_action")!=0) {finish(repository,candidate,candidate.number("execution_state")==0?4:3,"","Stopped before execution");release(repository,candidate);run.task=null;continue;}
                             if(!network.allowed(candidate.flag("wifi_only"))) {run.constraintWait=true;run.task=null;continue;}
                             if(candidate.number("execution_state")==1) {finish(repository,candidate,3,"","Previous executor ended; reconcile the server result");release(repository,candidate);run.task=null;continue;}
+                            bindSystemTask(repository,candidate);
                             List<BackupRepository.Row> started=repository.call(BackupRepository.START,candidate.text("id"),candidate.number("current_generation"));
                             if(started.isEmpty()) {finish(repository,candidate,4,"","Stopped before network admission");release(repository,candidate);run.task=null;continue;}
                             candidate=started.get(0);

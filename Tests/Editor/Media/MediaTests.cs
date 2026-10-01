@@ -431,6 +431,87 @@ namespace UIFrame.Regression
                 Assert.AreEqual(1,(await service.QueryTasksAsync()).Items.Count);
             } finally {await library.ShutdownAsync();await service.ShutdownAsync();}
         });
+        [UnityTest] public IEnumerator AutomaticLoopChecksPermissionBeforeUploadingQueuedTasks() => UniTask.ToCoroutine(async()=>
+        {
+            var service=await ImageBackupService.CreateAsync(Config());var library=await ImageLibraryIndex.OpenAsync(Path.Combine(root,"loop-permissions.sqlite"));
+            try {
+                var automatic=await AutomaticImageBackup.CreateAsync(service,library);
+                await automatic.ConfigureAsync(new AutomaticBackupPolicy {enabled=true,source=root,sourceKind=BackupSourceKind.Directory,includeExisting=true,wifiOnly=false});
+                await automatic.ScanOnceAsync();var task=(await service.QueryTasksAsync()).Items.Single();
+                var field=typeof(ImageLibraryIndex).GetField("repository",System.Reflection.BindingFlags.Instance|System.Reflection.BindingFlags.NonPublic);
+                var repository=(Game.Media.Storage.LibraryRepository)field.GetValue(library);
+                await repository.Scope(new ImageLibraryScope(ImageLibrarySourceKind.Directory,root),0,default,true);
+                using var timeout=new CancellationTokenSource(TimeSpan.FromSeconds(10));
+                Exception failure=null;try{await automatic.RunAsync(timeout.Token);}catch(Exception error){failure=error;}
+                Assert.IsInstanceOf<GalleryException>(failure);
+                Assert.AreEqual("ScopeConfirmationRequired",((GalleryException)failure).Code);
+                Assert.AreEqual(BackupState.Paused,(await service.GetTaskAsync(task.id)).state);
+                Assert.IsEmpty((await service.QueryBackupsAsync()).Items);
+                await automatic.ConfirmScopeAsync();
+            } finally {await library.ShutdownAsync();await service.ShutdownAsync();}
+        });
+        sealed class PendingSessionHandler : System.Net.Http.HttpMessageHandler
+        {
+            internal bool entered;
+            internal readonly System.Threading.Tasks.TaskCompletionSource<System.Net.Http.HttpResponseMessage> pending = new System.Threading.Tasks.TaskCompletionSource<System.Net.Http.HttpResponseMessage>(System.Threading.Tasks.TaskCreationOptions.RunContinuationsAsynchronously);
+            protected override System.Threading.Tasks.Task<System.Net.Http.HttpResponseMessage> SendAsync(System.Net.Http.HttpRequestMessage request,CancellationToken token)
+            {
+                if(request.Method==System.Net.Http.HttpMethod.Get)return System.Threading.Tasks.Task.FromResult(new System.Net.Http.HttpResponseMessage { Content=new System.Net.Http.StringContent("{\"protocolVersion\":1,\"account\":\"integration-user\",\"chunkBytes\":1024,\"maxFileBytes\":1048576}") });
+                entered=true;return pending.Task;
+            }
+        }
+        [UnityTest] public IEnumerator ConcurrentProcessingPreservesActiveOwnership() => UniTask.ToCoroutine(async()=>
+        {
+            var handler=new PendingSessionHandler();var service=await ImageBackupService.CreateAsync(Config(),NativeBackup.Call,false,handler);
+            System.Threading.Tasks.Task first=null,second=null;
+            try {
+                await service.EnqueueAsync(new[]{ImageReference.FromFile(imagePath)});
+                first=service.ProcessAsync().AsTask();second=service.ProcessAsync().AsTask();
+                using var timeout=new CancellationTokenSource(TimeSpan.FromSeconds(10));
+                await UniTask.WaitUntil(()=>handler.entered && (first.IsCompleted || second.IsCompleted),cancellationToken:timeout.Token);
+                bool runningWithLiveTransfer=service.IsRunning;
+                handler.pending.TrySetException(new IOException("Controlled upload failure"));
+                Exception firstError=null,secondError=null;
+                try{await first;}catch(Exception error){firstError=error;}
+                try{await second;}catch(Exception error){secondError=error;}
+                Assert.IsTrue(runningWithLiveTransfer,"An existing transfer must retain its execution ownership when another pass is rejected.");
+                Assert.IsNull(firstError,"A per-image HTTP failure must be persisted without losing the processing owner.");
+                Assert.IsInstanceOf<InvalidOperationException>(secondError);
+                Assert.AreEqual(BackupState.NeedsAttention,(await service.QueryTasksAsync()).Items.Single().state);
+            } finally {
+                handler.pending.TrySetException(new IOException("Fixture cleanup"));
+                if(first!=null)try{await first;}catch(Exception){}
+                if(second!=null)try{await second;}catch(Exception){}
+                await service.ShutdownAsync();
+            }
+        });
+        [UnityTest] public IEnumerator ConcurrentProcessingAdmissionIsSynchronous() => UniTask.ToCoroutine(async()=>
+        {
+            var service=await ImageBackupService.CreateAsync(Config());
+            try {
+                var first=service.ProcessAsync();var second=service.ProcessAsync();
+                Exception firstError=null,secondError=null;
+                try{await first;}catch(Exception error){firstError=error;}
+                try{await second;}catch(Exception error){secondError=error;}
+                Assert.IsNull(firstError,"The first admitted processing pass must finish successfully.");
+                Assert.IsInstanceOf<InvalidOperationException>(secondError,"Concurrent entry must be rejected before an asynchronous boundary.");
+                await service.ProcessAsync();
+            } finally {await service.ShutdownAsync();}
+        });
+        [UnityTest] public IEnumerator WatchStartupFailureReleasesLoopOwnership() => UniTask.ToCoroutine(async()=>
+        {
+            string source=Path.Combine(root,"watched");Directory.CreateDirectory(source);
+            var service=await ImageBackupService.CreateAsync(Config());var library=await ImageLibraryIndex.OpenAsync(Path.Combine(root,"watch-startup.sqlite"));
+            try {
+                var automatic=await AutomaticImageBackup.CreateAsync(service,library);
+                await automatic.ConfigureAsync(new AutomaticBackupPolicy {enabled=true,source=source,sourceKind=BackupSourceKind.Directory,includeExisting=true,wifiOnly=false});
+                Directory.Delete(source);
+                Exception observed=null;try{await automatic.RunAsync(default);}catch(Exception error){observed=error;}
+                Assert.IsNotNull(observed);
+                Directory.CreateDirectory(source);
+                await automatic.ConfigureAsync(new AutomaticBackupPolicy {enabled=false});
+            } finally {await library.ShutdownAsync();await service.ShutdownAsync();}
+        });
         [UnityTest] public IEnumerator ThumbnailCoalescingIndependentCancellationAndShutdownLeases() => UniTask.ToCoroutine(async()=>
         {
             int loads=0;var gate=new UniTaskCompletionSource();

@@ -57,7 +57,12 @@ class Store:
             cleanup_error TEXT,
             PRIMARY KEY(account,id))''')
         self.db.execute('CREATE INDEX IF NOT EXISTS uploads_expiry ON uploads(completed,cleanup_state,last_activity)')
-        self.db.execute('CREATE TABLE IF NOT EXISTS incoming(account TEXT NOT NULL, upload_id TEXT NOT NULL, filename TEXT PRIMARY KEY)')
+        self.db.execute('''CREATE TABLE IF NOT EXISTS incoming(
+            account TEXT NOT NULL, upload_id TEXT NOT NULL, filename TEXT PRIMARY KEY,
+            created_at REAL NOT NULL, cleanup_state INTEGER NOT NULL DEFAULT 0 CHECK(cleanup_state BETWEEN 0 AND 2),
+            cleanup_error TEXT)''')
+        self.db.execute('CREATE INDEX IF NOT EXISTS incoming_upload ON incoming(account,upload_id)')
+        self.db.execute('CREATE INDEX IF NOT EXISTS incoming_cleanup ON incoming(cleanup_state,created_at,filename)')
         self.db.commit()
 
     def upload_lock(self, account, key):
@@ -110,40 +115,65 @@ class Store:
             else:
                 del self.active_uploads[(account, key)]
 
+    def remove_incoming(self, account, filename):
+        # This record owns its file even after cancellation removes the upload.
+        # A failed deletion remains observable and needs an explicit retry.
+        with self.lock, self.db:
+            self.db.execute('UPDATE incoming SET cleanup_state=1,cleanup_error=NULL WHERE filename=?', (filename,))
+        try:
+            file = self.directory(account) / filename
+            size = file.stat().st_size if file.exists() else 0
+            file.unlink(missing_ok=True)
+            sync_directory(self.directory(account))
+            with self.lock, self.db:
+                self.db.execute('DELETE FROM incoming WHERE filename=?', (filename,))
+            return size
+        except Exception as primary:
+            try:
+                with self.lock, self.db:
+                    self.db.execute('UPDATE incoming SET cleanup_state=2,cleanup_error=? WHERE filename=?', (str(primary), filename))
+            except Exception as secondary:
+                print('Recording incoming cleanup failure also failed: ' + repr(secondary), file=sys.stderr)
+            raise
+
     def cleanup_expired(self, ttl_seconds, maximum=200, retry_failed=False):
         if ttl_seconds <= 0 or not 1 <= maximum <= 200:
             raise ValueError('Positive TTL and 1-200 cleanup page size required')
         cutoff = time.time() - ttl_seconds
+        deleted = freed = skipped = 0
+        with self.lock:
+            incoming = self.db.execute('SELECT account,upload_id,filename FROM incoming WHERE '
+                'cleanup_state=1 OR (cleanup_state=0 AND created_at<?) OR (cleanup_state=2 AND ?) '
+                'ORDER BY created_at,filename LIMIT ?', (cutoff, retry_failed, maximum)).fetchall()
+        for item in incoming:
+            account, key = item['account'], item['upload_id']
+            with self.upload_lock(account, key):
+                with self.lock:
+                    current = self.db.execute('SELECT created_at,cleanup_state FROM incoming WHERE filename=?', (item['filename'],)).fetchone()
+                    if (not current or self.active_uploads.get((account, key)) or
+                        (current['cleanup_state'] == 2 and not retry_failed) or
+                        (current['cleanup_state'] == 0 and current['created_at'] >= cutoff)):
+                        skipped += 1
+                        continue
+                freed += self.remove_incoming(account, item['filename'])
+        # Count both kinds of persisted cleanup work against the same page budget.
+        remaining = maximum - len(incoming)
         with self.lock:
             candidates = self.db.execute('SELECT account,id FROM uploads WHERE completed=0 AND '
                 '(cleanup_state=1 OR (cleanup_state=0 AND last_activity<?) OR (cleanup_state=3 AND ?)) '
-                'ORDER BY last_activity,account,id LIMIT ?', (cutoff, retry_failed, maximum)).fetchall()
-        deleted = freed = skipped = 0
+                'ORDER BY last_activity,account,id LIMIT ?', (cutoff, retry_failed, remaining)).fetchall()
         for candidate in candidates:
             account, key = candidate['account'], candidate['id']
             with self.upload_lock(account, key):
                 with self.lock, self.db:
                     row = self.get(account, key)
-                    if not row or row['completed'] or self.active_uploads.get((account, key)) or (row['cleanup_state'] == 0 and row['last_activity'] >= cutoff):
+                    if (not row or row['completed'] or self.active_uploads.get((account, key)) or
+                        row['cleanup_state'] == 2 or (row['cleanup_state'] == 3 and not retry_failed) or
+                        (row['cleanup_state'] == 0 and row['last_activity'] >= cutoff)):
                         skipped += 1
                         continue
                     self.db.execute('UPDATE uploads SET cleanup_state=1,cleanup_error=NULL WHERE account=? AND id=?', (account, key))
                 try:
-                    # Incoming records are written before files. Page abandoned
-                    # transfers too; a crash resumes this same durable claim.
-                    while True:
-                        with self.lock:
-                            incoming = self.db.execute('SELECT filename FROM incoming WHERE account=? AND upload_id=? LIMIT 32', (account, key)).fetchall()
-                        if not incoming:
-                            break
-                        for item in incoming:
-                            file = self.directory(account) / item['filename']
-                            if file.exists():
-                                size = file.stat().st_size
-                                file.unlink()
-                                freed += size
-                            with self.lock, self.db:
-                                self.db.execute('DELETE FROM incoming WHERE filename=?', (item['filename'],))
                     file = self.part(account, key)
                     if file.exists():
                         size = file.stat().st_size
@@ -208,7 +238,7 @@ def handler_for(store):
         def do_DELETE(self):
             self.route('DELETE')
 
-        def background_upload(self, account, key):
+        def background_upload(self, account, key, epoch):
             # Stream without the store lock so Unity can register the next queued file
             # while this OS request is still sending. Recheck identity at commit.
             with store.lock:
@@ -217,6 +247,9 @@ def handler_for(store):
                     self.reply(404, {'error': 'Upload not found'})
                     return
                 row = dict(row)
+                if row['epoch'] != epoch or row['cleanup_state'] != 0:
+                    self.reply(409, {'error': 'Upload abandoned or identity changed during transfer'})
+                    return
                 if self.headers.get('X-Backup-Account-SHA256') != hashlib.sha256(account.encode()).hexdigest():
                     self.reply(403, {'error': 'Configured account mismatch'})
                     return
@@ -224,13 +257,12 @@ def handler_for(store):
                 if length != row['size']:
                     raise ValueError('File size mismatch')
                 directory = store.directory(account)
-            digest = hashlib.sha256()
-            temporary = None
-            try:
                 filename = secrets.token_hex(16) + '.incoming'
-                temporary = directory / filename
-                with store.lock, store.db:
-                    store.db.execute('INSERT INTO incoming VALUES(?,?,?)', (account, key, filename))
+                with store.db:
+                    store.db.execute('INSERT INTO incoming(account,upload_id,filename,created_at) VALUES(?,?,?,?)', (account, key, filename, time.time()))
+            digest = hashlib.sha256()
+            temporary = directory / filename
+            try:
                 with temporary.open('xb') as output:
                     remaining = length
                     while remaining:
@@ -261,9 +293,7 @@ def handler_for(store):
                 if temporary is not None:
                     primary = sys.exc_info()[1]
                     try:
-                        temporary.unlink(missing_ok=True)
-                        with store.lock, store.db:
-                            store.db.execute('DELETE FROM incoming WHERE filename=?', (temporary.name,))
+                        store.remove_incoming(account, temporary.name)
                     except Exception as cleanup:
                         if primary is None:
                             raise
@@ -296,14 +326,18 @@ def handler_for(store):
             parsed = urlsplit(self.path)
             parts = parsed.path.strip('/').split('/')
             activity_key = None
+            epoch = None
             try:
                 if method in ('PUT', 'POST', 'DELETE') and len(parts) >= 3 and parts[:2] == ['v1', 'uploads'] and HEX.fullmatch(parts[2]):
-                    if not store.begin_activity(account, parts[2]):
-                        self.reply(410, {'error': 'Upload session expired; explicitly register this identity again to resume'})
-                        return
-                    activity_key = parts[2]
+                    with store.lock:
+                        if not store.begin_activity(account, parts[2]):
+                            self.reply(410, {'error': 'Upload session expired; explicitly register this identity again to resume'})
+                            return
+                        activity_key = parts[2]
+                        admitted = store.get(account, activity_key)
+                        epoch = admitted['epoch'] if admitted else None
                 if method == 'PUT' and len(parts) == 4 and parts[:2] == ['v1', 'uploads'] and parts[3] == 'background' and HEX.fullmatch(parts[2]):
-                    self.background_upload(account, parts[2])
+                    self.background_upload(account, parts[2], epoch)
                     return
                 if method == 'GET' and len(parts) == 4 and parts[:2] == ['v1', 'backups'] and parts[3] == 'content' and HEX.fullmatch(parts[2]):
                     self.download(account, parts[2])
@@ -365,6 +399,9 @@ def handler_for(store):
                         if row['cleanup_state'] != 0:
                             self.reply(410, {'error': 'Upload session expired'})
                             return
+                        if activity_key is not None and row['epoch'] != epoch:
+                            self.reply(409, {'error': 'Upload abandoned or identity changed during transfer'})
+                            return
                         part = store.part(account, key)
                         if method == 'GET' and len(parts) == 3:
                             self.reply(200, store.describe(row))
@@ -415,7 +452,9 @@ def handler_for(store):
                                 self.reply(409, {'error': 'Committed backups cannot be canceled'})
                                 return
                             part.unlink(missing_ok=True)
+                            sync_directory(store.directory(account))
                             with store.lock, store.db:
+                                store.db.execute('UPDATE incoming SET cleanup_state=1 WHERE account=? AND upload_id=? AND cleanup_state=0', (account, key))
                                 store.db.execute('DELETE FROM uploads WHERE account=? AND id=?', (account, key))
                             self.reply(200, {'canceled': True})
                         else:

@@ -376,3 +376,5 @@ SqliteBatch 在受理前固定 SQL、参数和行数条件。SqliteBatchResult �
 仓库新增 `.github/workflows/native-storage.yml`：PR/主分支/手工触发四目标原生构建；macOS 与 Windows 宿主执行原生契约；macOS 执行两库 schema 和真实进程中断用例；归档二进制、dSYM/PDB、来源清单及 CTest 记录。Android/iOS 构建不标为设备运行通过。配置已交付，远端运行及 Windows/MSVC 结果仍待首轮 CI 取得；Unity 许可、设备农场、项目遥测和运营告警尚未配置。
 
 S4 仍未完成商业验收。不能用上述自动化配置代替 Windows 实际运行、移动系统行为、最低设备帧预算及24小时稳定性证据。
+
+后续 R1–R12 修复继续保持职责边界：通用核心源码和 ABI3 未变，任务引用索引、批次来源更新、分页缺失成员核对及资源释放时的元数据清理由共享业务仓库实现。已补真实引擎的规模基准和中断回归；记录见 [后续审查与修复](../../Docs/GallerySqliteFollowupAudit.md#修复结果2026-10-01)。四平台业务库已同步重建，商业验收仍按上述未完成项推进。

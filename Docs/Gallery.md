@@ -234,6 +234,10 @@ await automatic.ConfigureAsync(new AutomaticBackupPolicy {
 await automatic.RunAsync(applicationToken);
 ```
 
+自动循环每轮先刷新并核对来源 / 授权范围，再接受和传输图片，已有排队任务同样遵守此顺序。日志过期后的完整核对会分批撤下已移出的待准备来源，并暂停关联任务，全部核对结束后才启用范围；扫描期间新发现的版本不会被当作历史基线排除。照片重新加入范围时会同步任务关联，但不会自动恢复已暂停任务。
+
+`ProcessAsync` 在首次异步等待前取得执行权，同一服务的重叠调用明确失败；失败调用不改变已运行传输的状态或取消资源。`RunAsync` 的监听创建和使用共用收尾，创建失败后可由调用方修正来源并重新配置 / 启动。
+
 Wi-Fi策略需要可验证的提供者；桌面可传自己的 `Func<bool>`。原生与自动备份网络策略必须一致。自动循环消费图库变化并按配置周期完整核对，最小周期30秒。目录需要递归时明确设置 `recursive`。
 
 首次不包含历史时，基线按页保存实际看到的来源版本，再短事务激活；中断未激活集合无排除效力。扫描期间新变化继续按持久日志消费。已发现候选按页判重，不逐张重复打开数据库或查询服务器能力。单张准备失败单独保存，可通过 `GetPreparationFailuresAsync` 分页查看并显式 `RetryPreparationFailuresAsync`；空间不足显示 `IsWaitingForCapacity`，候选保留。
@@ -253,6 +257,8 @@ var actual = await maintenance.RunAsync(policy, token);
 
 清理失败持久保存，不自动重试；调用 `RetryCleanupAsync` 或 RetryCleanup 批量操作。未记录失败的中断清理意图可以继续。可显式执行非阻塞 checkpoint。回执、排除基线、取消处置和操作ID等必要事实保留，元数据磁盘不承诺永远恒定。
 
+无任务引用的文件元数据随物理文件清理完成一起删除；历史任务仍引用的记录随历史清理删除。扫描历史先定位废弃代次，再按稳定键分批删除其明细，不遍历有效基线。
+
 ## 本机参考服务与构建
 
 ```sh
@@ -265,6 +271,8 @@ python3 Tools~/BackupServer/server.py serve --root /absolute/private/backup --up
 `init` 创建私有 credentials.json，仅在运行时提供账号和令牌，不提交Git。开发HTTP需要 `AllowDevelopmentHttp=true` 且地址为本机或明确局域网IP；设备访问电脑不能使用设备自己的127.0.0.1。正式部署使用HTTPS与项目认证。
 
 TTL仅适用于未完成上传。上传、校验或提交中的会话不能被回收；先事务认领，禁止继续使用，再删除分片并提交完成。中断恢复同一清理意图，失败需要 `--retry-failed-cleanup` 显式处理。旧会话返回410，重新登记是显式操作，幂等身份保持；已完成副本和共享blob不受TTL影响。此服务为单进程本机参考实现，生产配额、认证、部署和灾备由项目配置。
+
+前台分片与后台整文件请求都固定入场时的会话代次，取消后重建的会话拒绝旧请求写入。后台临时文件有独立的持久清理记录，取消会话不会删除这份归属；取消后进程中断，重启维护仍能回收临时文件。临时文件和会话共用每轮维护数量预算，已完成备份的内容文件不参与临时清理。
 
 `Runtime/MediaBackup/Native~/build/build.py` 依赖对应目标的已验证 SQLite 构建；`install.py` 校验来源及依赖后安装。二进制位于 `Runtime/MediaBackup/Plugins/{macOS,Windows/x86_64,Android/arm64-v8a,iOS}`。构建处理器检查来源哈希、核心版本，自动复制iOS头文件并配置链接、框架和Android keep规则，无需另建原生App。
 

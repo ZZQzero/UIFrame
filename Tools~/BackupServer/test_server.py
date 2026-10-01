@@ -4,6 +4,11 @@ import json
 import tempfile
 import threading
 import unittest
+import socket
+import subprocess
+import sys
+import time
+from pathlib import Path
 from http.server import ThreadingHTTPServer
 from urllib.request import Request, urlopen
 from urllib.error import HTTPError
@@ -75,7 +80,7 @@ class BackupProtocolTests(unittest.TestCase):
         incoming.write_bytes(b'1234')
         with self.store.lock, self.store.db:
             self.store.db.execute('UPDATE uploads SET cleanup_state=1')
-            self.store.db.execute('INSERT INTO incoming VALUES(?,?,?)', ('alice', key, incoming.name))
+            self.store.db.execute('INSERT INTO incoming(account,upload_id,filename,created_at) VALUES(?,?,?,0)', ('alice', key, incoming.name))
         self.assertFalse(self.store.begin_activity('alice', key))
         self.assertEqual(4, self.store.cleanup_expired(1)['freedBytes'])
         self.assertFalse(incoming.exists())
@@ -85,6 +90,123 @@ class BackupProtocolTests(unittest.TestCase):
         self.assertEqual('alice', response['capabilities']['account'])
         self.assertEqual(1, response['capabilities']['protocolVersion'])
         self.assertGreater(response['capabilities']['chunkBytes'], 0)
+
+    def test_foreground_request_cannot_cross_cancellation_and_recreation(self):
+        key, body, _ = self.create(b'abcdef')
+        path = '/v1/uploads/' + key
+        with socket.create_connection(('127.0.0.1', self.server.server_port)) as connection:
+            connection.settimeout(5)
+            connection.sendall((f'PUT {path}?offset=0 HTTP/1.1\r\nHost: localhost\r\n'
+                'Authorization: Bearer test-alice\r\nContent-Length: 6\r\n\r\na').encode())
+            deadline = time.monotonic() + 3
+            while True:
+                with self.store.lock:
+                    if self.store.active_uploads.get(('alice', key)):
+                        break
+                self.assertLess(time.monotonic(), deadline)
+                time.sleep(0.01)
+            self.assertEqual(200, self.call('DELETE', path)[0])
+            self.assertEqual(0, self.call('POST', '/v1/uploads', body)[1]['offset'])
+            connection.sendall(b'bcdef')
+            response = bytearray()
+            while data := connection.recv(4096):
+                response.extend(data)
+            self.assertTrue(response.startswith(b'HTTP/1.1 409'), response)
+        self.assertEqual(0, self.call('GET', path)[1]['offset'])
+        self.assertEqual(200, self.call('PUT', path + '?offset=0', b'abcdef')[0])
+        self.assertTrue(self.call('POST', path + '/commit')[1]['completed'])
+
+    def test_canceled_background_file_is_reclaimed_after_process_termination(self):
+        worker = '''
+import sys
+from http.server import ThreadingHTTPServer
+from server import Store, handler_for
+store = Store(sys.argv[1], [{'account':'alice','token':'test-alice'}])
+server = ThreadingHTTPServer(('127.0.0.1', 0), handler_for(store))
+print(server.server_port, flush=True)
+server.serve_forever()
+'''
+        with tempfile.TemporaryDirectory() as directory:
+            process = subprocess.Popen([sys.executable, '-u', '-c', worker, directory],
+                cwd=Path(__file__).parent, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
+            original_url = self.url
+            try:
+                port = int(process.stdout.readline())
+                self.url = 'http://127.0.0.1:' + str(port)
+                data = b'x' * (1024 * 1024)
+                key, _, _ = self.create(data)
+                with socket.create_connection(('127.0.0.1', port)) as connection:
+                    connection.settimeout(5)
+                    connection.sendall((f'PUT /v1/uploads/{key}/background HTTP/1.1\r\nHost: localhost\r\n'
+                        'Authorization: Bearer test-alice\r\n'
+                        f'X-Backup-Account-SHA256: {hashlib.sha256(b"alice").hexdigest()}\r\n'
+                        f'Content-Length: {len(data)}\r\n\r\n').encode() + data[:262144])
+                    deadline = time.monotonic() + 3
+                    while not any(p.stat().st_size > 0 for p in Path(directory).rglob('*.incoming')):
+                        self.assertLess(time.monotonic(), deadline)
+                        time.sleep(0.01)
+                    self.assertEqual(200, self.call('DELETE', '/v1/uploads/' + key)[0])
+                    process.kill()
+                    process.wait(timeout=5)
+                reopened = Store(directory, [{'account': 'alice', 'token': 'test-alice'}])
+                try:
+                    self.assertEqual(0, reopened.db.execute('SELECT count(*) FROM uploads').fetchone()[0])
+                    self.assertEqual(1, reopened.db.execute('SELECT count(*) FROM incoming').fetchone()[0])
+                    self.assertGreater(reopened.cleanup_expired(86400)['freedBytes'], 0)
+                    self.assertEqual(0, reopened.db.execute('SELECT count(*) FROM incoming').fetchone()[0])
+                    self.assertEqual([], list(Path(directory).rglob('*.incoming')))
+                finally:
+                    reopened.close()
+            finally:
+                self.url = original_url
+                if process.poll() is None:
+                    process.kill()
+                    process.wait(timeout=5)
+                process.stdout.close()
+
+    def test_incoming_cleanup_failure_requires_explicit_retry(self):
+        from unittest.mock import patch
+        file = self.store.directory('alice') / 'orphan.incoming'
+        file.write_bytes(b'data')
+        with self.store.lock, self.store.db:
+            self.store.db.execute('INSERT INTO incoming(account,upload_id,filename,created_at) VALUES(?,?,?,0)',
+                ('alice', 'removed-upload', file.name))
+        with patch.object(Path, 'unlink', side_effect=OSError('injected deletion failure')):
+            with self.assertRaisesRegex(OSError, 'injected deletion failure'):
+                self.store.cleanup_expired(1)
+        self.assertEqual(2, self.store.db.execute('SELECT cleanup_state FROM incoming').fetchone()[0])
+        self.assertEqual(0, self.store.cleanup_expired(1)['freedBytes'])
+        self.assertTrue(file.exists())
+        self.assertEqual(4, self.store.cleanup_expired(1, retry_failed=True)['freedBytes'])
+        self.assertFalse(file.exists())
+
+    def test_cleanup_rechecks_failure_recorded_after_candidate_selection(self):
+        from contextlib import contextmanager
+        from unittest.mock import patch
+        key, _, _ = self.create(b'upload')
+        file = self.store.directory('alice') / 'late-failure.incoming'
+        file.write_bytes(b'data')
+        with self.store.lock, self.store.db:
+            self.store.db.execute('UPDATE uploads SET last_activity=0')
+            self.store.db.execute('INSERT INTO incoming(account,upload_id,filename,created_at) VALUES(?,?,?,0)',
+                ('alice', key, file.name))
+        original = self.store.upload_lock
+        @contextmanager
+        def concurrent_failure(account, identity):
+            with original(account, identity):
+                # Another owner finishes with a cleanup failure after selection,
+                # before this maintenance pass acquires the upload lock.
+                with self.store.lock, self.store.db:
+                    self.store.db.execute('UPDATE incoming SET cleanup_state=2')
+                    self.store.db.execute('UPDATE uploads SET cleanup_state=3')
+                yield
+        with patch.object(self.store, 'upload_lock', concurrent_failure):
+            self.assertEqual(0, self.store.cleanup_expired(1)['freedBytes'])
+        self.assertTrue(file.exists())
+        self.assertEqual(0, self.store.cleanup_expired(1)['expired'])
+        result = self.store.cleanup_expired(1, retry_failed=True)
+        self.assertEqual(4, result['freedBytes'])
+        self.assertEqual(1, result['expired'])
 
     def test_slow_commit_hash_does_not_block_other_uploads_or_allow_same_upload_deletion(self):
         from unittest.mock import patch

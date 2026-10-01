@@ -294,8 +294,11 @@ static NSMutableDictionary<NSString*,UFMLibraryObserver*> *UFMObservers;
 @implementation UFMLibraryObserver
 - (void)photoLibraryDidChange:(PHChange*)change {
     @synchronized(UFMIndexGate) {
-        _revision++;
         PHFetchResultChangeDetails *details=_fetch?[change changeDetailsForFetchResult:_fetch]:nil;
+        // A valid result with no change details was unaffected by this notification.
+        // An unavailable result still requires reconciliation and access checking.
+        if(_fetch && !details)return;
+        _revision++;
         if([UFMAccess() isEqual:@"Limited"] && (!details || !details.hasIncrementalChanges || details.insertedIndexes.count || details.removedIndexes.count))_accessChanged=YES;
         if(!details || !details.hasIncrementalChanges || details.insertedIndexes.count+details.changedIndexes.count+details.removedIndexes.count+_pending.count>1024) {
             _reconcile=YES;[_pending removeAllObjects];

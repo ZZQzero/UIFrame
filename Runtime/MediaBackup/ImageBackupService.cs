@@ -233,11 +233,14 @@ namespace Game.Media.Backup
             Check(); if(running || pausing) throw new InvalidOperationException("A backup pass or pause is already active.");
             if(nativeEnabled && canTransfer!=null) throw new ArgumentException("A managed callback cannot enforce background network policy.");
             if(ids!=null && ids.Count>32) throw new ArgumentException("An explicit processing batch contains at most 32 tasks.");
-            token.ThrowIfCancellationRequested(); if((await GetSummaryAsync(token)).QueuePaused) return;
+            token.ThrowIfCancellationRequested();
             running=true; callbackFailure=null; capabilityFailure=null;
-            processing=CancellationTokenSource.CreateLinkedTokenSource(token,lifetime.Token); token=processing.Token;
+            CancellationTokenSource passCancellation=null;
             try
             {
+                passCancellation=CancellationTokenSource.CreateLinkedTokenSource(token,lifetime.Token);
+                processing=passCancellation;token=passCancellation.Token;
+                if((await GetSummaryAsync(token)).QueuePaused) return;
                 if(!CanTransfer(canTransfer)) return;
                 long upper=(await Db(Command.Info,token)).Single.Number("upper_sequence"),after=0,passTime=Now; int index=0;
                 for(;;)
@@ -322,7 +325,7 @@ namespace Game.Media.Backup
                 }
                 await CleanupFilesAsync(token);
             }
-            finally { processing.Dispose();processing=null;running=false;callbackFailure=null;capabilityFailure=null; }
+            finally { processing=null;running=false;callbackFailure=null;capabilityFailure=null;passCancellation?.Dispose(); }
         }
         async UniTask<UploadResponse> CreateSession(BackupTaskInfo record,CancellationToken token)
         {

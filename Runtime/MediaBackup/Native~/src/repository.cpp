@@ -151,7 +151,7 @@ struct Repository {
             a.count(3); auto batch=a.id(0),owner=a.id(1); auto now=a.number(2);
             commands.emplace_back("UPDATE preparations SET phase=1 WHERE id=? AND owner=? AND phase=0 AND expected_count=(SELECT count(*) FROM file_records WHERE preparation_id=preparations.id AND state=1) AND NOT EXISTS(SELECT 1 FROM file_records WHERE preparation_id=? AND state<>1)",std::vector<Value>{batch,owner,batch},1);
             commands.emplace_back("UPDATE tasks SET state=0,updated_utc=? WHERE batch_id=? AND state=9",std::vector<Value>{now,batch});
-            commands.emplace_back("UPDATE discoveries SET disposition=2,task_id=(SELECT id FROM tasks WHERE batch_id=? AND source_id=discoveries.source_id AND content_version=discoveries.content_version ORDER BY sequence LIMIT 1) WHERE disposition=0 AND EXISTS(SELECT 1 FROM tasks WHERE batch_id=? AND source_id=discoveries.source_id AND content_version=discoveries.content_version)",std::vector<Value>{batch,batch}); break;
+            commands.emplace_back("UPDATE discoveries SET disposition=2,task_id=(SELECT id FROM tasks WHERE batch_id=? AND source_id=discoveries.source_id AND content_version=discoveries.content_version ORDER BY sequence LIMIT 1) WHERE (source_id,content_version) IN(SELECT source_id,content_version FROM tasks WHERE batch_id=?) AND disposition=0",std::vector<Value>{batch,batch}); break;
         }
         case UFB_ABANDON: {
             a.count(4); auto batch=a.id(0),owner=a.id(1),error=a.text(3); auto now=a.number(2);
@@ -249,7 +249,11 @@ struct Repository {
                     }
                     std::filesystem::remove(exported);
                 }
-                return db.batch({{"UPDATE file_records SET state=3,cleanup_error=NULL,updated_utc=? WHERE id=? AND state=5",{now,id},1},{"SELECT 1 AS deleted,? AS freed_bytes",{bytes}}},capacity);
+                // Drop metadata when its final file owner is released. Accepted
+                // tasks retain their record until history pruning deletes them.
+                return db.batch({{"UPDATE file_records SET state=3,cleanup_error=NULL,updated_utc=? WHERE id=? AND state=5",{now,id},1},
+                    {"DELETE FROM file_records WHERE id=? AND NOT EXISTS(SELECT 1 FROM tasks WHERE file_id=file_records.id)",{id}},
+                    {"SELECT 1 AS deleted,? AS freed_bytes",{bytes}}},capacity);
             } catch(...) {
                 auto primary=std::current_exception();
                 try { std::rethrow_exception(primary); }
@@ -288,11 +292,11 @@ struct Repository {
         }
         case UFB_SCAN_PAGE: {
             auto scope=a.id(0),run=a.id(1); auto n=a.number(2,1,32); a.count(size_t(3+n*6));
-            commands.emplace_back("UPDATE scopes SET id=id WHERE id=? AND pending_scan_id=? AND EXISTS(SELECT 1 FROM scan_runs r WHERE r.id=pending_scan_id AND r.completed=0 AND r.scope_revision=scopes.scope_revision AND r.permission_generation=scopes.permission_generation)",std::vector<Value>{scope,run},1);
+            commands.emplace_back("UPDATE scopes SET id=id WHERE id=? AND pending_scan_id=? AND EXISTS(SELECT 1 FROM scan_runs r WHERE r.id=pending_scan_id AND r.completed=0 AND r.selection_cursor IS NULL AND r.scope_revision=scopes.scope_revision AND r.permission_generation=scopes.permission_generation)",std::vector<Value>{scope,run},1);
             for(int64_t i=0;i<n;++i) {
                 auto at=size_t(3+i*6); auto source=a.text(at),version=a.text(at+1),name=a.text(at+2,1024),mime=a.text(at+3,128),provider=a.text(at+4); auto bytes=a.number(at+5);
                 require(!source.empty() && !version.empty(),"Discovery requires source identity and content version");
-                commands.emplace_back("INSERT INTO scan_items(run_id,source_id,content_version) VALUES(?,?,?) ON CONFLICT DO NOTHING",std::vector<Value>{run,source,version});
+                commands.emplace_back("INSERT INTO scan_items(run_id,source_id,content_version,baseline_member) SELECT id,?,?,baseline FROM scan_runs WHERE id=? ON CONFLICT DO NOTHING",std::vector<Value>{source,version,run});
                 append_discovery(commands,scope,source,version,name,mime,provider,bytes);
             }
             break;
@@ -300,22 +304,41 @@ struct Repository {
         case UFB_ACTIVATE_SCAN: {
             a.count(9); auto scope=a.id(0),run=a.id(1),library=a.id(2); auto generation=a.number(3,1),revision=a.number(4,1),permission=a.number(5),start=a.number(6),through=a.number(7),retained=a.number(8);
             require(retained<=start && through>=start,"Library change log was truncated; reconciliation required",UF_CONDITION);
-            commands.emplace_back("UPDATE scan_runs SET completed=1 WHERE id=? AND scope_id=? AND completed=0 AND log_start=? AND scope_revision=? AND permission_generation=?",std::vector<Value>{run,scope,start,revision,permission},1);
-            commands.emplace_back("UPDATE scopes SET active_baseline_id=CASE WHEN (SELECT baseline FROM scan_runs WHERE id=?)=1 THEN ? ELSE active_baseline_id END,enabled=1,initialized=1,pending_scan_id=NULL WHERE id=? AND pending_scan_id=? AND library_id=? AND index_generation=? AND scope_revision=? AND permission_generation=? AND consumed_seq=?",std::vector<Value>{run,run,scope,run,library,generation,revision,permission,through},1); break;
+            // Reconcile a bounded page of prior discoveries against the final source
+            // membership, including changes consumed after enumeration. Persist the
+            // cursor with the pauses; only the final page enables the scope.
+            auto scans=decode(db.query({"SELECT coalesce(selection_cursor,''),coalesce(selection_version,'') FROM scan_runs WHERE id=? AND scope_id=? AND completed=0 AND log_start=? AND scope_revision=? AND permission_generation=?",{run,scope,start,revision,permission}})).back().rows;
+            require(scans.size()==1,"Scan is not pending reconciliation",UF_CONDITION);
+            auto source=scans[0][0].text,version=scans[0][1].text;
+            auto selected=decode(db.query({"SELECT d.source_id,d.content_version,EXISTS(SELECT 1 FROM scan_items i WHERE i.run_id=? AND i.source_id=d.source_id) FROM discoveries d WHERE d.scope_id=? AND (d.source_id,d.content_version)>(?,?) ORDER BY d.source_id,d.content_version LIMIT 32",{run,scope,source,version}})).back().rows;
+            commands.emplace_back("UPDATE scopes SET id=id WHERE id=? AND pending_scan_id=? AND library_id=? AND index_generation=? AND scope_revision=? AND permission_generation=? AND consumed_seq=?",std::vector<Value>{scope,run,library,generation,revision,permission,through},1);
+            for(auto &row:selected) {
+                source=row[0].text;version=row[1].text;
+                if(!row[2].integer)append_removed_source(commands,scope,source,&version);
+            }
+            bool pending=selected.size()==32;
+            commands.emplace_back("UPDATE scan_runs SET selection_cursor=?,selection_version=?,completed=? WHERE id=? AND completed=0",std::vector<Value>{source,version,int64_t(pending?0:1),run},1);
+            if(!pending)commands.emplace_back("UPDATE scopes SET active_baseline_id=CASE WHEN (SELECT baseline FROM scan_runs WHERE id=?)=1 THEN ? ELSE active_baseline_id END,enabled=1,initialized=1,pending_scan_id=NULL WHERE id=? AND pending_scan_id=?",std::vector<Value>{run,run,scope,run},1);
+            commands.emplace_back("SELECT ? AS pending",std::vector<Value>{int64_t(pending)});break;
         }
         case UFB_DISCOVER: {
             auto scope=a.id(0),library=a.id(1); auto generation=a.number(2,1),revision=a.number(3,1),permission=a.number(4),from=a.number(5),through=a.number(6),retained=a.number(7),n=a.number(8,0,32); a.count(size_t(9+n*8));
             require(retained<=from && through>=from,"Library cursor no longer continuous",UF_CONDITION);
-            commands.emplace_back("UPDATE scopes SET consumed_seq=? WHERE id=? AND library_id=? AND index_generation=? AND scope_revision=? AND permission_generation=? AND consumed_seq=?",std::vector<Value>{through,scope,library,generation,revision,permission,from},1);
+            commands.emplace_back("UPDATE scopes SET consumed_seq=? WHERE id=? AND library_id=? AND index_generation=? AND scope_revision=? AND permission_generation=? AND consumed_seq=? AND NOT EXISTS(SELECT 1 FROM scan_runs WHERE id=pending_scan_id AND selection_cursor IS NOT NULL)",std::vector<Value>{through,scope,library,generation,revision,permission,from},1);
             auto last=from;
             for(int64_t i=0;i<n;++i) {
                 require(last<through,"Change sequence exceeds declared page boundary");
                 auto at=size_t(9+i*8); auto sequence=a.number(at,last+1,through),kind=a.number(at+1,0,4); last=sequence;
                 auto source=a.text(at+2),version=a.text(at+3),name=a.text(at+4,1024),mime=a.text(at+5,128),provider=a.text(at+6); auto bytes=a.number(at+7);
-                if(kind<=2) append_discovery(commands,scope,source,version,name,mime,provider,bytes);
+                if(kind<=2) {
+                    append_discovery(commands,scope,source,version,name,mime,provider,bytes);
+                    // A change observed during initialization belongs to the current
+                    // membership, but is not an excluded historical baseline version.
+                    commands.emplace_back("INSERT INTO scan_items(run_id,source_id,content_version) SELECT pending_scan_id,?,? FROM scopes WHERE id=? AND pending_scan_id IS NOT NULL ON CONFLICT DO NOTHING",std::vector<Value>{source,version,scope});
+                }
                 else {
-                    commands.emplace_back("UPDATE discoveries SET disposition=6 WHERE scope_id=? AND source_id=? AND disposition=0",std::vector<Value>{scope,source});
-                    commands.emplace_back("UPDATE tasks SET desired_action=1,state=CASE WHEN state IN(0,5) THEN 4 ELSE state END WHERE id IN(SELECT task_id FROM discoveries WHERE scope_id=? AND source_id=?) AND state IN(0,1,2,5)",std::vector<Value>{scope,source});
+                    append_removed_source(commands,scope,source);
+                    commands.emplace_back("DELETE FROM scan_items WHERE run_id=(SELECT pending_scan_id FROM scopes WHERE id=?) AND source_id=?",std::vector<Value>{scope,source});
                 }
             }
             break;
@@ -487,14 +510,15 @@ struct Repository {
         }
         case UFB_PRUNE_SCANS: {
             a.count(1);auto remaining=a.number(0,1,200),removed=int64_t(0);
-            const char *pages[]={
-                "DELETE FROM scan_items WHERE (run_id,source_id,content_version) IN(SELECT i.run_id,i.source_id,i.content_version FROM scan_items i JOIN scan_runs r ON r.id=i.run_id WHERE r.id NOT IN(SELECT active_baseline_id FROM scopes WHERE active_baseline_id IS NOT NULL UNION ALL SELECT pending_scan_id FROM scopes WHERE pending_scan_id IS NOT NULL) ORDER BY i.run_id,i.source_id,i.content_version LIMIT ?)",
-                "DELETE FROM scan_runs WHERE id IN(SELECT r.id FROM scan_runs r WHERE NOT EXISTS(SELECT 1 FROM scan_items WHERE run_id=r.id) AND r.id NOT IN(SELECT active_baseline_id FROM scopes WHERE active_baseline_id IS NOT NULL UNION ALL SELECT pending_scan_id FROM scopes WHERE pending_scan_id IS NOT NULL) LIMIT ?)",
-                "DELETE FROM file_records WHERE id IN(SELECT id FROM file_records WHERE state=3 AND NOT EXISTS(SELECT 1 FROM tasks WHERE file_id=file_records.id) LIMIT ?)"};
-            for(auto sql:pages) {
-                if(!remaining)break;
-                auto result=decode(db.batch({{sql,{remaining}},{"SELECT changes() AS removed"}})).back();
-                auto count=result.rows[0][0].integer;remaining-=count;removed+=count;
+            auto runs=decode(db.query({"SELECT id FROM scan_runs WHERE id NOT IN(SELECT active_baseline_id FROM scopes WHERE active_baseline_id IS NOT NULL UNION ALL SELECT pending_scan_id FROM scopes WHERE pending_scan_id IS NOT NULL) ORDER BY id LIMIT 1"})).back().rows;
+            if(!runs.empty()) {
+                auto run=runs[0][0];
+                auto count=decode(db.batch({{"DELETE FROM scan_items WHERE (run_id,source_id,content_version) IN(SELECT run_id,source_id,content_version FROM scan_items WHERE run_id=? ORDER BY source_id,content_version LIMIT ?)",{run,remaining}},{"SELECT changes() AS removed"}})).back().rows[0][0].integer;
+                remaining-=count;removed+=count;
+                if(remaining) {
+                    count=decode(db.batch({{"DELETE FROM scan_runs WHERE id=? AND NOT EXISTS(SELECT 1 FROM scan_items WHERE run_id=?)",{run,run}},{"SELECT changes() AS removed"}})).back().rows[0][0].integer;
+                    remaining-=count;removed+=count;
+                }
             }
             return db.query({"SELECT ? AS removed",{removed}},capacity);
         }
@@ -541,6 +565,12 @@ struct Repository {
             commands.emplace_back("UPDATE discoveries SET disposition=5 WHERE task_id=? AND EXISTS(SELECT 1 FROM tasks WHERE id=? AND state=8)",std::vector<Value>{id,id});
         }
     }
+    static void append_removed_source(std::vector<Command> &commands,const std::string &scope,const std::string &source,const std::string *version=nullptr) {
+        std::string predicate="scope_id=? AND source_id=?";std::vector<Value> values{scope,source};
+        if(version) {predicate+=" AND content_version=?";values.emplace_back(*version);}
+        commands.emplace_back("UPDATE discoveries SET disposition=6 WHERE "+predicate+" AND disposition=0",values);
+        commands.emplace_back("UPDATE tasks SET desired_action=1,state=CASE WHEN state IN(0,5) THEN 4 ELSE state END WHERE id IN(SELECT task_id FROM discoveries WHERE "+predicate+") AND state IN(0,1,2,5)",values);
+    }
     static void append_discovery(std::vector<Command> &commands,const std::string &scope,const std::string &source,const std::string &version,const std::string &name,const std::string &mime,const std::string &provider,int64_t bytes) {
         require(!source.empty() && !version.empty(),"Discovery requires source identity and content version");
         commands.emplace_back(
@@ -550,9 +580,10 @@ struct Repository {
             "(SELECT id FROM tasks WHERE source_id=? AND content_version=? AND state<>9 ORDER BY sequence LIMIT 1),?,?,?,? "
             "WHERE NOT EXISTS(SELECT 1 FROM scan_items WHERE run_id IN(SELECT active_baseline_id FROM scopes WHERE id=? "
             "UNION ALL SELECT pending_scan_id FROM scopes WHERE id=? AND EXISTS(SELECT 1 FROM scan_runs WHERE id=pending_scan_id AND baseline=1)) "
-            "AND source_id=? AND content_version=?) "
+            "AND source_id=? AND content_version=? AND baseline_member=1) "
             "ON CONFLICT(scope_id,source_id,content_version) DO UPDATE SET name=excluded.name,mime=excluded.mime,"
             "provider_id=excluded.provider_id,byte_count=excluded.byte_count,"
+            "task_id=CASE WHEN discoveries.disposition=6 THEN excluded.task_id ELSE discoveries.task_id END,"
             "disposition=CASE WHEN discoveries.disposition=6 THEN excluded.disposition ELSE discoveries.disposition END",
             std::vector<Value>{scope,source,version,source,version,source,version,source,version,name,mime,provider,bytes,scope,scope,source,version});
     }

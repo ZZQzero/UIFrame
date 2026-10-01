@@ -169,7 +169,8 @@ namespace Game.Media.Backup
                     var latest=await library.GetPositionAsync(source,cancellationToken);
                     if(latest.LibraryId!=position.LibraryId || latest.IndexGeneration!=position.IndexGeneration || latest.ScopeRevision!=position.ScopeRevision || latest.PermissionGeneration!=position.PermissionGeneration)
                         throw new InvalidOperationException("Library scope changed during baseline reconciliation.");
-                    await service.Db(Command.ActivateScan,cancellationToken,scope,run,position.LibraryId,position.IndexGeneration,position.ScopeRevision,position.PermissionGeneration,start,through.Sequence,latest.RetainedAfter);
+                    while((await service.Db(Command.ActivateScan,cancellationToken,scope,run,position.LibraryId,position.IndexGeneration,position.ScopeRevision,position.PermissionGeneration,start,through.Sequence,latest.RetainedAfter)).Single.Flag("pending"))
+                        await UniTask.Yield(PlayerLoopTiming.Update,cancellationToken);
                 }
                 else await ConsumeChanges(source,scope,CopyPosition(position,state.Number("consumed_seq")),cancellationToken);
                 await service.SynchronizeNativeAsync();
@@ -235,18 +236,19 @@ namespace Game.Media.Backup
         public async UniTask RunAsync(CancellationToken cancellationToken)
         {
             MediaThread.Check();if(looping) throw new InvalidOperationException("Automatic backup loop already running.");Validate(policy);looping=true;
-            bool changed=true;long nextReconciliation=0;using var watch=policy.enabled?library.Watch(Scope,batch=>{if(batch.RequiresRefresh || batch.Items.Count!=0)changed=true;}):null;
+            bool changed=true;long nextReconciliation=0;IDisposable watch=null;var cleanup=new UIFrame.CleanupFailure();
             try
             {
+                watch=policy.enabled?library.Watch(Scope,batch=>{if(batch.RequiresRefresh || batch.Items.Count!=0)changed=true;}):null;
                 while(policy.enabled)
                 {
                     cancellationToken.ThrowIfCancellationRequested();
                     changed=false;
                     if(!policy.wifiOnly || wifiAvailable())
                     {
-                        await service.ProcessAsync(cancellationToken,service.UsesNativeBackgroundTransfer?null:policy.wifiOnly?wifiAvailable:null);
                         bool complete=System.Diagnostics.Stopwatch.GetTimestamp()>=nextReconciliation;
                         await ScanOnceAsync(cancellationToken,true,complete);
+                        await service.ProcessAsync(cancellationToken,service.UsesNativeBackgroundTransfer?null:policy.wifiOnly?wifiAvailable:null);
                         if(complete)nextReconciliation=System.Diagnostics.Stopwatch.GetTimestamp()+(long)policy.scanIntervalSeconds*System.Diagnostics.Stopwatch.Frequency;
                     }
                     long until=System.Diagnostics.Stopwatch.GetTimestamp()+(long)policy.scanIntervalSeconds*System.Diagnostics.Stopwatch.Frequency;
@@ -256,14 +258,16 @@ namespace Game.Media.Backup
                         if(failure!=null)
                         {
                             if(failure is GalleryException gallery && (gallery.Code=="PermissionDenied" || gallery.Code=="ScopeConfirmationRequired"))
-                                try{await SuspendScopeAsync(default);}catch(Exception cleanup){UnityEngine.Debug.LogException(cleanup);}
+                                try{await SuspendScopeAsync(default);}catch(Exception secondary){UnityEngine.Debug.LogException(secondary);}
                             System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(failure).Throw();
                         }
                         await UniTask.Delay(100,ignoreTimeScale:true,cancellationToken:cancellationToken);
                     } while(!changed && System.Diagnostics.Stopwatch.GetTimestamp()<until && (nextReconciliation==0 || System.Diagnostics.Stopwatch.GetTimestamp()<nextReconciliation));
                 }
             }
-            finally { looping=false; }
+            catch(Exception error) { cleanup.Capture(error); }
+            finally { looping=false;if(watch!=null)cleanup.Run(watch.Dispose); }
+            cleanup.Throw();
         }
     }
 }

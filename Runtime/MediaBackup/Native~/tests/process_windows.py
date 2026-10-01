@@ -50,7 +50,7 @@ def decode(data):
 
 
 class Repository:
-    def __init__(self, core, library, root, create):
+    def __init__(self, core, library, root, create, identity=IDENTITY):
         self.core = C.CDLL(core, mode=C.RTLD_GLOBAL)
         self.native = C.CDLL(library)
         self.native.ufbackup_open.argtypes = [C.c_char_p] * 4 + [C.c_int, C.POINTER(C.c_uint64), C.POINTER(Status)]
@@ -58,7 +58,7 @@ class Repository:
         self.native.ufbackup_close.argtypes = [C.c_uint64, C.POINTER(Status)]
         self.handle = C.c_uint64()
         status = Status(size=C.sizeof(Status), abi=1)
-        assert self.native.ufbackup_open(str(root).encode(), IDENTITY.encode(), b'https://test.invalid', b'test',
+        assert self.native.ufbackup_open(str(root).encode(), identity.encode(), b'https://test.invalid', b'test',
                                         int(create), C.byref(self.handle), C.byref(status)) == 0, status.message
 
     def call(self, command, *args):

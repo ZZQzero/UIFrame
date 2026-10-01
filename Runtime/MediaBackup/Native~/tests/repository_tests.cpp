@@ -123,6 +123,9 @@ int main() {
             expect(background.call(UFB_TASK,{"a2"}).back().rows.empty(),"Unaccepted task leaked into task history");
             expect(background.call(UFB_CLEANUP_RUN,{"a2",int64_t(48),int64_t(49)}).back().rows[0][1].integer==3,"Partial export cleanup byte count");
             expect(!std::filesystem::exists(root/identity/"payloads/a2.payload.source"),"Partial export directory leaked");
+            auto fileSummary=background.call(UFB_FILE_SUMMARY).back();
+            for(auto &row:fileSummary.rows)
+                if(row[0].integer==3)expect(row[1].integer==0,"Abandoned file metadata outlived its last owner");
             auto preparation=background.call(UFB_PREPARATION,{"aa"});
             expect(preparation[0].rows[0][1].integer==1 && preparation.back().rows[0][0].text=="cc","Accepted preparation identity lost after task pruning");
             // Permission suspension and interrupted reset use bounded durable pages.

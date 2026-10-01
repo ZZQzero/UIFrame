@@ -46,6 +46,7 @@ CREATE TABLE scan_runs (
     scope_revision INTEGER NOT NULL,
     log_start INTEGER NOT NULL,
     selection_cursor TEXT,
+    selection_version TEXT,
     baseline INTEGER NOT NULL DEFAULT 0 CHECK(baseline IN(0,1)),
     completed INTEGER NOT NULL DEFAULT 0 CHECK(completed BETWEEN 0 AND 2)
 ) STRICT;
@@ -53,6 +54,7 @@ CREATE TABLE scan_items (
     run_id TEXT NOT NULL REFERENCES scan_runs(id),
     source_id TEXT NOT NULL,
     content_version TEXT NOT NULL,
+    baseline_member INTEGER NOT NULL DEFAULT 0 CHECK(baseline_member IN(0,1)),
     PRIMARY KEY(run_id,source_id,content_version)
 ) WITHOUT ROWID, STRICT;
 CREATE TABLE discoveries (
@@ -70,6 +72,7 @@ CREATE TABLE discoveries (
 ) WITHOUT ROWID, STRICT;
 CREATE INDEX discoveries_pending ON discoveries(scope_id,disposition,source_id,content_version);
 CREATE INDEX discoveries_task ON discoveries(task_id,scope_id);
+CREATE INDEX discoveries_source ON discoveries(source_id,content_version);
 CREATE TABLE backup_receipts (
     backup_id TEXT PRIMARY KEY,
     source_id TEXT NOT NULL,
@@ -143,6 +146,7 @@ CREATE INDEX tasks_schedule ON tasks(state,next_attempt_utc,sequence);
 CREATE INDEX tasks_state_page ON tasks(state,sequence);
 CREATE INDEX tasks_batch ON tasks(batch_id,sequence);
 CREATE INDEX tasks_source ON tasks(source_id,content_version);
+CREATE INDEX tasks_file ON tasks(file_id);
 CREATE INDEX tasks_history ON tasks(state,updated_utc,sequence);
 CREATE TABLE task_attempts (
     task_id TEXT NOT NULL REFERENCES tasks(id),
