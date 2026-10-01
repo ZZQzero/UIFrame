@@ -4,7 +4,8 @@
     "UIFrame.Runtime",
     "UniTask",
     "Unity.InputSystem",
-    "UIFrame.Editor"
+    "UIFrame.Editor",
+    "UIFrame.Sqlite"
   ],
   "optionalUnityReferences": [
     "TestAssemblies"

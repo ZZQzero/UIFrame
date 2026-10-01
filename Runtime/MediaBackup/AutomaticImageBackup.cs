@@ -142,7 +142,7 @@ namespace Game.Media.Backup
                 var position=await library.GetPositionAsync(source,cancellationToken);
                 var previous=(await service.Db(Command.ScopeState,cancellationToken,scope)).Rows;
                 if(previous.Count!=0 && previous[0].Text("library_id")==position.LibraryId && previous[0].Number("permission_generation")!=position.PermissionGeneration)
-                    await SuspendScopeAsync(cancellationToken);
+                    throw new GalleryException("ScopeConfirmationRequired","Photo access changed; confirm the current scope before continuing automatic backup.");
                 var state=(await service.Db(Command.Scope,cancellationToken,scope,source.Id,position.LibraryId,position.IndexGeneration,position.ScopeRevision,position.PermissionGeneration,policy.includeExisting)).Single;
                 bool reconcile=!state.Flag("enabled") || state.Number("consumed_seq")<position.RetainedAfter;
                 if(reconcile)
@@ -198,13 +198,23 @@ namespace Game.Media.Backup
             catch(Exception error)
             {
                 LastError=error.Message;
-                if(error is GalleryException gallery && gallery.Code=="PermissionDenied")
+                if(error is GalleryException gallery && (gallery.Code=="PermissionDenied" || gallery.Code=="ScopeConfirmationRequired"))
                 {
                     try {await SuspendScopeAsync(default);}catch(Exception secondary){UnityEngine.Debug.LogException(secondary);}
                 }
                 throw;
             }
             finally { running=false; }
+        }
+        /// <summary>Explicitly accept the current permission scope. Existing paused tasks require a separate resume decision.</summary>
+        public async UniTask ConfirmScopeAsync(CancellationToken token=default)
+        {
+            MediaThread.Check();Validate(policy);
+            if(running || looping)throw new InvalidOperationException("Stop automatic backup before confirming its scope.");
+            await library.RefreshAsync(Scope,token,true);
+            var position=await library.GetPositionAsync(Scope,token);
+            await SuspendScopeAsync(token);
+            await service.Db(Command.Scope,token,CatalogScope,Scope.Id,position.LibraryId,position.IndexGeneration,position.ScopeRevision,position.PermissionGeneration,policy.includeExisting);
         }
         async UniTask SuspendScopeAsync(CancellationToken token)
         {
@@ -245,7 +255,7 @@ namespace Game.Media.Backup
                         var failure=library.GetWatchFailure(Scope);
                         if(failure!=null)
                         {
-                            if(failure is GalleryException gallery && gallery.Code=="PermissionDenied")
+                            if(failure is GalleryException gallery && (gallery.Code=="PermissionDenied" || gallery.Code=="ScopeConfirmationRequired"))
                                 try{await SuspendScopeAsync(default);}catch(Exception cleanup){UnityEngine.Debug.LogException(cleanup);}
                             System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(failure).Throw();
                         }

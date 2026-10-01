@@ -9,10 +9,10 @@ namespace Game.Media
 {
     public readonly struct ImageThumbnailCacheStatistics
     {
-        public readonly long IdleBytes,InUseBytes,PendingDestroyBytes;
+        public readonly long IdleBytes,InUseBytes,PendingDestroyBytes,EstimatedInFlightDecodeBytes;
         public readonly int Entries,PendingKeys,Waiters,RequestMetadataBytes;
-        internal ImageThumbnailCacheStatistics(long idle,long used,long destroy,int entries)
-        {IdleBytes=idle;InUseBytes=used;PendingDestroyBytes=destroy;Entries=entries;PendingKeys=ImageWorkBudget.Keys;Waiters=ImageWorkBudget.Waiters;RequestMetadataBytes=ImageWorkBudget.MetadataBytes;}
+        internal ImageThumbnailCacheStatistics(long idle,long used,int entries)
+        {IdleBytes=idle;InUseBytes=used;PendingDestroyBytes=ImageTexture.PendingDestroyBytes;EstimatedInFlightDecodeBytes=GameImageReader.EstimatedInFlightDecodeBytes;Entries=entries;PendingKeys=ImageWorkBudget.Keys;Waiters=ImageWorkBudget.Waiters;RequestMetadataBytes=ImageWorkBudget.MetadataBytes;}
     }
     /// <summary>Application-owned memory cache. Each caller owns an independent texture lease.</summary>
     public sealed class ImageThumbnailCache
@@ -52,14 +52,14 @@ namespace Game.Media
         readonly LinkedList<Entry> idle=new LinkedList<Entry>();
         readonly long budget;
         readonly Func<ImageReference,ImagePreviewOptions,CancellationToken,UniTask<ImageTexture>> loader;
-        long idleBytes,inUseBytes,pendingDestroy;
-        int loading;
+        long idleBytes,inUseBytes;
+        int loading,pendingDisposals;
         bool closed;
         Exception shutdownFailure;
         public ImageThumbnailCache(long idleBudgetBytes=32L*1024*1024):this(idleBudgetBytes,GameImageReader.LoadAdmittedPreviewAsync){}
         internal ImageThumbnailCache(long bytes,Func<ImageReference,ImagePreviewOptions,CancellationToken,UniTask<ImageTexture>> loader)
         {MediaThread.Check();if(bytes<0)throw new ArgumentOutOfRangeException(nameof(bytes));budget=bytes;this.loader=loader??throw new ArgumentNullException(nameof(loader));}
-        public ImageThumbnailCacheStatistics Statistics {get{MediaThread.Check();return new ImageThumbnailCacheStatistics(idleBytes,inUseBytes,pendingDestroy,entries.Count);}}
+        public ImageThumbnailCacheStatistics Statistics {get{MediaThread.Check();return new ImageThumbnailCacheStatistics(idleBytes,inUseBytes,entries.Count);}}
         public UniTask<ImageTexture> AcquireAsync(ImageReference image,ImagePreviewOptions options=null,CancellationToken cancellationToken=default)
         {
             MediaThread.Check();if(closed)throw new ObjectDisposedException(nameof(ImageThumbnailCache));if(image==null)throw new ArgumentNullException(nameof(image));
@@ -129,10 +129,15 @@ namespace Game.Media
             Remove(entry);if(entry.Idle!=null){idle.Remove(entry.Idle);entry.Idle=null;idleBytes-=entry.Owner.ByteCount;}
             if(entry.Clients!=0)return;
             var owner=entry.Owner;entry.Owner=null;if(owner==null)return;
-            long bytes=owner.ByteCount;owner.Dispose();
-            if(Application.isPlaying){pendingDestroy+=bytes;ObserveDestroy(bytes).Forget(error=>Debug.LogException(error));}
+            DisposeOwner(owner);
         }
-        async UniTask ObserveDestroy(long bytes){await UniTask.NextFrame();pendingDestroy-=bytes;}
+        void DisposeOwner(ImageTexture owner)
+        {
+            if(owner==null)return;
+            try {owner.Dispose();}
+            finally {if(Application.isPlaying){pendingDisposals++;AwaitDisposal().Forget(Debug.LogException);}}
+        }
+        async UniTask AwaitDisposal(){await UniTask.NextFrame();pendingDisposals--;}
         void Trim(){while(idleBytes>budget || entries.Count>128 && idle.Count!=0)Evict(idle.First.Value);}
         void FinishWaiter(Waiter waiter,ImageTexture value,Exception error,bool cancel)
         {
@@ -160,7 +165,7 @@ namespace Game.Media
                 if(failure!=null || !entry.Reusable || closed || entry.Waiters.Count==0)
                 {
                     Remove(entry);
-                    try{loaded?.Dispose();}catch(Exception cleanup){if(failure==null)failure=cleanup;else Debug.LogException(cleanup);}
+                    try{DisposeOwner(loaded);}catch(Exception cleanup){if(failure==null)failure=cleanup;else Debug.LogException(cleanup);}
                     foreach(var waiter in entry.Waiters.ToArray())FinishWaiter(waiter,null,failure is OperationCanceledException && entry.Cancellation.IsCancellationRequested?null:failure,true);
                 }
                 else
@@ -204,7 +209,7 @@ namespace Game.Media
                 }
                 try{cleanup.Throw();}catch(Exception error){shutdownFailure=error;}
             }
-            while(loading!=0 || pendingDestroy!=0)await UniTask.Yield();
+            while(loading!=0 || pendingDisposals!=0)await UniTask.Yield();
             if(shutdownFailure!=null)System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(shutdownFailure).Throw();
         }
     }

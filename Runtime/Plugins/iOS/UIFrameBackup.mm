@@ -124,7 +124,7 @@ static void *UFBQueueKey=&UFBQueueKey;
 - (void)trim:(NSString*)identity {
     if([self hasTasks:identity])return;
     if(_failures[identity]){[self detach:identity];return;}
-    NSNumber *handle=_stores[identity];if(handle && UFBCommand(handle.unsignedLongLongValue,UFB_ATTEMPTS,@[@0,@2,@1]).count==0)[self detach:identity];
+    NSNumber *handle=_stores[identity];if(handle && UFBCommand(handle.unsignedLongLongValue,UFB_SCHEDULABLE,@[@0,@2,@1]).count==0)[self detach:identity];
 }
 - (void)fail:(NSString*)identity error:(NSException*)error {
     if(!_failures[identity])_failures[identity]=error;
@@ -201,7 +201,7 @@ static void *UFBQueueKey=&UFBQueueKey;
     if(_recovered!=2 || _orphans.count!=0)return;
     uint64_t handle=[self store:identity];NSDictionary *info=UFBCommand(handle,UFB_INFO,@[]).firstObject;long long cursor=0;
     for(;;) {
-        NSArray *page=UFBCommand(handle,UFB_ATTEMPTS,@[@(cursor),@2,@100]);
+        NSArray *page=UFBCommand(handle,UFB_SCHEDULABLE,@[@(cursor),@2,@100]);
         for(NSDictionary *row in page) {
             cursor=[row[@"sequence"] longLongValue];NSString *tag=UFBTag(identity,row[@"id"],row[@"current_generation"]);
             if(_tasks[tag])continue;
@@ -253,7 +253,10 @@ static void *UFBQueueKey=&UFBQueueKey;
     if([op isEqual:@"submit"]) {
         NSArray *rows=UFBCommand(handle,UFB_TASK,@[request[@"id"]]);UFBRequire(rows.count==1,@"Task not found");NSDictionary *row=rows[0];
         UFBRequire([row[@"current_generation"] isEqual:request[@"generation"]],@"Obsolete native submission generation");
-        NSString *tag=UFBTag(identity,row[@"id"],row[@"current_generation"]);[self storeToken:request[@"token"] tag:tag];[self schedule:identity];
+        NSString *tag=UFBTag(identity,row[@"id"],row[@"current_generation"]);[self storeToken:request[@"token"] tag:tag];
+        @try { if([row[@"submission_state"] integerValue]==0)UFBCommand(handle,UFB_HANDOFF,@[row[@"id"],row[@"current_generation"],tag]); }
+        @catch(NSException *error){@try{NSDictionary *current=UFBCommand(handle,UFB_ATTEMPT,@[row[@"id"],row[@"current_generation"]]).firstObject;if([current[@"submission_state"] integerValue]==0)[self removeToken:tag];}@catch(NSException *cleanup){NSLog(@"Credential cleanup failed: %@",cleanup.reason);}@throw;}
+        [self schedule:identity];
     } else if([op isEqual:@"wake"] || [op isEqual:@"recover"])[self schedule:identity];
     else if([op isEqual:@"sync"]) {
         NSString *prefix=[identity stringByAppendingString:@":"];

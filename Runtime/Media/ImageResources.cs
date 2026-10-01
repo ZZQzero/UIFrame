@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.IO;
 using System.Threading;
 using UnityEngine;
+using Cysharp.Threading.Tasks;
 
 namespace Game.Media
 {
@@ -106,10 +107,17 @@ namespace Game.Media
             MediaThread.Check();var old=resource;var callback=released;resource=null;released=null;if(old==null)return;
             var cleanup=new UIFrame.CleanupFailure();cleanup.Run(old.Release);if(callback!=null)cleanup.Run(callback);cleanup.Throw();
         }
+        internal static long PendingDestroyBytes { get; private set; }
+        static async Cysharp.Threading.Tasks.UniTask ObserveDestroy(long bytes)
+        {await Cysharp.Threading.Tasks.UniTask.NextFrame();PendingDestroyBytes-=bytes;}
         internal static void Destroy(UnityEngine.Object value)
         {
             if(value==null)return;
-            if(Application.isPlaying)UnityEngine.Object.Destroy(value);else UnityEngine.Object.DestroyImmediate(value);
+            if(Application.isPlaying) {
+                long bytes=value is Texture2D?UnityEngine.Profiling.Profiler.GetRuntimeMemorySizeLong(value):0;
+                UnityEngine.Object.Destroy(value);
+                if(bytes>0){PendingDestroyBytes+=bytes;ObserveDestroy(bytes).Forget(error=>Debug.LogException(error));}
+            } else UnityEngine.Object.DestroyImmediate(value);
         }
     }
 

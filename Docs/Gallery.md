@@ -269,3 +269,16 @@ TTL仅适用于未完成上传。上传、校验或提交中的会话不能被�
 `Runtime/MediaBackup/Native~/build/build.py` 依赖对应目标的已验证 SQLite 构建；`install.py` 校验来源及依赖后安装。二进制位于 `Runtime/MediaBackup/Plugins/{macOS,Windows/x86_64,Android/arm64-v8a,iOS}`。构建处理器检查来源哈希、核心版本，自动复制iOS头文件并配置链接、框架和Android keep规则，无需另建原生App。
 
 打开 `Tools/UIFrame/图片与备份` 使用索引分页、共享预览、任务分页 / 批量控制和清理预览；UGUI示例在 `Samples~/GalleryDemo`，提供任务翻页和预览后清理入口。设备能力与未完成验收见 [验证记录](GalleryValidation.md)，原生命令语义见 [RepositoryContract.md](../Runtime/MediaBackup/Native~/include/RepositoryContract.md)。
+
+## 2026-10-01 接收、索引与内存契约补充
+
+- 后台交接分为认领、凭据持久化后的 Handoff、系统任务绑定、Start。系统只查询已交接代次；未交接的终结代次仅用于释放资源。C# 关闭或失败不能代替平台宣告凭据已经释放。接收文件统一由共享仓库 Seal 刷盘，再由 Accept 发布任务。
+- `ReadChangesAsync` 在单个只读 SQL 快照中读取身份、权限代次、保留水位和最多200条变化；日志被截断或范围变代时返回 `RequiresRefresh`，不把空页误当已消费。
+- `ImageReference.FromFile` 是便宜的文件元数据引用；持久目录索引在此基础上保存内容哈希证明。首次扫描、重开、监听溢出、重新获得焦点或显式 `RequestRefresh` 后重新核对内容；连续监听下的例行完整枚举可复用已核对且 stat 未变的版本，已通知路径始终重新核对。哈希使用128 KiB缓冲和工作线程。索引查询返回的内容版本同时用于缩略图键、备份判重和准备前后校验；不要自行截断版本字符串。
+- Android 外部媒体通知先规范化为枚举使用的 external 图片身份；非图片/未知卷通知要求完整核对。扫描保存开始时的提供者版本/各卷 generation 与观察序号，完成前再次比较。iOS 扫描复用观察者持有的 PHFetchResult，比较观察修订；观察者重建必须完整核对，不把进程内序号当作可跨进程恢复的 PhotoKit token。扫描期间边界变化以 `LibraryChangedDuringScan` 失败，业务显式发起新扫描。
+- Limited 状态不能证明授权集合未变。iOS 集合成员变化、Android 无法区分的 Limited 通知，以及观察者重建/回到前台后的 Limited 范围均按“授权范围需要核对”处理：推进权限代次，旧游标失效。Limited 下移出记录为 `AccessChanged`，不推定原图已被删除。自动循环抛出 `ScopeConfirmationRequired` 并仅暂停该范围未完成任务。停止并等待循环后，业务向用户展示当前可见范围，再调用 `await automatic.ConfirmScopeAsync(token)`。此调用允许后续扫描，不恢复既有暂停任务；恢复任务仍由业务显式决定。不会自动弹权限窗口。
+- 每次开始/完成图库完整核对，都分批清理最多200条废弃或非当前完成扫描。当前完成代次和进行中的扫描始终保留；查询有 scope/phase 与 phase/id 索引。
+
+`ImageThumbnailCache.Statistics` 的 IdleBytes / InUseBytes 属于该缓存。PendingDestroyBytes 覆盖进程内本图片管线经 ImageTexture.Destroy 移交 Unity 的纹理，包括取消、失效和变换临时纹理；预计下一帧释放后减记。EstimatedInFlightDecodeBytes 是当前串行解码的保守工作量估算，不是原生堆实测值，排队请求不重复计入。平台解码器内部、驱动及 RenderTexture 池仍需 Unity Profiler / 系统工具测量；这些数字不能相加得出进程硬上限。Shutdown 只等待本缓存所属请求及销毁移交，不等待无关缓存的生命周期。
+
+`Samples~/GalleryDemo/GalleryVirtualListDemo.cs` 使用现有 LoopVerticalScrollRect，离屏释放租约，重绑隔离旧请求。示例每页最多200条元数据，支持下一页；业务可按产品需要组合分页导航，不能把这个示例视为已完成5000张连续滚动的设备验收。

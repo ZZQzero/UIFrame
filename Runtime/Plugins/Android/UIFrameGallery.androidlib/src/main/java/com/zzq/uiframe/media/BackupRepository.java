@@ -9,7 +9,7 @@ import java.util.*;
 /** Typed transport only. SQL and task state transitions are in the shared C++ repository. */
 final class BackupRepository implements AutoCloseable {
     static { System.loadLibrary("uiframe_sqlite"); System.loadLibrary("uiframe_backup"); }
-    static final int INFO=1, TASK=7, SUBMITTED=10, FINISH=12, RELEASE=13, START=22, ATTEMPTS=23,
+    static final int INFO=1, TASK=7, SUBMITTED=10, FINISH=12, RELEASE=13, START=22, ATTEMPTS=23,HANDOFF=74,SCHEDULABLE=75,
         CLEANUP_PAGE=18, CLEANUP_RUN=19, ATTEMPT=60, RESTART=63;
     public static final class Failure extends RuntimeException {
         private static final long serialVersionUID=1L;

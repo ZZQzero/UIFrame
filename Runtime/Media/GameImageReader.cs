@@ -9,6 +9,7 @@ namespace Game.Media
 {
     public static class GameImageReader
     {
+        internal static long EstimatedInFlightDecodeBytes {get;private set;}
         static readonly SemaphoreSlim processingGate = new SemaphoreSlim(1, 1);
 
         public static UniTask<ImageTexture> LoadThumbnailAsync(ImageReference image, int maxEdge = 256, CancellationToken cancellationToken = default)
@@ -44,6 +45,7 @@ namespace Game.Media
         {
             string nativeDirectory = null; string path = image.Id; Texture2D texture = null;
             bool failed = false;
+            EstimatedInFlightDecodeBytes=checked((long)Math.Min((long)edge*edge,pixels)*16);
             try
             {
                 if (NativeMedia.Available)
@@ -57,6 +59,7 @@ namespace Game.Media
                 if (!NativeMedia.Available && (long)header.Width * header.Height > 16 * 1024 * 1024)
                     throw new GalleryException("ImageTooLarge", "Desktop preview is limited to 16 megapixels; mobile uses native downsampling.");
                 ImageHeader.CheckTarget(header.Width, header.Height, edge, pixels);
+                EstimatedInFlightDecodeBytes=checked((long)header.Width*header.Height*8+(long)Math.Min((long)edge*edge,pixels)*12);
                 bool transform = header.Orientation > 1 || Math.Max(header.Width, header.Height) > edge;
                 var parameters = DownloadedTextureParams.Default;
                 parameters.mipmapChain = false; parameters.readable = readable && !transform;
@@ -82,6 +85,7 @@ namespace Game.Media
             catch { failed = true; throw; }
             finally
             {
+                EstimatedInFlightDecodeBytes=0;
                 ImageTexture.Destroy(texture);
                 if (nativeDirectory != null && failed) ImagePaths.CleanAfterFailure(nativeDirectory);
             }

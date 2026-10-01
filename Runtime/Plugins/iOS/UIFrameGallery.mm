@@ -287,13 +287,16 @@ static NSMutableDictionary<NSString*,NSMutableDictionary*> *UFMScans;
 @property NSString *album;
 @property PHFetchResult<PHAsset*> *fetch;
 @property NSMutableDictionary<NSString*,NSDictionary*> *pending;
-@property BOOL reconcile;
+@property BOOL reconcile,accessChanged;
+@property NSUInteger revision;
 @end
 static NSMutableDictionary<NSString*,UFMLibraryObserver*> *UFMObservers;
 @implementation UFMLibraryObserver
 - (void)photoLibraryDidChange:(PHChange*)change {
     @synchronized(UFMIndexGate) {
+        _revision++;
         PHFetchResultChangeDetails *details=_fetch?[change changeDetailsForFetchResult:_fetch]:nil;
+        if([UFMAccess() isEqual:@"Limited"] && (!details || !details.hasIncrementalChanges || details.insertedIndexes.count || details.removedIndexes.count))_accessChanged=YES;
         if(!details || !details.hasIncrementalChanges || details.insertedIndexes.count+details.changedIndexes.count+details.removedIndexes.count+_pending.count>1024) {
             _reconcile=YES;[_pending removeAllObjects];
             @try {_fetch=details?details.fetchResultAfterChanges:UFMFetch(_album);} @catch(NSException *error){_fetch=nil;}
@@ -330,7 +333,9 @@ static NSDictionary *UFMIndex(UFMJob *job) {
         }
         if([op isEqual:@"imagesOpen"]) {
             if(UFMScans.count>=16 || UFMScans[identity])return UFMError(@"ScanCapacity",@"Photo scan capacity or identity conflict");
-            UFMScans[identity]=[@{@"fetch":UFMFetch(job.request[@"album"]),@"offset":@0} mutableCopy];return @{@"status":@"ok"};
+            NSString *observerId=job.request[@"source"];UFMLibraryObserver *observer=observerId.length?UFMObservers[observerId]:nil;
+            if(observerId.length && !observer.fetch)return UFMError(@"InvalidObserver",@"Photo observer snapshot is unavailable");
+            UFMScans[identity]=[@{@"fetch":observer?observer.fetch:UFMFetch(job.request[@"album"]),@"offset":@0} mutableCopy];return @{@"status":@"ok"};
         }
         if([op isEqual:@"imagesNext"]) {
             NSMutableDictionary *scan=UFMScans[identity];if(!scan)return UFMError(@"InvalidScan",@"Photo scan no longer exists");
@@ -351,7 +356,8 @@ static NSDictionary *UFMIndex(UFMJob *job) {
             NSMutableArray *items=[NSMutableArray new];NSMutableArray *keys=[NSMutableArray new];
             for(NSString *key in observer.pending){[keys addObject:key];[items addObject:observer.pending[key]];if(items.count==32)break;}
             [observer.pending removeObjectsForKeys:keys];BOOL reconcile=observer.reconcile;observer.reconcile=NO;
-            return @{@"status":@"ok",@"items":items,@"requiresReconcile":@(reconcile),@"hasNext":@(observer.pending.count!=0)};
+            BOOL accessChanged=observer.accessChanged;observer.accessChanged=NO;
+            return @{@"status":@"ok",@"items":items,@"requiresReconcile":@(reconcile),@"accessChanged":@(accessChanged),@"boundary":[NSString stringWithFormat:@"%@:%lu",identity,(unsigned long)observer.revision],@"hasNext":@(observer.pending.count!=0)};
         }
         return UFMError(@"UnsupportedOperation",op);
     }

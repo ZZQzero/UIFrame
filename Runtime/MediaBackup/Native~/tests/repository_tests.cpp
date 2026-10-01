@@ -150,6 +150,33 @@ int main() {
             other.call(UFB_BIND_PREPARER,{"ff"},UF_STATE);
         }
         { Store reopened(root.u8string(),identity,false); expect(reopened.call(UFB_RECEIPTS,{int64_t(0),"",int64_t(10)}).back().rows.size()==1,"Receipt did not survive reopen"); }
+        for(int executor=1;executor<=2;++executor) {
+            Store store(root.u8string(),std::string(64,char('c'+executor)),true);
+            store.call(UFB_BIND_PREPARER,{"bb"});
+            store.call(UFB_PREPARE,{"aa","bb",int64_t(1),int64_t(1),"cc","file:native","v1","photo.jpg","image/jpeg",int64_t(4)});
+            store.call(UFB_SEAL,{"cc","bb",int64_t(4),hash,hash,"image/jpeg",int64_t(1024),int64_t(2)},UF_IO);
+            std::ofstream(root/store.id/"payloads/cc.payload")<<"data";
+            store.call(UFB_SEAL,{"cc","bb",int64_t(5),hash,hash,"image/jpeg",int64_t(1024),int64_t(2)},UF_IO);
+            store.call(UFB_SEAL,{"cc","bb",int64_t(4),hash,hash,"image/jpeg",int64_t(1024),int64_t(2)});
+            store.call(UFB_ACCEPT,{"aa","bb",int64_t(3)});
+            store.call(UFB_CLAIM,{"cc",int64_t(executor),int64_t(0),int64_t(4),"bb"});
+            expect(store.call(UFB_SCHEDULABLE,{int64_t(0),int64_t(executor),int64_t(100)}).back().rows.empty(),"Unhanded attempt reached scheduler");
+            store.call(UFB_START,{"cc",int64_t(1)},UF_CONDITION);
+            store.call(UFB_SUBMITTED,{"cc",int64_t(1),"system","credential"},UF_CONDITION);
+            store.call(UFB_HANDOFF,{"cc",int64_t(1),"credential"});
+            expect(store.call(UFB_SCHEDULABLE,{int64_t(0),int64_t(executor),int64_t(100)}).back().rows.size()==1,"Handed attempt not schedulable");
+            store.call(UFB_START,{"cc",int64_t(1)},UF_CONDITION);
+            store.call(UFB_SUBMITTED,{"cc",int64_t(1),"system","credential"});
+            store.call(UFB_START,{"cc",int64_t(1)});
+            store.call(UFB_RESTART,{"cc",int64_t(1)});
+            store.call(UFB_START,{"cc",int64_t(1)},UF_CONDITION);
+            store.call(UFB_SUBMITTED,{"cc",int64_t(1),"new-system","credential"});
+            store.call(UFB_START,{"cc",int64_t(1)});
+            store.call(UFB_RECOVER_ATTEMPT,{"cc",int64_t(1),int64_t(9)});
+            auto released=store.call(UFB_TASK,{"cc"}).back().rows[0];
+            expect(released[25].integer==1 && released[26].integer==0,"Recovery falsely released native credentials");
+            store.call(UFB_RELEASE,{"cc",int64_t(1),int64_t(1),int64_t(1)});
+        }
         uf_diagnostics diagnostics{}; diagnostics.size=sizeof(diagnostics); diagnostics.abi=UFSQLITE_ABI;
         expect(ufsqlite_get_diagnostics(&diagnostics)==0,"Diagnostics unavailable");
         expect(!diagnostics.databases && !diagnostics.operations && !diagnostics.reserved_bytes,"Native resources leaked");

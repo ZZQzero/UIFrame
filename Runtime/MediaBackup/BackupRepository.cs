@@ -33,7 +33,7 @@ namespace Game.Media.Backup
             Operation=40, SelectOperation=41, ApplyOperation=42, OperationStatus=43, OperationItems=44,
             HistoryPage=50, PruneTask=51, PruneOperation=52, Storage=53, Checkpoint=54,
             RecoverPreparations=55, FileSummary=56, RecoverAttempt=57, BindPreparer=58,
-            ScheduleRetry=59, Attempt=60, Ready=62, Preparation=64, ReservePayload=65, Operations=66, PruneChanges=67, PruneScans=68, SuspendScope=69, ResetScope=70, ResetScopePage=71, OperationCleanupPage=72, ScopeState=73
+            ScheduleRetry=59, Attempt=60, Ready=62, Preparation=64, ReservePayload=65, Operations=66, PruneChanges=67, PruneScans=68, SuspendScope=69, ResetScope=70, ResetScopePage=71, OperationCleanupPage=72, ScopeState=73, Handoff=74, Schedulable=75
         }
         const int Limit = 1024 * 1024;
         const string Library =

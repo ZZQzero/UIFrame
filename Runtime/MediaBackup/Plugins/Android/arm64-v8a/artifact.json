@@ -2,11 +2,11 @@
   "abi": 1,
   "sqlite_build_id": "cc2af4a34676c4a76a07358b30d6c4351d4b22a8bdba0f2c9c2e0954fdbbc305",
   "binary": "libuiframe_backup.so",
-  "sha256": "37777224ce29e5790b095f7987651f70c2c924639f37e40b334e85f8897ea778",
+  "sha256": "b571d39dc96e9b3249e3e9f6f9345e39e7f58b6a40bebfbd609e1316333cf932",
   "sources": [
     {
       "path": "CMakeLists.txt",
-      "sha256": "545444ac2e8a48c3e9764a89ddfb8c0e93fd21c083c242d2467b7049c7c6d57c"
+      "sha256": "d7bf260dca815290c4a99ad2b5cf6cec7c50f7664cb64842a8f6837eff8447c4"
     },
     {
       "path": "src/android.cpp",
@@ -14,11 +14,11 @@
     },
     {
       "path": "src/repository.cpp",
-      "sha256": "e7217f6ffdc9978b145d2d6e08a7d32239b0ea5be4fa8d535388d4097faa6baa"
+      "sha256": "5e15b5e749df8f979b76fc00843ed080e0c1c16563e467353a4643a2dcd39d4b"
     },
     {
       "path": "include/ufbackup.h",
-      "sha256": "9a4db8ffd30f095d402e67e59a8ebe7a91a82383f031a50b6c7f1458e577e8be"
+      "sha256": "ffc445a3f73ccca9650f8df9ea036747b40dc9d3f97078182879461e11740f5c"
     },
     {
       "path": "schema/catalog.sql",
@@ -26,7 +26,7 @@
     },
     {
       "path": "build/build.py",
-      "sha256": "eb016a74737f1315a3a34b4fe08cf8d1f0bf614b10e9eac9093f7961cb59725b"
+      "sha256": "3dd1f8806d5ad78fd25df73b081c5f545bc48498e22773c811558a0dccf7f39f"
     },
     {
       "path": "build/install.py",

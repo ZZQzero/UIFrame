@@ -102,13 +102,33 @@ def worker(core, library, root, stage):
     sys.stdin.read(1)
 
 
+def native_worker(core, library, root, executor, stage):
+    db = Repository(core, library, root, True)
+    db.call(58, 'aa')
+    db.call(2, 'bb', 'aa', 1, 1, 'cc', 'file:photo', 'v1', 'photo.jpg', 'image/jpeg', 4)
+    (Path(root) / IDENTITY / 'payloads/cc.payload').write_bytes(b'test')
+    db.call(3, 'cc', 'aa', 4, HASH, HASH, 'image/jpeg', 1024, 2)
+    db.call(4, 'bb', 'aa', 3)
+    db.call(9, 'cc', executor, 0, 4, 'aa')
+    if stage >= 1:
+        db.call(74, 'cc', 1, 'protected-reference')
+    if stage >= 2:
+        db.call(10, 'cc', 1, 'system-task', 'protected-reference')
+    print('ready', flush=True)
+    sys.stdin.read(1)
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--core', required=True)
     parser.add_argument('--repository', required=True)
     parser.add_argument('--worker', choices=STAGES)
     parser.add_argument('--root', type=Path)
+    parser.add_argument('--native-stage', type=int, choices=[0, 1, 2])
+    parser.add_argument('--executor', type=int, choices=[1, 2])
     args = parser.parse_args()
+    if args.native_stage is not None:
+        return native_worker(args.core, args.repository, args.root, args.executor, args.native_stage)
     if args.worker:
         return worker(args.core, args.repository, args.root, args.worker)
     with tempfile.TemporaryDirectory(prefix='ufbackup-process-') as directory:
@@ -140,7 +160,35 @@ def main():
                 assert db.call(19, item['id'], item['updated_utc'], 7)[-1][0]['deleted'] == 1
             db.close()
             print(stage + ': passed', flush=True)
-    print('Backup process windows: 7/7 passed')
+        for executor in (1, 2):
+            for stage in (0, 1, 2):
+                root = Path(directory) / ('handoff-%d-%d' % (executor, stage))
+                process = subprocess.Popen([sys.executable, __file__, '--core', args.core, '--repository', args.repository,
+                    '--native-stage', str(stage), '--executor', str(executor), '--root', str(root)],
+                    stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
+                try:
+                    assert process.stdout.readline().strip() == 'ready'
+                finally:
+                    if process.poll() is None: process.kill()
+                    process.wait(timeout=5)
+                db = Repository(args.core, args.repository, root, False)
+                row = db.call(7, 'cc')[-1][0]
+                assert row['submission_state'] == stage
+                scheduled = db.call(75, 0, executor, 100)[-1]
+                assert len(scheduled) == (0 if stage == 0 else 1)
+                if stage == 0:
+                    db.call(58, 'ee')
+                    db.call(57, 'cc', 1, 6)
+                    recovered = db.call(75, 0, executor, 100)[-1][0]
+                    assert recovered['execution_state'] == 4 and recovered['credential_released'] == 0
+                elif stage == 1:
+                    db.call(10, 'cc', 1, 'recovered-system-task', 'protected-reference')
+                    assert db.call(22, 'cc', 1)[-1]
+                else:
+                    assert db.call(22, 'cc', 1)[-1]
+                db.close()
+                print('native handoff executor=%d phase=%d: passed' % (executor, stage))
+    print('Backup process windows: 13/13 passed (7 lifecycle + 6 native handoff)')
 
 
 if __name__ == '__main__':

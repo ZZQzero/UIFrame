@@ -23,8 +23,8 @@ namespace Game.Media
     }
     [Serializable] internal sealed class MediaResponse
     {
-        public string status, code, error, access;
-        public bool more,hasNext,requiresReconcile;
+        public string status, code, error, access, boundary;
+        public bool more,hasNext,requiresReconcile,accessChanged;
         public MediaItem[] items;
     }
 

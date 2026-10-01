@@ -2,6 +2,7 @@
 import argparse
 import hashlib
 import json
+import os
 import platform
 import subprocess
 from pathlib import Path
@@ -35,8 +36,9 @@ def main():
     binary = args.core_build.resolve()/names[args.target]
     if hashlib.sha256(binary.read_bytes()).hexdigest() != core['artifacts'][binary.name]:
         raise ValueError('SQLite core artifact checksum mismatch')
-    library = binary if args.target != 'windows-x64' else args.core_build.resolve()/'libuiframe_sqlite.dll.a'
-    host_tests = args.target == 'macos'
+    windows_native = args.target == 'windows-x64' and platform.system() == 'Windows' and not args.llvm_mingw
+    library = binary if args.target != 'windows-x64' else args.core_build.resolve()/('uiframe_sqlite.lib' if windows_native else 'libuiframe_sqlite.dll.a')
+    host_tests = args.target == 'macos' or windows_native
     flags = ['-DCMAKE_BUILD_TYPE=RelWithDebInfo', '-DUFSQLITE_LIBRARY='+str(library),
              '-DUFBACKUP_TESTS='+('ON' if host_tests else 'OFF'), '-DUFBACKUP_SANITIZE='+('ON' if args.sanitize else 'OFF')]
     if args.target == 'macos':
@@ -46,14 +48,20 @@ def main():
     elif args.target == 'android':
         if not args.ndk: parser.error('Android requires --ndk')
         flags += ['-DCMAKE_TOOLCHAIN_FILE='+str(args.ndk/'build/cmake/android.toolchain.cmake'), '-DANDROID_ABI=arm64-v8a', '-DANDROID_PLATFORM=android-25', '-DANDROID_STL=c++_static']
+    elif windows_native:
+        flags += ['-G', 'Visual Studio 17 2022', '-A', 'x64']
     else:
         if not args.llvm_mingw: parser.error('Windows cross build requires --llvm-mingw')
         flags += ['-DCMAKE_TOOLCHAIN_FILE='+str(SQLITE/'build/windows-llvm-mingw.cmake'), '-DUFSQLITE_LLVM_MINGW='+str(args.llvm_mingw)]
     original = sources()
     subprocess.run([args.cmake, '-S', str(ROOT), '-B', str(args.output), *flags], check=True)
-    subprocess.run([args.cmake, '--build', str(args.output), '--parallel', '2'], check=True)
+    subprocess.run([args.cmake, '--build', str(args.output), '--config', 'RelWithDebInfo', '--parallel', '2'], check=True)
     if host_tests:
-        subprocess.run([str(Path(args.cmake).with_name('ctest')), '--test-dir', str(args.output), '--output-on-failure'], check=True)
+        environment=dict(os.environ)
+        if windows_native: environment['PATH']=str(args.core_build.resolve())+os.pathsep+environment['PATH']
+        subprocess.run([str(Path(args.cmake).with_name('ctest.exe' if windows_native else 'ctest')), '--test-dir', str(args.output), '-C', 'RelWithDebInfo', '--output-on-failure'], check=True,env=environment)
+    if args.target == 'macos':
+        subprocess.run(['xcrun','dsymutil',str(args.output/'libuiframe_backup.dylib')],check=True)
     if sources() != original: raise ValueError('Sources changed during build')
     artifacts = {p.name:hashlib.sha256(p.read_bytes()).hexdigest() for p in args.output.glob('*uiframe_backup*') if p.is_file()}
     build_id = hashlib.sha256(json.dumps(original,sort_keys=True).encode()).hexdigest()

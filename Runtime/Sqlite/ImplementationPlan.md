@@ -368,3 +368,11 @@ SqliteBatch 在受理前固定 SQL、参数和行数条件。SqliteBatchResult �
 - SQL / schema 变更同时提交查询计划、数据规模测试和错误恢复验证；低影响文档修改不新增运行时测试。
 - SQLite 或工具链升级先进入验证分支，重跑持久化 / ABI / 性能矩阵，再锁定新产物；不得自动跟随“最新版”发布。
 - 设计不等于商业认证。只有通过对应门槛的版本、平台和场景可标为已支持。
+
+## 14. 照片集成复审与自动化补充（2026-10-01）
+
+本轮照片修复使用现有 ABI3 的只读查询/事务能力：图库日志通过单 SQL 快照读取水位与页面，没有为业务增加可持有的长事务、第二套连接或备用后端。业务交接条件和文件可靠接收在共享 BackupRepository 实现，不改变通用 SQLite 职责。见 [复审记录](../../Docs/GallerySqlitePlanAudit.md)。
+
+仓库新增 `.github/workflows/native-storage.yml`：PR/主分支/手工触发四目标原生构建；macOS 与 Windows 宿主执行原生契约；macOS 执行两库 schema 和真实进程中断用例；归档二进制、dSYM/PDB、来源清单及 CTest 记录。Android/iOS 构建不标为设备运行通过。配置已交付，远端运行及 Windows/MSVC 结果仍待首轮 CI 取得；Unity 许可、设备农场、项目遥测和运营告警尚未配置。
+
+S4 仍未完成商业验收。不能用上述自动化配置代替 Windows 实际运行、移动系统行为、最低设备帧预算及24小时稳定性证据。

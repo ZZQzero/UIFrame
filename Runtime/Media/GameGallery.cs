@@ -116,12 +116,14 @@ namespace Game.Media
         /// <summary>Consumes at most 200 items per callback. Return false to stop; the visit returns false when stopped.</summary>
         public static async UniTask<bool> VisitImagesAsync(Func<IReadOnlyList<ImageReference>, UniTask<bool>> consume,
             string albumId = null, CancellationToken cancellationToken = default)
+            => await VisitObservedImagesAsync(consume,albumId,null,cancellationToken);
+        internal static async UniTask<bool> VisitObservedImagesAsync(Func<IReadOnlyList<ImageReference>,UniTask<bool>> consume,string albumId,string observerId,CancellationToken cancellationToken)
         {
             if (consume == null) throw new ArgumentNullException(nameof(consume));
             MediaThread.Check();string scan=Guid.NewGuid().ToString("N");Exception failure=null;
             try
             {
-                await NativeMedia.Request(new MediaRequest {op="imagesOpen",path=scan,album=albumId},cancellationToken);
+                await NativeMedia.Request(new MediaRequest {op="imagesOpen",path=scan,album=albumId,source=observerId},cancellationToken);
                 for(;;)
                 {
                     var page=await NativeMedia.Request(new MediaRequest {op="imagesNext",path=scan},cancellationToken);
@@ -138,7 +140,7 @@ namespace Game.Media
         }
         internal static async UniTask ValidateVersionAsync(ImageReference image,CancellationToken token)
         {
-            string version=image.Source=="file"?ImageReference.FromFile(image.Id).Version:
+            string version=image.Source=="file"?await UniTask.RunOnThreadPool(()=>FileImageVersion.Current(image,token)):
                 (await NativeMedia.Request(new MediaRequest {op="stat",source=image.Source,path=image.Id},token)).items[0].version;
             if(version!=image.Version)throw new GalleryException("SourceChanged","Image content changed after its metadata was read.");
         }

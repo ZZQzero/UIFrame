@@ -340,6 +340,46 @@ namespace UIFrame.Regression
             }
             finally{await service.ShutdownAsync();}
         });
+        [UnityTest] public IEnumerator EqualStatDirectoryWritesChangeIndexedVersionAndRejectStalePreparation() => UniTask.ToCoroutine(async()=>
+        {
+            string path=Path.Combine(root,"same.jpg");File.WriteAllText(path,"AAAA");
+            var stamp=new DateTime(2026,9,1,12,0,0,DateTimeKind.Utc);File.SetLastWriteTimeUtc(path,stamp);
+            var metadata=ImageReference.FromFile(path);var scope=new ImageLibraryScope(ImageLibrarySourceKind.Directory,root);
+            var library=await ImageLibraryIndex.OpenAsync(Path.Combine(root,"content.sqlite"));
+            try {
+                await library.RefreshAsync(scope);var before=await library.GetPositionAsync(scope);
+                var old=(await library.QueryAsync(scope)).Items.Single(i=>i.Id==path);
+                File.WriteAllText(path,"BBBB");File.SetLastWriteTimeUtc(path,stamp);
+                Assert.AreEqual(metadata.Version,ImageReference.FromFile(path).Version);
+                await UniTask.Delay(350,ignoreTimeScale:true);await library.RefreshAsync(scope);
+                var batch=await library.ReadChangesAsync(scope,before);
+                Assert.IsTrue(batch.Items.Any(c=>c.SourceIdentity=="file:"+path && c.Kind==ImageLibraryChangeKind.ContentChanged));
+                try {await GameGallery.ValidateVersionAsync(old,default);Assert.Fail("Stale content was accepted");}catch(GalleryException e){Assert.AreEqual("SourceChanged",e.Code);}
+            } finally {await library.ShutdownAsync();}
+        });
+        [UnityTest] public IEnumerator ChangeSnapshotRemainsContinuousDuringPruningAndScanHistoryIsBounded() => UniTask.ToCoroutine(async()=>
+        {
+            var repository=await Game.Media.Storage.LibraryRepository.OpenAsync(Path.Combine(root,"snapshot.sqlite"),default);
+            var scope=new ImageLibraryScope(ImageLibrarySourceKind.Directory,root);
+            try {
+                var state=await repository.Scope(scope,0,default);
+                for(int i=0;i<12;i++) {
+                    var start=await repository.Position();var run=await repository.Begin(state,start.sequence,default);
+                    await repository.Upsert(state,run,new[]{new ImageReference("file",imagePath,"photo.png","image/png",version:"v"+i)},default);
+                    await repository.Finish(state,run,start.sequence,default);
+                }
+                var scans=await repository.Query(new UIFrame.Sqlite.SqliteCommand("SELECT count(*) FROM scan_runs"),r=>r.GetInt64(0));Assert.AreEqual(1,scans[0]);
+                // Both reads can legally win. A snapshot must contain the rows or
+                // expose the new retained watermark; an empty, continuous page is forbidden.
+                var reading=repository.Changes(scope.Id,0,200,default);
+                var pruning=repository.PruneChanges(12,default);
+                var batch=await reading;await pruning;
+                Assert.IsTrue(batch.Items.Count==12 || batch.Position.RetainedAfter>=12);
+                var pruned=await repository.Changes(scope.Id,0,200,default);Assert.AreEqual(12,pruned.Position.RetainedAfter);
+                var changed=await repository.Scope(scope,0,default,true);Assert.AreEqual(state.Permission+1,changed.Permission);
+                Assert.IsTrue(changed.RequiresReconcile);
+            } finally {await repository.CloseAsync();}
+        });
         [UnityTest] public IEnumerator LibraryRefreshIsPagedAndVersionsRemainVisibleAcrossScopes() => UniTask.ToCoroutine(async()=>
         {
             var library=await ImageLibraryIndex.OpenAsync(Path.Combine(root,"library.sqlite"));
@@ -372,6 +412,24 @@ namespace UIFrame.Regression
                 await automatic.ScanOnceAsync();Assert.AreEqual(1,(await service.QueryTasksAsync()).Items.Count);
             }
             finally{await library.ShutdownAsync();await service.ShutdownAsync();}
+        });
+        [UnityTest] public IEnumerator PermissionRevisionRequiresExplicitConfirmationWithoutResumingOldTasks() => UniTask.ToCoroutine(async()=>
+        {
+            var service=await ImageBackupService.CreateAsync(Config());var library=await ImageLibraryIndex.OpenAsync(Path.Combine(root,"permissions.sqlite"));
+            try {
+                var automatic=await AutomaticImageBackup.CreateAsync(service,library);
+                await automatic.ConfigureAsync(new AutomaticBackupPolicy {enabled=true,source=root,sourceKind=BackupSourceKind.Directory,includeExisting=true,wifiOnly=false});
+                await automatic.ScanOnceAsync();var task=(await service.QueryTasksAsync()).Items.Single();
+                var field=typeof(ImageLibraryIndex).GetField("repository",System.Reflection.BindingFlags.Instance|System.Reflection.BindingFlags.NonPublic);
+                var repository=(Game.Media.Storage.LibraryRepository)field.GetValue(library);
+                await repository.Scope(new ImageLibraryScope(ImageLibrarySourceKind.Directory,root),0,default,true);
+                try {await automatic.ScanOnceAsync();Assert.Fail("Changed scope continued without confirmation");}
+                catch(GalleryException error){Assert.AreEqual("ScopeConfirmationRequired",error.Code);}
+                Assert.AreEqual(BackupState.Paused,(await service.GetTaskAsync(task.id)).state);
+                await automatic.ConfirmScopeAsync();await automatic.ScanOnceAsync();
+                Assert.AreEqual(BackupState.Paused,(await service.GetTaskAsync(task.id)).state);
+                Assert.AreEqual(1,(await service.QueryTasksAsync()).Items.Count);
+            } finally {await library.ShutdownAsync();await service.ShutdownAsync();}
         });
         [UnityTest] public IEnumerator ThumbnailCoalescingIndependentCancellationAndShutdownLeases() => UniTask.ToCoroutine(async()=>
         {

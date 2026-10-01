@@ -8,6 +8,14 @@
 #include <map>
 #include <memory>
 #include <mutex>
+#include <system_error>
+#ifdef _WIN32
+#include <windows.h>
+#else
+#include <fcntl.h>
+#include <unistd.h>
+#include <sys/stat.h>
+#endif
 
 namespace {
 using namespace ufsqlite;
@@ -59,6 +67,36 @@ const std::string ReceiptColumns="SELECT backup_id,source_id,content_version,low
 const std::string Unreleased="EXISTS(SELECT 1 FROM task_attempts a WHERE a.task_id=tasks.id AND (a.payload_released=0 OR a.credential_released=0))";
 const std::string CleanupEligible="NOT EXISTS(SELECT 1 FROM tasks t JOIN task_attempts a ON a.task_id=t.id WHERE t.file_id=file_records.id AND (a.payload_released=0 OR a.credential_released=0))";
 
+// Publish payload durability before committing the database fact. No database
+// transaction is held while waiting for filesystem I/O.
+void durable_payload(const std::filesystem::path &payload,uint64_t bytes) {
+#ifdef _WIN32
+    HANDLE file=CreateFileW(payload.c_str(),GENERIC_READ|GENERIC_WRITE,FILE_SHARE_READ,nullptr,OPEN_EXISTING,FILE_FLAG_OPEN_REPARSE_POINT,nullptr);
+    require(file!=INVALID_HANDLE_VALUE,"Cannot open prepared payload for durable publication",UF_IO);
+    BY_HANDLE_FILE_INFORMATION info{};
+    bool valid=GetFileInformationByHandle(file,&info) && !(info.dwFileAttributes&(FILE_ATTRIBUTE_DIRECTORY|FILE_ATTRIBUTE_REPARSE_POINT))
+        && ((uint64_t(info.nFileSizeHigh)<<32)|info.nFileSizeLow)==bytes;
+    bool flushed=valid && FlushFileBuffers(file); bool closed=CloseHandle(file);
+    require(valid && flushed && closed,"Prepared payload durability failed",UF_IO);
+#else
+    int file=::open(payload.c_str(),O_RDWR|O_NOFOLLOW|O_CLOEXEC);
+    require(file>=0,"Cannot open prepared payload for durable publication",UF_IO);
+    struct stat info{};bool valid=::fstat(file,&info)==0 && S_ISREG(info.st_mode) && uint64_t(info.st_size)==bytes;
+    bool flushed=valid && ::fsync(file)==0;
+#ifdef __APPLE__
+    if(flushed)flushed=::fcntl(file,F_FULLFSYNC)==0;
+#endif
+    bool closed=::close(file)==0;require(valid && flushed && closed,"Prepared payload durability failed",UF_IO);
+    // Persist the payload filename and the payload-directory entry in the store.
+    for(auto directory:{payload.parent_path(),payload.parent_path().parent_path()}) {
+        int fd=::open(directory.c_str(),O_RDONLY|O_DIRECTORY|O_CLOEXEC);
+        require(fd>=0,"Cannot open payload directory for durable publication",UF_IO);
+        bool synced=::fsync(fd)==0;bool released=::close(fd)==0;
+        require(synced && released,"Prepared payload directory durability failed",UF_IO);
+    }
+#endif
+}
+
 struct Repository {
     std::mutex gate;
     Client db;
@@ -105,7 +143,7 @@ struct Repository {
         case UFB_SEAL: {
             a.count(8); auto id=a.id(0),owner=a.id(1),key=a.id(4),mime=a.text(5,128); auto bytes=a.number(2),budget=a.number(6,1),now=a.number(7); auto hash=Value::blob(sha(a,3));
             auto payload=std::filesystem::u8path(path).parent_path()/"payloads"/(id+".payload");
-            require(std::filesystem::is_regular_file(payload) && !std::filesystem::is_symlink(payload) && std::filesystem::file_size(payload)==uint64_t(bytes),"Prepared payload is missing or size changed",UF_IO);
+            durable_payload(payload,uint64_t(bytes));
             commands.emplace_back("UPDATE file_records SET byte_count=?,sha256=?,state=1,updated_utc=? WHERE id=? AND state=0 AND EXISTS(SELECT 1 FROM preparations p WHERE p.id=preparation_id AND p.phase=0 AND p.owner=?) AND ? <= ? - (SELECT coalesce(sum(bytes),0) FROM file_counts WHERE state<>3) + byte_count",std::vector<Value>{bytes,hash,now,id,owner,bytes,budget},1);
             commands.emplace_back("UPDATE task_metadata SET idempotency_key=?,mime=? WHERE task_id=?",std::vector<Value>{key,mime,id},1); break;
         }
@@ -133,13 +171,18 @@ struct Repository {
             commands.emplace_back("INSERT INTO task_attempts(task_id,generation,session_id,idempotency_key,submission_state,execution_state,server_outcome,payload_released,credential_released,executor,wifi_only) SELECT t.id,t.current_generation,?,t.id||':'||t.current_generation,0,0,0,0,0,?,? FROM tasks t JOIN task_metadata m ON m.task_id=t.id WHERE t.id=?",std::vector<Value>{session,executor,wifi,id},1);
             commands.push_back(task(id)); break;
         }
+        case UFB_HANDOFF: {
+            a.count(3); auto id=a.id(0); auto generation=a.number(1,1); auto credential=a.text(2,16384);
+            require(!credential.empty(),"Native handoff requires a persisted credential");
+            commands.emplace_back("UPDATE task_attempts SET submission_state=1,credential_reference=? WHERE task_id=? AND generation=? AND executor IN(1,2) AND execution_state=0 AND payload_released=0 AND submission_state=0",std::vector<Value>{credential,id,generation},1); break;
+        }
         case UFB_SUBMITTED: {
             a.count(4); auto id=a.id(0); auto generation=a.number(1,1); auto system=a.text(2,256),credential=a.text(3,16384);
-            commands.emplace_back("UPDATE task_attempts SET submission_state=1,system_task_id=?,credential_reference=? WHERE task_id=? AND generation=? AND execution_state IN(0,1) AND payload_released=0 AND (submission_state=0 OR (system_task_id=? AND credential_reference=?))",std::vector<Value>{system,credential,id,generation,system,credential},1); break;
+            commands.emplace_back("UPDATE task_attempts SET submission_state=2,system_task_id=?,credential_reference=? WHERE task_id=? AND generation=? AND execution_state IN(0,1) AND payload_released=0 AND submission_state IN(1,2) AND credential_reference=? AND (submission_state=1 OR system_task_id=?)",std::vector<Value>{system,credential,id,generation,credential,system},1); break;
         }
         case UFB_START: {
             a.count(2); auto id=a.id(0); auto generation=a.number(1,1);
-            commands.emplace_back("UPDATE task_attempts SET task_id=task_id WHERE task_id=? AND generation=? AND execution_state=0 AND payload_released=0 AND EXISTS(SELECT 1 FROM tasks t WHERE t.id=task_id AND t.current_generation=generation AND t.state=1)",std::vector<Value>{id,generation},1);
+            commands.emplace_back("UPDATE task_attempts SET task_id=task_id WHERE task_id=? AND generation=? AND execution_state=0 AND payload_released=0 AND (executor=0 OR submission_state=2) AND EXISTS(SELECT 1 FROM tasks t WHERE t.id=task_id AND t.current_generation=generation AND t.state=1)",std::vector<Value>{id,generation},1);
             commands.emplace_back("UPDATE task_attempts SET execution_state=1 WHERE task_id=? AND generation=? AND EXISTS(SELECT 1 FROM tasks t WHERE t.id=task_id AND t.desired_action=0) AND (SELECT paused FROM store_settings WHERE singleton=1)=0",std::vector<Value>{id,generation});
             commands.emplace_back(TaskColumns+"WHERE t.id=? AND changes()=1",std::vector<Value>{id}); break;
         }
@@ -221,7 +264,8 @@ struct Repository {
             }
         }
         case UFB_CLEANUP_RETRY: a.count(2); commands.emplace_back("UPDATE file_records SET state=2,cleanup_error=NULL,updated_utc=? WHERE id=? AND state=4",std::vector<Value>{a.number(1),a.id(0)},1); break;
-        case UFB_ATTEMPTS: a.count(3); read=true; commands.emplace_back(TaskColumns+"WHERE t.sequence>? AND a.executor=? AND (a.payload_released=0 OR a.credential_released=0) ORDER BY t.sequence LIMIT ?",std::vector<Value>{a.number(0),a.number(1,0,2),a.number(2,1,200)}); break;
+        case UFB_SCHEDULABLE:
+        case UFB_ATTEMPTS: a.count(3); read=true; commands.emplace_back(TaskColumns+"WHERE t.sequence>? AND a.executor=? AND (a.payload_released=0 OR a.credential_released=0) "+std::string(command==UFB_SCHEDULABLE?"AND (a.submission_state>0 OR a.execution_state>=2) ":"")+"ORDER BY t.sequence LIMIT ?",std::vector<Value>{a.number(0),a.number(1,0,2),a.number(2,1,200)}); break;
         case UFB_CHANGES: {
             a.count(2); auto after=a.number(0),limit=a.number(1,1,199);
             commands.emplace_back("SELECT store_id,retained_after_seq,? < retained_after_seq AS requires_refresh FROM store_settings WHERE singleton=1",std::vector<Value>{after});
@@ -393,7 +437,7 @@ struct Repository {
             // The executor has positively observed that no system/managed task
             // owns these resources. Preserve unknown server outcome for lookup.
             a.count(3); auto id=a.id(0); auto generation=a.number(1,1),now=a.number(2);
-            commands.emplace_back("UPDATE task_attempts SET execution_state=CASE WHEN execution_state IN(0,1) THEN 4 ELSE execution_state END,payload_released=1,credential_released=1,credential_reference=NULL WHERE task_id=? AND generation=?",std::vector<Value>{id,generation},1);
+            commands.emplace_back("UPDATE task_attempts SET execution_state=CASE WHEN execution_state IN(0,1) THEN 4 ELSE execution_state END,payload_released=1,credential_released=CASE WHEN executor=0 THEN 1 ELSE credential_released END,credential_reference=CASE WHEN executor=0 THEN NULL ELSE credential_reference END WHERE task_id=? AND generation=?",std::vector<Value>{id,generation},1);
             commands.emplace_back("UPDATE tasks SET state=6,error='Executor ended; server result requires reconciliation',updated_utc=? WHERE id=? AND current_generation=? AND state IN(1,2)",std::vector<Value>{now,id,generation}); break;
         }
         case UFB_SCHEDULE_RETRY: {
@@ -416,7 +460,7 @@ struct Repository {
             // The executor must positively observe its previous execution ended.
             // A recorded failed/unknown terminal attempt cannot be restarted.
             a.count(2); auto id=a.id(0); auto generation=a.number(1,1);
-            commands.emplace_back("UPDATE task_attempts SET execution_state=0,submission_state=0,system_task_id=NULL WHERE task_id=? AND generation=? AND execution_state=1 AND payload_released=0 AND server_outcome=0 AND EXISTS(SELECT 1 FROM tasks t WHERE t.id=task_id AND t.current_generation=generation AND t.state IN(1,2))",std::vector<Value>{id,generation},1);
+            commands.emplace_back("UPDATE task_attempts SET execution_state=0,submission_state=CASE WHEN executor=0 THEN 0 ELSE 1 END,system_task_id=NULL WHERE task_id=? AND generation=? AND execution_state=1 AND payload_released=0 AND server_outcome=0 AND EXISTS(SELECT 1 FROM tasks t WHERE t.id=task_id AND t.current_generation=generation AND t.state IN(1,2))",std::vector<Value>{id,generation},1);
             commands.emplace_back("UPDATE tasks SET state=1 WHERE id=? AND current_generation=? AND state IN(1,2)",std::vector<Value>{id,generation},1); break;
         }
         case UFB_PREPARATION: {

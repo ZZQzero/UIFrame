@@ -58,7 +58,7 @@ public final class BackupBridge {
         if(repository.call(BackupRepository.INFO).get(0).flag("paused"))return;
         long cursor=0;boolean pending=false,any=false;
         for(;;) {
-            List<BackupRepository.Row> page=repository.call(BackupRepository.ATTEMPTS,cursor,1,100);
+            List<BackupRepository.Row> page=repository.call(BackupRepository.SCHEDULABLE,cursor,1,100);
             for(BackupRepository.Row row:page) {
                 cursor=row.number("sequence");
                 if(row.number("state")==1 && row.number("execution_state")<=1 && row.number("desired_action")==0) {pending=true;any|=!row.flag("wifi_only");}
@@ -83,7 +83,7 @@ public final class BackupBridge {
     private static void settleIdle(Context context,BackupRepository repository) throws Exception {
         Run running=active.get(repository.id);boolean paused=repository.call(BackupRepository.INFO).get(0).flag("paused");long cursor=0;
         for(;;) {
-            List<BackupRepository.Row> page=repository.call(BackupRepository.ATTEMPTS,cursor,1,100);
+            List<BackupRepository.Row> page=repository.call(BackupRepository.SCHEDULABLE,cursor,1,100);
             for(BackupRepository.Row task:page) {
                 cursor=task.number("sequence");if(running!=null && task.text("id").equals(running.task))continue;
                 if(task.number("execution_state")>=2)release(repository,task);
@@ -115,10 +115,13 @@ public final class BackupBridge {
                         if(task.number("current_generation")!=request.getLong("generation"))throw new IllegalStateException("Obsolete backup submission generation");
                         String token=request.getString("token");if(token.trim().isEmpty())throw new IllegalArgumentException("Missing backup credential");
                         String credential;
-                        if(task.number("submission_state")==1) {
+                        if(task.number("submission_state")>0) {
                             credential=task.text("credential_reference");
                             if(!token.equals(decrypt(credential)))throw new IllegalStateException("Submission credential changed for the same generation");
-                        } else credential=encrypt(token);
+                        } else {
+                            credential=encrypt(token);
+                            repository.call(BackupRepository.HANDOFF,id,task.number("current_generation"),credential);
+                        }
                         repository.call(BackupRepository.SUBMITTED,id,task.number("current_generation"),Integer.toString(jobId(repository.id)),credential);
                         if(running==null)schedule(app,repository);
                     } else if(op.equals("wake") || op.equals("sync") || op.equals("recover")) {
@@ -151,7 +154,7 @@ public final class BackupBridge {
                 long after=0;
                 for(;;) {
                     if(run.stopped || repository.call(BackupRepository.INFO).get(0).flag("paused"))break;
-                    List<BackupRepository.Row> page=repository.call(BackupRepository.ATTEMPTS,after,1,100);
+                    List<BackupRepository.Row> page=repository.call(BackupRepository.SCHEDULABLE,after,1,100);
                     for(BackupRepository.Row candidate:page) {
                         after=candidate.number("sequence");if(run.stopped)break;
                         synchronized(LOCK) {

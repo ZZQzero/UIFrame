@@ -14,7 +14,7 @@ CREATE TABLE library_scopes (
     permission_generation INTEGER NOT NULL CHECK(permission_generation>=0),
     access_state INTEGER NOT NULL DEFAULT 0,
     completed_scan_id TEXT,
-    platform_cursor BLOB,
+    platform_cursor TEXT,
     requires_reconcile INTEGER NOT NULL CHECK(requires_reconcile IN(0,1))
 ) STRICT;
 CREATE TABLE assets (
@@ -49,10 +49,12 @@ CREATE TABLE scan_runs (
     scope_revision INTEGER NOT NULL,
     log_start INTEGER NOT NULL,
     phase INTEGER NOT NULL CHECK(phase BETWEEN 0 AND 3),
-    platform_upper_bound BLOB,
+    platform_upper_bound TEXT,
     missing_cursor TEXT,
     error TEXT
 ) STRICT;
+CREATE INDEX scans_scope_phase ON scan_runs(scope_id,phase);
+CREATE INDEX scans_retention ON scan_runs(phase,id);
 CREATE TABLE change_log (
     sequence INTEGER PRIMARY KEY AUTOINCREMENT,
     scope_id TEXT NOT NULL,

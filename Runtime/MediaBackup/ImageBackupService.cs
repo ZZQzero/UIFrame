@@ -107,17 +107,21 @@ namespace Game.Media.Backup
             {
                 repository.Execute(Command.BindPreparer,owner);
                 while(repository.Execute(Command.RecoverPreparations,owner,Now,32).Single.Number("recovered")!=0) token.ThrowIfCancellationRequested();
+                for(int executor=0;executor<=2;executor++)
+                {
                 long cursor=0;
                 do
                 {
-                    var attempts=repository.Execute(Command.Attempts,cursor,0,100).Rows;
+                    var attempts=repository.Execute(Command.Attempts,cursor,executor,100).Rows;
                     foreach(var attempt in attempts)
                     {
                         token.ThrowIfCancellationRequested(); cursor=attempt.Number("sequence");
+                        if(executor!=0 && attempt.Number("submission_state")!=0)continue;
                         repository.Execute(Command.RecoverAttempt,attempt.Text("id"),attempt.Number("current_generation"),Now);
                     }
                     if(attempts.Count<100) break;
                 } while(true);
+                }
                 paused=repository.Execute(Command.Info).Single.Flag("paused");
                 client=new HttpClient(handler??new HttpClientHandler { AllowAutoRedirect=false }) { Timeout=System.Threading.Timeout.InfiniteTimeSpan };
             }
@@ -263,7 +267,12 @@ namespace Game.Media.Backup
                                 {
                                     string credential=GetAccessToken(); if(string.IsNullOrWhiteSpace(credential)) throw new InvalidOperationException("No access token available.");
                                     token.ThrowIfCancellationRequested(); handedOff=true;
-                                    await Platform(new NativeBackupRequest { op="submit",repository=StoreId,id=record.id,generation=record.generation,token=credential });
+                                    try { await Platform(new NativeBackupRequest { op="submit",repository=StoreId,id=record.id,generation=record.generation,token=credential }); }
+                                    catch {
+                                        try { handedOff=(await Db(Command.Attempt,default,record.id,record.generation)).Single.Number("submission_state")>0; }
+                                        catch(Exception lookup){Debug.LogException(lookup);}
+                                        throw;
+                                    }
                                 }
                             }
                             else
@@ -295,8 +304,9 @@ namespace Game.Media.Backup
                             {
                                 try
                                 {
-                                    if(determined) await Db(Command.Release,default,record.id,record.generation,true,true);
+                                    if(determined) await Db(Command.Release,default,record.id,record.generation,true,!nativeEnabled);
                                     else await Db(Command.RecoverAttempt,default,record.id,record.generation,Now);
+                                    if(nativeEnabled)await Platform(new NativeBackupRequest {op="sync",repository=StoreId});
                                 }
                                 catch(Exception cleanup) { if(primary==null) primary=ExceptionDispatchInfo.Capture(cleanup); else Debug.LogException(cleanup); }
                             }
