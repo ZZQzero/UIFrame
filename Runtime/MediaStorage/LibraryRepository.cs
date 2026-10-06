@@ -32,13 +32,7 @@ namespace Game.Media.Storage
                 }
                 var app=await repository.Query(new SqliteCommand("PRAGMA application_id"),r=>r.GetInt64(0),token).ConfigureAwait(false);
                 var version=await repository.Query(new SqliteCommand("PRAGMA user_version"),r=>r.GetInt64(0),token).ConfigureAwait(false);
-                if(app[0]!=1430667852 || (version[0]!=1 && version[0]!=2)) throw new InvalidDataException("Unexpected image library identity or schema.");
-                if(version[0]==1)
-                    await repository.Commit(new[]{
-                        new SqliteCommand("ALTER TABLE assets ADD COLUMN byte_count INTEGER CHECK(byte_count IS NULL OR byte_count>=0)"),
-                        new SqliteCommand("UPDATE library_scopes SET requires_reconcile=1"),
-                        new SqliteCommand("PRAGMA user_version=2")
-                    },token).ConfigureAwait(false);
+                if(app[0]!=1430667852 || version[0]!=3) throw new InvalidDataException("Unexpected image library identity or schema.");
                 var identity=await repository.Query(new SqliteCommand("SELECT library_id,index_generation FROM library_settings WHERE singleton=1"),r=>(id:r.GetString(0),generation:r.GetInt64(1)),token).ConfigureAwait(false);
                 if(identity.Count!=1) throw new InvalidDataException("Missing image library identity.");
                 repository.Id=identity[0].id; repository.Generation=identity[0].generation;
@@ -76,13 +70,13 @@ namespace Game.Media.Storage
             var rows=await Query(new SqliteCommand("SELECT max((SELECT coalesce(max(sequence),0) FROM change_log),retained_after_seq),retained_after_seq FROM library_settings WHERE singleton=1"),
                 r=>(r.GetInt64(0),r.GetInt64(1)),token).ConfigureAwait(false); return rows[0];
         }
-        internal async Task<string> Begin(LibraryScopeState scope,long start,CancellationToken token,string platformBoundary=null)
+        internal async Task<string> Begin(LibraryScopeState scope,CancellationToken token)
         {
             string run=Guid.NewGuid().ToString("N");
             await Commit(new[]{
                 new SqliteCommand("UPDATE library_scopes SET requires_reconcile=1 WHERE id=? AND revision=? AND permission_generation=?",scope.Scope,scope.Revision,scope.Permission).ExpectAffectedRows(1),
-                new SqliteCommand("UPDATE scan_runs SET phase=3,error='Superseded by a new complete reconciliation' WHERE scope_id=? AND phase IN(0,1)",scope.Scope),
-                new SqliteCommand("INSERT INTO scan_runs(id,scope_id,permission_generation,scope_revision,log_start,phase,platform_upper_bound) VALUES(?,?,?,?,?,0,?)",run,scope.Scope,scope.Permission,scope.Revision,start,platformBoundary).ExpectAffectedRows(1)
+                new SqliteCommand("UPDATE scan_runs SET phase=3 WHERE scope_id=? AND phase IN(0,1)",scope.Scope),
+                new SqliteCommand("INSERT INTO scan_runs(id,scope_id,phase) VALUES(?,?,0)",run,scope.Scope).ExpectAffectedRows(1)
             },token).ConfigureAwait(false); await PruneScans(token).ConfigureAwait(false);return run;
         }
         internal async Task Upsert(LibraryScopeState scope,string run,IReadOnlyList<ImageReference> images,CancellationToken token)
@@ -119,14 +113,14 @@ namespace Game.Media.Storage
                 if(missing.Count==0) break;
                 var commands=new List<SqliteCommand>{new SqliteCommand("UPDATE library_scopes SET id=id WHERE id=? AND revision=? AND permission_generation=?",scope.Scope,scope.Revision,scope.Permission).ExpectAffectedRows(1)};
                 foreach(string source in missing) AppendRemoval(commands,scope,source,scope.Access==(long)LibraryAccess.Limited?4:3);
-                cursor=missing[missing.Count-1]; commands.Add(new SqliteCommand("UPDATE scan_runs SET missing_cursor=? WHERE id=? AND phase=1",cursor,run).ExpectAffectedRows(1));
+                cursor=missing[missing.Count-1]; commands.Add(new SqliteCommand("UPDATE scan_runs SET id=id WHERE id=? AND phase=1",run).ExpectAffectedRows(1));
                 await Commit(commands,token).ConfigureAwait(false);
             }
             // Compare completed visible membership, never observer lifetime or an
             // ambiguous platform notification. Paging bounds memory for large scopes.
             string fingerprint=scope.Access==(long)LibraryAccess.Limited?await AccessFingerprint(scope.Scope,token).ConfigureAwait(false):null;
             await Commit(new[]{
-                new SqliteCommand("UPDATE library_scopes SET completed_scan_id=?,platform_cursor=(SELECT platform_upper_bound FROM scan_runs WHERE id=?),requires_reconcile=0 WHERE id=? AND revision=? AND permission_generation=?",run,run,scope.Scope,scope.Revision,scope.Permission).ExpectAffectedRows(1),
+                new SqliteCommand("UPDATE library_scopes SET completed_scan_id=?,requires_reconcile=0 WHERE id=? AND revision=? AND permission_generation=?",run,scope.Scope,scope.Revision,scope.Permission).ExpectAffectedRows(1),
                 new SqliteCommand("UPDATE library_scopes SET revision=revision+1,permission_generation=permission_generation+1 WHERE id=? AND ? IS NOT NULL AND access_fingerprint IS NOT NULL AND access_fingerprint<>?",scope.Scope,fingerprint,fingerprint),
                 new SqliteCommand("UPDATE library_scopes SET access_fingerprint=? WHERE id=?",fingerprint,scope.Scope).ExpectAffectedRows(1),
                 new SqliteCommand("UPDATE scan_runs SET phase=2 WHERE id=? AND phase=1",run).ExpectAffectedRows(1)

@@ -1,6 +1,6 @@
 # 照片备份 v2 执行记录
 
-本页保留原实施阶段的契约与验证记录。2026-10-06 的登记／准备解耦、ABI 4 / schema 3 及最新验证见 [准备协调器重构记录](GalleryPreparationRedesign.md)。
+本页保留原实施阶段的契约与验证记录。2026-10-06 的登记／准备解耦、ABI 4 / catalog schema 4、图库 schema 3 及最新验证见 [准备协调器重构记录](GalleryPreparationRedesign.md)。
 
 更新：2026-10-02。对应 [实施计划](GalleryBackgroundProtocolPlan.md)，当前 API 见 [Gallery.md](Gallery.md)。
 

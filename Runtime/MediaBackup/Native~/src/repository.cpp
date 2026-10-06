@@ -125,7 +125,7 @@ struct Repository {
             db.batch(commands);
         }
         auto header=decode(db.batch({{"PRAGMA application_id"},{"PRAGMA user_version"}}));
-        require(header[0].rows[0][0].integer==1430667843 && header[1].rows[0][0].integer==3,"Unexpected backup catalog schema",UF_STATE);
+        require(header[0].rows[0][0].integer==1430667843 && header[1].rows[0][0].integer==4,"Unexpected backup catalog schema",UF_STATE);
         auto settings=decode(db.query({"SELECT store_id,server,account FROM store_settings WHERE singleton=1"})).back().rows;
         require(settings.size()==1 && settings[0][0].text==id,"Backup store identity mismatch",UF_STATE);
         require((server.empty() || server==settings[0][1].text) && (account.empty() || account==settings[0][2].text),"Backup server/account mismatch",UF_STATE);
@@ -134,18 +134,18 @@ struct Repository {
     Command task(const std::string &id) { return {TaskColumns+"WHERE t.id=?",{id}}; }
     Bytes execute(unsigned command,const Args &a,unsigned capacity) {
         require(!closed && !faulted,"Backup repository is closed or faulted",UF_STATE);
-        if(command>=UFB_CONTROL_CREATE)return protocol_command(db,path,id,account,command,a,capacity);
+        if(command>=UFB_CONTROL_CREATE)return protocol_command(db,path,account,command,a,capacity);
         std::vector<Command> commands;
         bool read=false;
         switch(command) {
-        case UFB_INFO: a.count(0); read=true; commands.emplace_back("SELECT store_id,server,account,paused,native_wifi_only,retained_after_seq,source_namespace,development_http,transfer_mode,(SELECT coalesce(max(sequence),0) FROM tasks) AS upper_sequence FROM store_settings WHERE singleton=1"); break;
+        case UFB_INFO: a.count(0); read=true; commands.emplace_back("SELECT store_id,server,account,paused,retained_after_seq,source_namespace,development_http,transfer_mode,(SELECT coalesce(max(sequence),0) FROM tasks) AS upper_sequence FROM store_settings WHERE singleton=1"); break;
         case UFB_PREPARE: {
             auto batch=a.id(0), owner=a.id(1); auto now=a.number(2), n=a.number(3,1,32); a.count(size_t(6+n*5));
             auto scope=a.text(size_t(4+n*5),64);auto epoch=a.number(size_t(5+n*5));
             require(scope.empty()==(epoch==0),"Scope and admission epoch must be supplied together");
             commands.emplace_back("UPDATE store_settings SET singleton=singleton WHERE paused=0 AND (SELECT count(*) FROM tasks WHERE state=9)+?<=128",std::vector<Value>{n},1);
             if(!scope.empty())commands.emplace_back("UPDATE scopes SET id=id WHERE id=? AND enabled=1 AND requires_confirmation=0 AND admission_epoch=?",std::vector<Value>{scope,epoch},1);
-            commands.emplace_back("INSERT INTO preparations(id,owner,phase,created_utc,expected_count) VALUES(?,?,0,?,?)",std::vector<Value>{batch,owner,now,n},1);
+            commands.emplace_back("INSERT INTO preparations(id,owner,phase,created_utc) VALUES(?,?,0,?)",std::vector<Value>{batch,owner,now},1);
             for(int64_t i=0;i<n;++i) {
                 size_t at=size_t(4+i*5); auto item=a.id(at), source=a.metadata(at+1,1024),version=a.metadata(at+2,1024),name=a.metadata(at+3,1024),mime=a.metadata(at+4,128);
                 require(!source.empty() && !version.empty(),"Source identity and content version are required");
@@ -445,10 +445,10 @@ struct Repository {
             // Explicit application recovery supplies the new preparation owner. It
             // is legal only after the former facade has relinquished ownership.
             a.count(3); auto owner=a.id(0); auto now=a.number(1),limit=a.number(2,1,32);
-            auto batches=decode(db.query({"SELECT id,owner FROM preparations WHERE phase=0 AND owner<>? ORDER BY created_utc,id LIMIT ?",{owner,limit}})).back().rows;
+            auto batches=decode(db.query({"SELECT id FROM preparations WHERE phase=0 AND owner<>? ORDER BY created_utc,id LIMIT ?",{owner,limit}})).back().rows;
             if(batches.empty()) return db.query({"SELECT 0 AS recovered"},capacity);
             for(auto &b:batches) {
-                commands.emplace_back("UPDATE preparations SET phase=2,error='Preparation interrupted before durable acceptance' WHERE id=? AND phase=0",std::vector<Value>{b[0]},1);
+                commands.emplace_back("UPDATE preparations SET phase=2 WHERE id=? AND phase=0",std::vector<Value>{b[0]},1);
                 commands.emplace_back("UPDATE file_records SET state=2,updated_utc=? WHERE id IN(SELECT file_id FROM tasks WHERE batch_id=? AND state=9) AND state IN(0,1)",std::vector<Value>{now,b[0]});
                 commands.emplace_back("UPDATE discoveries SET disposition=0,task_id=NULL,error=NULL WHERE disposition=2 AND EXISTS(SELECT 1 FROM tasks t WHERE t.id=task_id AND t.batch_id=? AND t.state=9 AND t.scope_id=discoveries.scope_id AND NOT "+admission("t")+")",std::vector<Value>{b[0]});
                 commands.emplace_back("UPDATE discoveries SET disposition=4,error='Preparation interrupted before durable acceptance' WHERE disposition=2 AND task_id IN(SELECT id FROM tasks WHERE batch_id=? AND state=9)",std::vector<Value>{b[0]});

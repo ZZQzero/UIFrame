@@ -11,7 +11,7 @@ namespace Game.Media.Backup
 {
     public enum BackupAction { Resume, Pause, Cancel, Retry, RetryCleanup, ClearHistory }
     public enum BackupOperationPhase { Selecting, Running, Completed, Failed }
-    public enum BackupOperationOutcome { Pending, Applied, NotApplicable, Missing, Failed, WaitingForRelease, AlreadySatisfied }
+    public enum BackupOperationOutcome { Pending, Applied, NotApplicable, Missing, WaitingForRelease=5, AlreadySatisfied }
     public sealed class BackupOperationCommand
     {
         public string OperationId { get; set; }

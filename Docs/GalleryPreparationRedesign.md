@@ -6,7 +6,7 @@
 
 将固定成员登记、容量准入、实际文件准备和执行交接分为明确阶段。这样长时间容量等待不会占住自动扫描，来源租约和任务控制范围也在最早的确定点固定。文件准备保持单一生产者，避免多文件并行预留与取消释放的复杂度；上传仍保留既有并发与 v2 服务端确认协议。
 
-这是部署前的接口／schema 调整，不保留旧登记命令的双轨兼容。业务 ABI 为 4，catalog schema 为 3，HTTP 协议仍为 v2，SQLite ABI 仍为 3。schema 3 以前的开发库明确拒绝，调用方使用新的测试目录；没有自动迁移或删除数据库。默认暂存上限由512MiB改为1GiB、单文件仍为512MiB，避免未知大小照片和上一张上传必然串行；仅按需占用磁盘。
+这是部署前的接口／schema 调整，不保留旧登记命令的双轨兼容。业务 ABI 为 4，catalog schema 为 4，图库 schema 为 3，HTTP 协议仍为 v2，SQLite ABI 仍为 3。两库非当前版本的开发库明确拒绝，调用方使用新的测试目录；没有自动迁移或删除数据库。默认暂存上限由512MiB改为1GiB、单文件仍为512MiB，避免未知大小照片和上一张上传必然串行；仅按需占用磁盘。
 
 ## 已落地的边界
 
@@ -37,7 +37,7 @@
 
 本轮复查上一轮的登记、容量、scope 控制、执行交接、原生调度与释放改动，并按实际引用清理遗留实现：
 
-- Prepare 每项只携带 taskId/source/version/name/mime，初始文件占用由仓库固定为 0；容量预留只由 TryPrepare 管理。移除恒为零的旧预留占位字段，业务 ABI 提升到 4，catalog schema 保持 3。schema 3 的现有开发库无需迁移；ABI 3 插件不能与新托管代码混用。
+- Prepare 每项只携带 taskId/source/version/name/mime，初始文件占用由仓库固定为 0；容量预留只由 TryPrepare 管理。移除恒为零的旧预留占位字段，业务 ABI 提升到 4，catalog schema 保持 3。该阶段的 schema 3 开发库无需迁移（后续清理已改为只接受 schema 4，见下文）；ABI 3 插件不能与新托管代码混用。
 - 删除无生产调用方的 Schedulable (75) 命令及其分支。Attempts 仍用于实际资源所有权查询，ControlCreate / Uploads / ProtocolWake 负责调度；未交接任务不可调度的回归改为检查生产 ControlCreate 入口。
 - 删除不可达的 BackupBudgetExceededException、无用 Snapshot / Payload 方法及 relativePath 映射、旧异步扫描异常拆包分支；HTTP 状态检查改为同步方法，保留 HTTP 错误和 RetryAfter 信息。
 - accepting 更名为 registering，明确它只表示登记临界区。桌面 Plan 是否立即提交改为检查实际 preparing 状态，准备期间遵循既有 250ms / 32 项聚合规则。
@@ -54,3 +54,25 @@ SQLite 上游源码、SQLite 插件和换机／重装恢复仍不在本轮范围
 - Android 生产 JNI／仓库绑定、iOS 15+ Objective-C++ 语法检查通过。四平台备份插件已安装为 ABI 4，源码清单、二进制哈希和现有 SQLite 依赖身份校验一致。
 - 共同源码 build ID：`404838bc6396a14a3b7bb4dde8fa8d6d7af3d9827ef7fae476dd501378c957f2`。
 - 证据：工作区 `ReviewArtifacts/gallery-cleanup-2026-10-06/verification.json` 及同目录原始日志。真机后台／权限与 Windows 实际执行仍未覆盖。
+
+## 部署前旧代码清理
+
+用户确认尚未部署，本次统一为 catalog schema 4 和 library schema 3；两库仅支持当前版本。删除图库 v1→v2 自动升级，拒绝旧开发库并保留文件，由调用方显式选择新目录。业务 ABI 4、SQLite ABI 3、HTTP v2 不变；命令参数与状态编号不重排。查询结果按列名读取，插件与当前源码一同交付。
+
+- 删除 Android／iOS 未使用的旧 images 全量枚举命令；当前图片枚举统一使用 imagesOpen／imagesNext／imagesClose。公开快照 API 仍通过当前分页实现工作，相册分组及授权目录继续使用 PageStore。
+- 删除 Android stop、iOS pause／stop 别名和示例 ContinueBackup 转发。Android 通知按钮实际使用的 pause 保留。
+- 图库删除只写不读的 platform_cursor、扫描权限／修订／起点／平台边界／missing_cursor／错误副本。扫描身份与阶段仍持久保存；当前扫描的边界、水位和权限校验继续由执行上下文完成，重开后明确重新核对。备份库中参与断点恢复的同名字段保留。
+- 备份库删除 native_wifi_only、preparations.expected_count／error、operations.failed_count，并收紧从未产生的状态。真实网络策略仍来自每个 task_attempt 的 wifi_only；操作 Failed 阶段、显式 Retry 和资源释放等待保持原语义，逐项从未产生的 Failed 枚举删除。
+- 下载回执直接使用 BackupRecord，移除中间 BackupTaskInfo 包装；删除原生协议未使用的 store 参数和无用引用。
+
+当前系统版本需要的 API 分支、PhotoKit／MediaStore 元数据适配、有限授权处理，以及当前格式的异常退出恢复继续保留。历史设计与审查文档保存当时证据，不作为运行时代码兼容路径。SQLite 源码及插件不修改；不处理换机／重装恢复。
+
+### 本次清理验证
+
+- Unity 两轮合计87个不同用例，86通过、1跳过（未启用Android构建目标）。首轮无图形模式下GPU方向／透明度用例失败；启用图形后定向复跑通过，未为此修改生产代码。图库schema 1／2／4拒绝且文件字节不变、当前图库创建／重开／分页／变化日志、真实HTTP回执下载与历史清理均通过。
+- 原生CTest通过，包含catalog schema 1／2／3／5拒绝、文件字节不变及无句柄泄漏；13项准入、30项协议、48个进程中断窗口、2个核对恢复窗口、范围分页核对通过。
+- Android全部媒体Java源码以API36编译通过，生产JNI／仓库宿主绑定通过；iOS图库和备份Objective-C++以iOS15最低版本语法检查通过，保留既有Unity非UIScene窗口适配的弃用警告。
+- macOS、Android arm64、iOS arm64、Windows x64业务插件均已更新。来源、二进制与现有SQLite依赖哈希一致，共同build ID为 `6a8f27ff62c357791c251e3341b14727cb911be8302c6065356eba1305574c2e`。SQLite源码及插件无改动。
+- 证据：工作区 `ReviewArtifacts/gallery-legacy-removal-2026-10-06/verification.json`、逐文件哈希、产物校验及原始日志。未运行Android／iOS真机、Windows程序或长期负载。
+
+前轮完整审查已确认的批量驱动故障准入／关闭传播、Android排队Job更新、混合网络策略合批、参考服务核验线程故障处理，是独立行为问题，未计入本次旧代码清理的修复成果。详情与复现保留在 `ReviewArtifacts/gallery-complete-followup-2026-10-06/review.md`，不能将本次回归通过解释为这些问题已解决。

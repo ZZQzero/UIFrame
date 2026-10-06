@@ -83,8 +83,7 @@ public final class GalleryBridge {
                 switch (op) {
                     case "imagesOpen": case "imagesNext": case "imagesClose": case "observe": case "unobserve": case "drain": case "stat": result=GalleryIndex.call(job);break;
                     case "access": result = response("ok").put("access", access()); break;
-                    case "albums": result = library(job, true); break;
-                    case "images": result = library(job, false); break;
+                    case "albums": result = albums(job); break;
                     case "directory": result = directory(job); break;
                     case "export": result = export(job); break;
                     case "preview": result = preview(job); break;
@@ -321,25 +320,21 @@ public final class GalleryBridge {
                 DataOutputStream ownedWriter=writer; DataInputStream ownedReader=reader) { }
         }
     }
-    static JSONObject library(Job job, boolean albums) throws Exception {
+    static JSONObject albums(Job job) throws Exception {
         String access = access(); if (!access.equals("Authorized") && !access.equals("Limited")) throw new SecurityException("Library access not granted.");
-        String[] columns = {"_id", "_display_name", "mime_type", "_size", "width", "height", "date_modified", "bucket_id", "bucket_display_name"};
-        String album = job.request.optString("album"); job.pages=new PageStore();
+        String[] columns = {"bucket_id", "bucket_display_name"};
+        job.pages=new PageStore();
         JSONObject group=null; String previous=null;
         try(Cursor cursor = context.getContentResolver().query(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, columns,
-            album.isEmpty() ? null : "bucket_id = ?", album.isEmpty() ? null : new String[] {album}, albums?"bucket_id ASC":"date_added DESC, _id DESC", job.signal)) {
+            null, null, "bucket_id ASC", job.signal)) {
             if (cursor == null) throw new IOException("MediaStore query returned no cursor.");
             while(cursor.moveToNext()) {
-                job.check(); String bucket = cursor.getString(7);
-                if (albums) {
-                    if(group==null || !Objects.equals(previous,bucket)) {
-                        if(group!=null) job.pages.add(group);
-                        group=new JSONObject().put("id",bucket).put("name",cursor.getString(8)).put("count",0); previous=bucket;
-                    }
-                    group.put("count",group.getInt("count")+1);
-                } else job.pages.add(new JSONObject().put("id", Uri.withAppendedPath(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, cursor.getString(0)).toString())
-                    .put("name", cursor.getString(1)).put("mime", cursor.getString(2)).put("size", cursor.getLong(3))
-                    .put("width", cursor.getInt(4)).put("height", cursor.getInt(5)).put("version", cursor.getString(6) + ":" + cursor.getLong(3)));
+                job.check(); String bucket = cursor.getString(0);
+                if(group==null || !Objects.equals(previous,bucket)) {
+                    if(group!=null) job.pages.add(group);
+                    group=new JSONObject().put("id",bucket).put("name",cursor.getString(1)).put("count",0); previous=bucket;
+                }
+                group.put("count",group.getInt("count")+1);
             }
         }
         if(group!=null) job.pages.add(group); job.pages.finish(); return response("ok");

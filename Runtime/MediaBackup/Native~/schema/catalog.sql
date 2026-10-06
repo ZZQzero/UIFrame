@@ -1,5 +1,5 @@
 PRAGMA application_id=1430667843;
-PRAGMA user_version=3;
+PRAGMA user_version=4;
 CREATE TABLE store_settings (
     singleton INTEGER PRIMARY KEY CHECK(singleton=1),
     store_id TEXT NOT NULL UNIQUE,
@@ -8,7 +8,6 @@ CREATE TABLE store_settings (
     paused INTEGER NOT NULL CHECK(paused IN(0,1)),
     retained_after_seq INTEGER NOT NULL DEFAULT 0 CHECK(retained_after_seq>=0),
     automatic_policy BLOB,
-    native_wifi_only INTEGER NOT NULL DEFAULT 1 CHECK(native_wifi_only IN(0,1)),
     source_namespace TEXT NOT NULL DEFAULT '',
     development_http INTEGER NOT NULL DEFAULT 0 CHECK(development_http IN(0,1)),
     transfer_mode INTEGER NOT NULL DEFAULT 0 CHECK(transfer_mode IN(0,1)),
@@ -17,11 +16,9 @@ CREATE TABLE store_settings (
 CREATE TABLE preparations (
     id TEXT PRIMARY KEY,
     owner TEXT NOT NULL,
-    phase INTEGER NOT NULL CHECK(phase BETWEEN 0 AND 3),
+    phase INTEGER NOT NULL CHECK(phase BETWEEN 0 AND 2),
     stop_requested INTEGER NOT NULL DEFAULT 0 CHECK(stop_requested IN(0,1)),
-    expected_count INTEGER NOT NULL DEFAULT 0 CHECK(expected_count BETWEEN 0 AND 32),
-    created_utc INTEGER NOT NULL,
-    error TEXT
+    created_utc INTEGER NOT NULL
 ) STRICT;
 CREATE TABLE preparation_items (
     preparation_id TEXT NOT NULL REFERENCES preparations(id),
@@ -137,7 +134,7 @@ CREATE TABLE tasks (
     source_id TEXT NOT NULL,
     content_version TEXT NOT NULL,
     state INTEGER NOT NULL CHECK(state IN(0,1,2,3,4,6,7,8,9)),
-    desired_action INTEGER NOT NULL DEFAULT 0 CHECK(desired_action BETWEEN 0 AND 3),
+    desired_action INTEGER NOT NULL DEFAULT 0 CHECK(desired_action BETWEEN 0 AND 2),
     file_id TEXT REFERENCES file_records(id),
     backup_id TEXT REFERENCES backup_receipts(backup_id),
     current_generation INTEGER NOT NULL DEFAULT 0 CHECK(current_generation>=0),
@@ -161,8 +158,8 @@ CREATE TABLE task_attempts (
     task_id TEXT NOT NULL REFERENCES tasks(id),
     generation INTEGER NOT NULL CHECK(generation>0),
     system_task_id TEXT,
-    submission_state INTEGER NOT NULL CHECK(submission_state BETWEEN 0 AND 2),
-    execution_state INTEGER NOT NULL CHECK(execution_state BETWEEN 0 AND 4),
+    submission_state INTEGER NOT NULL CHECK(submission_state IN(0,1)),
+    execution_state INTEGER NOT NULL CHECK(execution_state IN(0,1,2,4)),
     server_outcome INTEGER NOT NULL CHECK(server_outcome BETWEEN 0 AND 2),
     payload_released INTEGER NOT NULL CHECK(payload_released IN(0,1)),
     credential_released INTEGER NOT NULL CHECK(credential_released IN(0,1)),
@@ -223,7 +220,6 @@ CREATE TABLE operations (
     selection_cursor INTEGER NOT NULL DEFAULT 0 CHECK(selection_cursor>=0),
     selected_count INTEGER NOT NULL DEFAULT 0 CHECK(selected_count>=0),
     applied_count INTEGER NOT NULL DEFAULT 0 CHECK(applied_count>=0),
-    failed_count INTEGER NOT NULL DEFAULT 0 CHECK(failed_count>=0),
     details_expired INTEGER NOT NULL DEFAULT 0 CHECK(details_expired IN(0,1)),
     created_utc INTEGER NOT NULL,
     updated_utc INTEGER NOT NULL,
@@ -234,7 +230,7 @@ CREATE INDEX operations_cleanup ON operations(updated_utc,id) WHERE phase IN(2,3
 CREATE TABLE operation_items (
     operation_id TEXT NOT NULL REFERENCES operations(id),
     task_id TEXT NOT NULL,
-    outcome INTEGER NOT NULL CHECK(outcome BETWEEN 0 AND 6),
+    outcome INTEGER NOT NULL CHECK(outcome IN(0,1,2,3,5,6)),
     error TEXT,
     PRIMARY KEY(operation_id,task_id)
 ) WITHOUT ROWID, STRICT;
@@ -254,7 +250,7 @@ CREATE TABLE change_log (
     created_utc INTEGER NOT NULL
 ) STRICT;
 CREATE TABLE task_counts (
-    state INTEGER PRIMARY KEY CHECK(state BETWEEN 0 AND 9),
+    state INTEGER PRIMARY KEY CHECK(state IN(0,1,2,3,4,6,7,8,9)),
     count INTEGER NOT NULL CHECK(count>=0)
 ) STRICT;
 INSERT INTO task_counts VALUES(0,0),(1,0),(2,0),(3,0),(4,0),(6,0),(7,0),(8,0),(9,0);

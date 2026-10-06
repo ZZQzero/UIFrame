@@ -285,7 +285,7 @@ namespace Game.Media
                 if(complete)
                 {
                     string boundary=observer.PlatformBoundary;
-                    string run=await repository.Begin(state,start.sequence,token,boundary);
+                    string run=await repository.Begin(state,token);
                     async UniTask<bool> Consume(IReadOnlyList<ImageReference> page)
                     {
                         for(int offset=0;offset<page.Count;offset+=32)

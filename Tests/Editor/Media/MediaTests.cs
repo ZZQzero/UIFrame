@@ -318,7 +318,7 @@ namespace UIFrame.Regression
             try {
                 var state=await repository.Scope(scope,0,default);
                 for(int i=0;i<12;i++) {
-                    var start=await repository.Position();var run=await repository.Begin(state,start.sequence,default);
+                    var start=await repository.Position();var run=await repository.Begin(state,default);
                     await repository.Upsert(state,run,new[]{new ImageReference("file",imagePath,"photo.png","image/png",version:"v"+i)},default);
                     await repository.Finish(state,run,start.sequence,default);
                 }

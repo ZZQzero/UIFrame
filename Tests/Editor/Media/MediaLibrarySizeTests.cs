@@ -12,7 +12,7 @@ namespace UIFrame.Regression
 {
     public sealed class MediaLibrarySizeTests
     {
-        [UnityTest] public IEnumerator SizeSurvivesPagingChangesAndVersionOneUpgrade() => UniTask.ToCoroutine(async () => {
+        [UnityTest] public IEnumerator SizeSurvivesPagingChangesAndReopen() => UniTask.ToCoroutine(async () => {
             string root=Path.Combine(Path.GetTempPath(),"uiframe-library-size-"+Guid.NewGuid().ToString("N"));
             string photos=Path.Combine(root,"photos"),path=Path.Combine(root,"library.sqlite");
             Directory.CreateDirectory(photos);File.WriteAllBytes(Path.Combine(photos,"photo.jpg"),new byte[17]);
@@ -30,16 +30,10 @@ namespace UIFrame.Regression
                 Assert.AreEqual(23,changes.Items.Last().ByteCount);
                 await observation.CloseAsync();observation=null;
                 await library.ShutdownAsync();library=null;
-                // A real v1 catalog has the same records and identity, without the added column.
-                var db=await SqliteDatabase.OpenAsync(new SqliteOpenOptions(path,SqliteOpenMode.OpenExistingReadWrite));
-                try {
-                    using(await db.ExecuteTransactionAsync(new SqliteBatch(new SqliteQueryBudget(),
-                        new SqliteCommand("ALTER TABLE assets DROP COLUMN byte_count"),new SqliteCommand("PRAGMA user_version=1")))){}
-                } finally {await db.CloseAsync();}
                 library=await ImageLibraryIndex.OpenAsync(path);
                 Assert.AreEqual(position.LibraryId,(await library.GetPositionAsync(scope)).LibraryId);
                 Assert.AreEqual(1,(await library.QueryAsync(scope)).Items.Count);
-                Assert.IsNull((await library.QueryAsync(scope)).Items.Single().ByteCount);
+                Assert.AreEqual(23,(await library.QueryAsync(scope)).Items.Single().ByteCount);
                 await library.RefreshAsync(scope);
                 Assert.AreEqual(23,(await library.QueryAsync(scope)).Items.Single().ByteCount);
             } finally {
@@ -47,6 +41,27 @@ namespace UIFrame.Regression
                 if(library!=null)await library.ShutdownAsync();
                 Directory.Delete(root,true);
             }
+        });
+        [UnityTest] public IEnumerator UnsupportedLibrarySchemasAreRejectedWithoutMigration() => UniTask.ToCoroutine(async () => {
+            string root=Path.Combine(Path.GetTempPath(),"uiframe-library-format-"+Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(root);
+            try {
+                foreach(int version in new[]{1,2,4}) {
+                    string path=Path.Combine(root,version+".sqlite");
+                    var library=await ImageLibraryIndex.OpenAsync(path);await library.ShutdownAsync();
+                    var db=await SqliteDatabase.OpenAsync(new SqliteOpenOptions(path,SqliteOpenMode.OpenExistingReadWrite));
+                    try {
+                        using(await db.ExecuteTransactionAsync(new SqliteBatch(new SqliteQueryBudget(),
+                            new SqliteCommand("PRAGMA user_version="+version)))){}
+                    } finally {await db.CloseAsync();}
+                    byte[] before=File.ReadAllBytes(path);
+                    Exception failure=null;
+                    try {library=await ImageLibraryIndex.OpenAsync(path);await library.ShutdownAsync();}
+                    catch(Exception error){failure=error;}
+                    Assert.IsInstanceOf<InvalidDataException>(failure,"An unsupported schema must fail at open.");
+                    CollectionAssert.AreEqual(before,File.ReadAllBytes(path),"Rejected catalogs must not be migrated or recreated.");
+                }
+            } finally {Directory.Delete(root,true);}
         });
     }
 }

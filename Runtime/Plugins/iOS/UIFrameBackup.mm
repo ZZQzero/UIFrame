@@ -419,7 +419,7 @@ static void *UFBQueueKey=&UFBQueueKey;
             @try{NSDictionary *current=UFBCommand(handle,UFB_TASK,@[row[@"id"]]).firstObject;if(![current[@"credential_reference"] isEqual:reference])[self removeToken:reference];}
             @catch(NSException *cleanup){NSLog(@"Credential cleanup failed: %@",cleanup.reason);}@throw;
         }
-    } else if([@[@"wake",@"sync",@"recover",@"pause",@"stop"] containsObject:op])
+    } else if([@[@"wake",@"sync",@"recover"] containsObject:op])
         // Explicit admission flushes its tail before returning to SubmitAsync;
         // autonomous callbacks retain the bounded Plan/Query aggregation window.
         [self schedule:identity flush:[op isEqual:@"wake"]];

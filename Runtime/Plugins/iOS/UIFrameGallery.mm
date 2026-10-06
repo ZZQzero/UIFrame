@@ -228,35 +228,19 @@ static NSDictionary *UFMDirectory(UFMJob *job) {
     if(enumerationError) return UFMSourceError(job,enumerationError,@"ReadFailed");
     [job.pages finish]; return @{@"status":@"ok"};
 }
-static NSDictionary *UFMLibrary(UFMJob *job) {
+static NSDictionary *UFMAlbums(UFMJob *job) {
     NSString *access=UFMAccess();
     if(![access isEqual:@"Authorized"] && ![access isEqual:@"Limited"]) return UFMError(@"PermissionDenied",@"Photo library read access has not been granted.");
     job.pages=[UFMPageStore new];
-    if([job.request[@"op"] isEqual:@"albums"]) {
-        NSMutableSet *seen=[NSMutableSet new];
-        for(NSNumber *type in @[@(PHAssetCollectionTypeSmartAlbum),@(PHAssetCollectionTypeAlbum)]) {
-            PHFetchResult *collections=[PHAssetCollection fetchAssetCollectionsWithType:(PHAssetCollectionType)type.integerValue subtype:PHAssetCollectionSubtypeAny options:nil];
-            for(PHAssetCollection *collection in collections) {
-                if(job.canceled) break;
-                if([seen containsObject:collection.localIdentifier]) continue; [seen addObject:collection.localIdentifier];
-                NSUInteger count=[PHAsset fetchAssetsInAssetCollection:collection options:UFMImageOptions()].count;
-                [job.pages add:@{ @"id":collection.localIdentifier, @"name":collection.localizedTitle ?: @"相册", @"count":@(count) }];
-            }
-        }
-    } else {
-        NSString *album=job.request[@"album"]; PHFetchResult<PHAsset*> *assets;
-        if(album.length) {
-            PHAssetCollection *collection=[PHAssetCollection fetchAssetCollectionsWithLocalIdentifiers:@[album] options:nil].firstObject;
-            if(!collection) return UFMError(@"SourceUnavailable",@"Album is no longer accessible.");
-            assets=[PHAsset fetchAssetsInAssetCollection:collection options:UFMImageOptions()];
-        } else assets=[PHAsset fetchAssetsWithOptions:UFMImageOptions()];
-        for(PHAsset *asset in assets) { @autoreleasepool {
+    NSMutableSet *seen=[NSMutableSet new];
+    for(NSNumber *type in @[@(PHAssetCollectionTypeSmartAlbum),@(PHAssetCollectionTypeAlbum)]) {
+        PHFetchResult *collections=[PHAssetCollection fetchAssetCollectionsWithType:(PHAssetCollectionType)type.integerValue subtype:PHAssetCollectionSubtypeAny options:nil];
+        for(PHAssetCollection *collection in collections) {
             if(job.canceled) break;
-            PHAssetResource *resource=[PHAssetResource assetResourcesForAsset:asset].firstObject;
-            NSString *name=resource.originalFilename ?: @"image";
-            [job.pages add:@{ @"id":asset.localIdentifier,@"name":name,@"mime":UFMMime(name.pathExtension),@"size":@(-1),
-                @"width":@(asset.pixelWidth),@"height":@(asset.pixelHeight),@"version":[NSString stringWithFormat:@"%.6f",asset.modificationDate.timeIntervalSince1970] }];
-        }}
+            if([seen containsObject:collection.localIdentifier]) continue; [seen addObject:collection.localIdentifier];
+            NSUInteger count=[PHAsset fetchAssetsInAssetCollection:collection options:UFMImageOptions()].count;
+            [job.pages add:@{ @"id":collection.localIdentifier, @"name":collection.localizedTitle ?: @"相册", @"count":@(count) }];
+        }
     }
     [job.pages finish]; return @{@"status":@"ok"};
 }
@@ -626,7 +610,7 @@ extern "C" void UFMStart(const char *json) {
             [PHPhotoLibrary requestAuthorizationForAccessLevel:PHAccessLevelReadWrite handler:^(PHAuthorizationStatus status) { UFMComplete(job,@{@"status":@"ok",@"access":UFMAccess()}); }];
         } else [UFMQueue addOperationWithBlock:^{ @autoreleasepool { @try {
             if([@[@"imagesOpen",@"imagesNext",@"imagesClose",@"observe",@"unobserve",@"drain",@"stat"] containsObject:op]) UFMComplete(job,UFMIndex(job));
-            else if([op isEqual:@"albums"] || [op isEqual:@"images"]) UFMComplete(job,UFMLibrary(job));
+            else if([op isEqual:@"albums"]) UFMComplete(job,UFMAlbums(job));
             else if([op isEqual:@"directory"]) UFMComplete(job,UFMDirectory(job));
             else if([op isEqual:@"export"] || [op isEqual:@"preview"]) {
                 if ([job.request[@"source"] isEqual:@"file"] || [job.request[@"source"] isEqual:@"directory"]) {

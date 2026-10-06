@@ -1,5 +1,5 @@
 PRAGMA application_id=1430667852;
-PRAGMA user_version=2;
+PRAGMA user_version=3;
 CREATE TABLE library_settings (
     singleton INTEGER PRIMARY KEY CHECK(singleton=1),
     library_id TEXT NOT NULL UNIQUE,
@@ -15,7 +15,6 @@ CREATE TABLE library_scopes (
     access_state INTEGER NOT NULL DEFAULT 0,
     access_fingerprint TEXT,
     completed_scan_id TEXT,
-    platform_cursor TEXT,
     requires_reconcile INTEGER NOT NULL CHECK(requires_reconcile IN(0,1))
 ) STRICT;
 CREATE TABLE assets (
@@ -43,13 +42,7 @@ CREATE INDEX assets_scan ON scope_assets(scope_id,seen_scan_id,source_id);
 CREATE TABLE scan_runs (
     id TEXT PRIMARY KEY,
     scope_id TEXT NOT NULL REFERENCES library_scopes(id),
-    permission_generation INTEGER NOT NULL,
-    scope_revision INTEGER NOT NULL,
-    log_start INTEGER NOT NULL,
-    phase INTEGER NOT NULL CHECK(phase BETWEEN 0 AND 3),
-    platform_upper_bound TEXT,
-    missing_cursor TEXT,
-    error TEXT
+    phase INTEGER NOT NULL CHECK(phase BETWEEN 0 AND 3)
 ) STRICT;
 CREATE INDEX scans_scope_phase ON scan_runs(scope_id,phase);
 CREATE INDEX scans_retention ON scan_runs(phase,id);

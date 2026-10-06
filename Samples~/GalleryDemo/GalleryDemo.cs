@@ -43,7 +43,6 @@ public sealed class GalleryDemo : MonoBehaviour
         var summary=await backup.GetSummaryAsync(ct);long completed=summary[BackupState.Completed],failed=summary[BackupState.Failed]+summary[BackupState.NeedsAttention];
         SetStatus($"已备份 {completed} 张，失败或需处理 {failed} 张。" + (backup.UsesNativeBackgroundTransfer ? "其余已提交系统后台，请刷新状态查看结果。" : ""));
     });
-    public void ContinueBackup() => ResumeBackup();
     public void PauseBackup() => Run(async ct => { await EnsureBackup(ct); await backup.PauseAsync(ct); SetStatus("备份已暂停。"); });
     public void ResumeBackup() => Run(async ct => { await EnsureBackup(ct); await backup.ResumeAsync(ct); SetStatus("已提交继续备份。"); });
     public void RefreshBackupStatus() => Run(async ct =>

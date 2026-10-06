@@ -6,6 +6,7 @@
 #include <chrono>
 #include <thread>
 #include <algorithm>
+#include <iterator>
 using namespace ufsqlite;
 void expect(bool ok,const char *message) { if(!ok) throw std::runtime_error(message); }
 struct Store {
@@ -107,7 +108,8 @@ int main() {
             expect(background.call(UFB_OPERATION_ITEMS,{"33","",int64_t(200)}).back().rows.size()==1,"Duplicate operation replayed targets");
             background.call(UFB_PRUNE_OPERATION,{"33",int64_t(30),int64_t(200)});
             auto operation=background.call(UFB_OPERATION_STATUS,{"33"}).back();
-            expect(operation.rows.size()==1 && operation.rows[0][10].integer==1,"Expired operation header was lost");
+            auto expired=std::find(operation.columns.begin(),operation.columns.end(),"details_expired");
+            expect(expired!=operation.columns.end() && operation.rows.size()==1 && operation.rows[0][expired-operation.columns.begin()].integer==1,"Expired operation header was lost");
             background.call(UFB_SCOPE,{"66","directory:photos","77",int64_t(1),int64_t(1),int64_t(1),int64_t(0)});
             background.call(UFB_BEGIN_SCAN,{"66","88","77",int64_t(1),int64_t(1),int64_t(1),int64_t(10)});
             background.call(UFB_SCAN_PAGE,{"66","88",int64_t(1),"file:old","v1","old.jpg","image/jpeg","old",int64_t(1)});
@@ -219,6 +221,25 @@ int main() {
             store.call(UFB_PAUSE,{int64_t(1)});store.call(UFB_PROTOCOL_ACTIONS,{int64_t(executor),int64_t(8)});
             for(auto task:{"cc","dd"})store.call(UFB_PROTOCOL_RELEASE,{task,int64_t(1)});
             expect(store.call(UFB_ATTEMPTS,{int64_t(0),int64_t(executor),int64_t(10)}).back().rows.empty(),"Released ownership retained in active inventory");
+        }
+        // Unsupported development schemas must fail without migration or data loss.
+        for(int version:{1,2,3,5}) {
+            auto schemaRoot=root/("schema-"+std::to_string(version));
+            {
+                Store store(schemaRoot.u8string(),identity,true);
+                store.call(UFB_PAUSE,{int64_t(1)});
+            }
+            auto path=schemaRoot/identity/"catalog.sqlite";
+            {
+                Client db;db.open(path.u8string(),false);
+                db.batch({{"PRAGMA user_version="+std::to_string(version)}});
+            }
+            auto contents=[&] {std::ifstream file(path,std::ios::binary);return std::string(std::istreambuf_iterator<char>(file),{});};
+            auto before=contents();expect(!before.empty(),"Schema fixture missing");
+            uint64_t handle=0;ufb_status status{};status.size=sizeof(status);status.abi=UFB_ABI;
+            expect(ufbackup_open(schemaRoot.u8string().c_str(),identity.c_str(),"https://test.invalid","test",0,&handle,&status)==UF_STATE,"Unsupported schema was accepted");
+            expect(handle==0,"Rejected schema retained a handle");
+            expect(contents()==before,"Rejected schema was modified");
         }
         uf_diagnostics diagnostics{}; diagnostics.size=sizeof(diagnostics); diagnostics.abi=UFSQLITE_ABI;
         expect(ufsqlite_get_diagnostics(&diagnostics)==0,"Diagnostics unavailable");

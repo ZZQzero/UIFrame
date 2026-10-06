@@ -1,7 +1,7 @@
 # 图片选择与备份示例
 
 1. 在场景中建立应用级对象，挂载 `GalleryDemo`。示例对象应独立于会被关闭的预览面板。
-2. 配置 UGUI `RawImage`、`Text`，为按钮绑定 `SelectOne`、`SelectMultiple`、`ReadAlbums`、`BackupSelected`、`ContinueBackup`、`PauseBackup`、`ResumeBackup`、`RefreshBackupStatus`、`ClearPreview`。
+2. 配置 UGUI `RawImage`、`Text`，为按钮绑定 `SelectOne`、`SelectMultiple`、`ReadAlbums`、`BackupSelected`、`PauseBackup`、`ResumeBackup`、`RefreshBackupStatus`、`ClearPreview`。
 3. 运行本机服务，配置服务器与账号；由运行时输入或认证服务调用 `SetAccessToken`，不要把令牌写在 Prefab。
 4. 选图、预览、备份。关闭预览不取消已经接收的备份任务；结束示例对象会等待 C# 服务停止；移动端已交给系统的上传继续保留，队列在下次创建相同服务目录后仍可恢复。退出账号前先暂停备份并等待完成。
 5. Editor 文件窗口只支持单选。多选与相册窗口、授权目录需在移动端验证。

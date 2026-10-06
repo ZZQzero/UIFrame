@@ -1,6 +1,6 @@
 # Shared BackupRepository contract
 
-ABI 4 (`ufb_status`: 284 bytes), catalog schema 3, SQLite core ABI 3. The only network protocol is v2. There are no schema migrations or old upload/session commands. SQL and business transitions live in `repository.cpp` and `protocol.cpp`; adapters perform scheduling, HTTP, protected storage and actual release.
+ABI 4 (`ufb_status`: 284 bytes), catalog schema 4, SQLite core ABI 3. The only network protocol is v2. Only the current catalog schema is accepted; unsupported databases are rejected without migration or deletion. There are no old upload/session commands. SQL and business transitions live in `repository.cpp` and `protocol.cpp`; adapters perform scheduling, HTTP, protected storage and actual release.
 
 A store is `<private root>/<SHA256(normalized server + newline + account)>/catalog.sqlite`. Its random source_namespace is distinct from the store ID, so local gallery IDs from different installations do not collide. Native existing-open reads persisted server/account without Unity. Android uses no-backup files; iOS uses Application Support, excluded from iCloud backup. C# exclusively owns preparation; native attachments retain their own repository lifetime.
 

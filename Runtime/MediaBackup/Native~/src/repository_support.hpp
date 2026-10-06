@@ -36,6 +36,6 @@ inline std::string admission(const std::string &task) {
 void durable_payload(const std::filesystem::path &payload,uint64_t bytes);
 void append_confirmation(std::vector<Command> &commands,const std::string &id,int64_t generation,
     const std::string &backup,const Value &hash,int64_t size,int64_t confirmed,int64_t now);
-Bytes protocol_command(Client &db,const std::string &path,const std::string &store,
+Bytes protocol_command(Client &db,const std::string &path,
     const std::string &account,unsigned command,const Args &args,unsigned capacity);
 }

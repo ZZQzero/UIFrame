@@ -2,7 +2,7 @@
   "abi": 4,
   "sqlite_build_id": "d485f695fda5529bd7ae610ff823fc211c45cdd4aa28fa94b9456b82bccf10fd",
   "binary": "libuiframe_backup.so",
-  "sha256": "9d989dabf9ccf83ef3d5d2b7d3351c4f1908d72575acbaa4f4118a0762979999",
+  "sha256": "c8b1a399632f5a268b524502796636ac2640d8a720c0a322e3fd8c32c2054ff8",
   "sources": [
     {
       "path": "CMakeLists.txt",
@@ -14,15 +14,15 @@
     },
     {
       "path": "src/protocol.cpp",
-      "sha256": "e7ab98fa88c7634ea86ffc3b9942dc334ed544bb98ec684fc5c9d59b5fc3d0a5"
+      "sha256": "98262af59027fb76e2e4d8a3093e5c73b153024e79ddfe4bce329cbaff2ca628"
     },
     {
       "path": "src/repository.cpp",
-      "sha256": "e3d11d7869d421185bb0fb4f18abc53a117d01df62c441a0d079cf4179681f57"
+      "sha256": "4983db5bf1a97adb5eb6e44a92e49bc2d41b613232710df04303d6912f676ab7"
     },
     {
       "path": "src/repository_support.hpp",
-      "sha256": "bbcf80909bbd5c3cecbd1f8aeed392a4b5697b975a482b012d111c89e054e98c"
+      "sha256": "7780c250c401cf53a103d0de190b5b7dc2745746cba21cefa41785178b58a963"
     },
     {
       "path": "include/ufbackup.h",
@@ -30,7 +30,7 @@
     },
     {
       "path": "schema/catalog.sql",
-      "sha256": "cd706ccb4f34f57bb733518cb2441a386077ca477b457dcbed2cda8d3f875c56"
+      "sha256": "ea9f200fbf56ccb447765170a3eb7e193d8af1f55a1c281aafb648c7b6af6a28"
     },
     {
       "path": "build/build.py",

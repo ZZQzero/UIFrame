@@ -22,7 +22,7 @@
 
 构建与真机验收状态见 [GalleryValidation.md](GalleryValidation.md)。计划中的性能数字为目标，不能从桌面编译或缓存预算推断手机峰值内存。
 
-当前备份使用唯一 v2 协议：有界准备、原生持久接收、批量 Plan、独立文件 PUT、服务端确认和滚动批量 Query。设计见 [后台备份协议实施计划](GalleryBackgroundProtocolPlan.md)，原实施证据见 [执行记录](GalleryBackgroundProtocolExecution.md)，当前登记／准备流程和验证见 [准备协调器重构记录](GalleryPreparationRedesign.md)。业务仓库 ABI 为 4、schema 为 3，通用 SQLite ABI 仍为 3；备份库无旧协议、旧 schema 或 JSON 数据迁移；schema 3 以前的开发库会明确拒绝，开发验证须显式选择新的空目录，不自动删库。图库索引单独支持下文声明的 v1 → v2 字段升级。
+当前备份使用唯一 v2 协议：有界准备、原生持久接收、批量 Plan、独立文件 PUT、服务端确认和滚动批量 Query。设计见 [后台备份协议实施计划](GalleryBackgroundProtocolPlan.md)，原实施证据见 [执行记录](GalleryBackgroundProtocolExecution.md)，当前登记／准备流程和验证见 [准备协调器重构记录](GalleryPreparationRedesign.md)。业务仓库 ABI 为 4、catalog schema 为 4，图库 library schema 为 3，通用 SQLite ABI 仍为 3。两库只接受各自当前版本，不提供旧协议、旧 schema 或 JSON 数据迁移；旧开发库明确拒绝打开，开发验证须显式选择新的空目录，不自动删库。清理范围与验证见 [部署前旧代码清理](GalleryPreparationRedesign.md#部署前旧代码清理)。
 
 ## 系统选择与图片所有权
 
@@ -252,7 +252,7 @@ var finished = await backup.WaitOperationAsync(id, token);
 
 操作包括 Resume、Pause、Cancel、Retry、RetryCleanup、ClearHistory。显式目标1–128个，或按状态筛选；不能同时传两者。Selecting 每页最多128个，Running 每页最多32个。筛选按逐页当时状态及提交创建上界进行；选择完毕后目标固定。WaitingForRelease 仍未完成，实际系统资源释放后才能结束。取消 Wait 只停止等待。相同ID相同参数返回原操作，参数不同拒绝；失败阶段不自动重跑；仓库已持久记录某个操作失败时，其余独立操作继续推进。无法确认持久结果或平台同步失败时停止当前驱动，等待者观察原错误，排除故障并关闭 / 重开服务后继续未失败阶段。
 
-逐项结果包括 Applied、AlreadySatisfied、NotApplicable、Missing、Failed、Pending、WaitingForRelease。清历史不会级联删除操作结果；明细过期后仍保留持久操作头和幂等依据，查询明确标记 `DetailsExpired`。查询未知ID返回 null。
+逐项结果包括 Applied、AlreadySatisfied、NotApplicable、Missing、Pending、WaitingForRelease；执行故障由整个操作的 Failed 阶段和 Error 表达。清历史不会级联删除操作结果；明细过期后仍保留持久操作头和幂等依据，查询明确标记 `DetailsExpired`。查询未知ID返回 null。
 
 Android 自动模式使用持久 JobScheduler；用户前台主动发起时，API34以上使用用户主动数据传输 Job，API25–33使用带进度及暂停通知的前台服务。启动失败明确报告，不自动降级；每仓库最多3个工作线程，同时最多4个活跃仓库。凭据通过 AndroidKeyStore 加密保存。iOS 的控制清单与照片都使用文件式后台 URLSession，Keychain 保护凭据；所有会话最多16个系统任务，照片最多14个，为控制请求保留空间，未来 Query 使用 earliestBeginDate。平台只负责系统能力，业务状态转换统一在共享仓库。
 
@@ -327,7 +327,7 @@ python3 Tools~/BackupServer/server.py serve --root /absolute/private/backup-v2
 - 后台交接分为认领、凭据持久化后的 Handoff、系统受理；每个控制请求和照片传输分别记录系统绑定与执行阶段。系统只执行已交接代次；C#关闭或失败不能代替平台宣告凭据已释放。文件统一由共享仓库 Seal 刷盘，再由 AcceptItem 逐项接受。
 - `ReadChangesAsync` 在单个只读 SQL 快照中读取身份、权限代次、保留水位和最多200条变化；日志被截断或范围变代时返回 `RequiresRefresh`，不把空页误当已消费。
 - `ImageReference.FromFile` 是便宜的文件元数据引用；持久目录索引在此基础上保存内容哈希证明。完整枚举与文件增量均排除符号链接／重解析点及其子项，普通文件变成链接后会移出索引。首次扫描、重开、监听溢出、重新获得焦点或显式 `RequestRefresh` 后重新核对内容；连续监听下的例行完整枚举可复用已核对且 stat 未变的版本，已通知路径始终重新核对。哈希使用池化128 KiB缓冲和工作线程。索引版本用于缩略图键、备份判重及接收校验；目录备份复制前后检查文件元数据，复制时计算的哈希直接与索引版本比较，不在复制前后再次完整读取源文件。普通 `FromFile` 引用只有元数据检查，若需内容证明应使用索引返回的引用；不要自行截断版本字符串。复制器关闭流后由原生 Seal 统一刷盘发布；上传前对暂存文件及下载时的哈希校验仍保留。
-- 图库索引保留提供者已知的字节大小，并贯通分页、变化日志与自动候选；未知大小保持未知。图库 schema v1 到 v2 的事务升级只添加可空大小字段并要求重新核对，不重建或丢弃已有记录；其他未声明版本仍拒绝。
+- 图库索引保留提供者已知的字节大小，并贯通分页、变化日志与自动候选；未知大小保持未知。图库只接受 schema 3，不再提供 v1 到 v2 的字段升级；不支持的版本明确拒绝，原文件保留。
 - Android SAF 枚举和 stat 使用相同的版本规则：缺少修改时间／大小、修改时间为0或大小为负时，枚举不返回版本，stat 返回 `ContentVersionUnavailable`。依赖版本的缓存和备份不能使用占位字符串，直接预览仍按自身读取契约执行。
 - Android 外部媒体通知先规范化为枚举使用的 external 图片身份；非图片/未知卷通知要求完整核对。扫描保存开始时的提供者版本/各卷 generation 与观察序号，完成前再次比较。iOS 扫描复用观察者持有的 PHFetchResult，比较观察修订；观察者重建必须完整核对，不把进程内序号当作可跨进程恢复的 PhotoKit token。扫描期间边界变化以 `LibraryChangedDuringScan` 失败，业务显式发起新扫描。
 - Limited 的不确定通知、观察者重建或恢复前台只要求完整核对。完成核对时按来源身份排序、每页200项计算可见成员摘要并持久保存；只有授权状态改变，或已核对的 Limited 成员集合改变，才推进权限代次。照片内容或名称变化不会改变成员摘要，相同集合在观察重建、确认后再次扫描或索引重开时不会重复要求确认。Limited 下移出记录为 `AccessChanged`，不推定原图已被删除。范围变化后自动循环抛出 `ScopeConfirmationRequired` 并仅暂停该范围未完成任务。停止并等待循环后，业务向用户展示当前可见范围，再调用 `await automatic.ConfirmScopeAsync(token)`。此调用允许后续扫描，不恢复既有暂停任务；恢复任务仍由业务显式决定。不会自动弹权限窗口。

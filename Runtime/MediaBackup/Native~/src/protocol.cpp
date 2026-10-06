@@ -176,8 +176,8 @@ void finish_error(std::vector<Command> &commands,const std::string &id,int64_t g
 }
 }
 
-Bytes protocol_command(Client &db,const std::string &path,const std::string &store,const std::string &account,unsigned command,const Args &a,unsigned capacity) {
-    (void)store;std::vector<Command> commands;auto directory=std::filesystem::u8path(path).parent_path();
+Bytes protocol_command(Client &db,const std::string &path,const std::string &account,unsigned command,const Args &a,unsigned capacity) {
+    std::vector<Command> commands;auto directory=std::filesystem::u8path(path).parent_path();
     switch(command) {
     case UFB_CONFIRM_SCOPE:
         a.count(1);commands.emplace_back("UPDATE scopes SET requires_confirmation=0 WHERE id=?",std::vector<Value>{a.id(0)},1);break;

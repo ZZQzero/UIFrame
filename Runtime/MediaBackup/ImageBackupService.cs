@@ -337,18 +337,18 @@ namespace Game.Media.Backup
             Check(); if (!Path.IsPathRooted(destination)) throw new ArgumentException("Absolute destination required.");
             var rows=(await Db(Command.Receipt,cancellationToken,backupId)).Rows;
             if(rows.Count!=1) throw new ArgumentException("Confirmed backup receipt not found.",nameof(backupId));
-            var receipt=Receipt(rows[0]); var record=new BackupTaskInfo { backupId=receipt.BackupId,size=receipt.ByteCount,sha256=receipt.Sha256 };
+            var receipt=Receipt(rows[0]);
             if (File.Exists(destination)) throw new IOException("Destination already exists.");
             using var linked = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, lifetime.Token);
             cancellationToken = linked.Token; downloads++;
             string temporary = destination + "." + Guid.NewGuid().ToString("N") + ".part";
             try
             {
-                using var request = Request(HttpMethod.Get, "/v2/backups/" + Uri.EscapeDataString(record.backupId) + "/content");
+                using var request = Request(HttpMethod.Get, "/v2/backups/" + Uri.EscapeDataString(receipt.BackupId) + "/content");
                 await WithResponse(request, (response, token) => UniTask.RunOnThreadPool(async () =>
                 {
                     CheckResponse(response);
-                    if (response.Content.Headers.ContentLength.HasValue && response.Content.Headers.ContentLength.Value != record.size)
+                    if (response.Content.Headers.ContentLength.HasValue && response.Content.Headers.ContentLength.Value != receipt.ByteCount)
                         throw new IOException("Downloaded backup size mismatch.");
                     using var input = await response.Content.ReadAsStreamAsync();
                     using var output = new FileStream(temporary, FileMode.CreateNew, FileAccess.Write, FileShare.None);
@@ -357,14 +357,14 @@ namespace Game.Media.Backup
                     for (;;)
                     {
                         token.ThrowIfCancellationRequested();
-                        int count = await input.ReadAsync(buffer, 0, (int)Math.Min(buffer.Length, record.size - received) + (received == record.size ? 1 : 0), token);
+                        int count = await input.ReadAsync(buffer, 0, (int)Math.Min(buffer.Length, receipt.ByteCount - received) + (received == receipt.ByteCount ? 1 : 0), token);
                         if (count == 0) break;
-                        if (count > record.size - received) throw new IOException("Downloaded backup exceeds expected size.");
+                        if (count > receipt.ByteCount - received) throw new IOException("Downloaded backup exceeds expected size.");
                         await output.WriteAsync(buffer, 0, count, token);
                         sha.TransformBlock(buffer, 0, count, null, 0); received += count;
                     }
                     sha.TransformFinalBlock(Array.Empty<byte>(), 0, 0);
-                    if (received != record.size || Hex(sha.Hash) != record.sha256) throw new IOException("Downloaded backup checksum mismatch.");
+                    if (received != receipt.ByteCount || Hex(sha.Hash) != receipt.Sha256) throw new IOException("Downloaded backup checksum mismatch.");
                     token.ThrowIfCancellationRequested(); output.Flush(true); return true;
                 }), cancellationToken);
                 cancellationToken.ThrowIfCancellationRequested(); File.Move(temporary, destination);

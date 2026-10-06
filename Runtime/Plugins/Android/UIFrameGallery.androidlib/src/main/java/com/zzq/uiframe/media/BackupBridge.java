@@ -175,7 +175,7 @@ public final class BackupBridge {
                     if(op.equals("accept"))repository.call(BackupRepository.HANDOFF,id,request.getLong("generation"),credential);
                     else if(op.equals("resume"))repository.call(BackupRepository.PROTOCOL_RESUME,id,credential,utcTicks());
                     else repository.call(BackupRepository.PROTOCOL_RECONCILE,id,utcTicks(),request.getBoolean("cancel"),credential);
-                } else if(op.equals("wake") || op.equals("sync") || op.equals("recover") || op.equals("stop") || op.equals("pause")) {
+                } else if(op.equals("wake") || op.equals("sync") || op.equals("recover") || op.equals("pause")) {
                     synchronizeExecutor(repository,op.equals("recover"));
                     if(op.equals("pause"))((JobScheduler)app.getSystemService(Context.JOB_SCHEDULER_SERVICE)).cancel(jobId(identity));
                     else schedule(app,repository,0);
