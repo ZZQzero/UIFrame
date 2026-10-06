@@ -1,5 +1,5 @@
 PRAGMA application_id=1430667843;
-PRAGMA user_version=4;
+PRAGMA user_version=5;
 CREATE TABLE store_settings (
     singleton INTEGER PRIMARY KEY CHECK(singleton=1),
     store_id TEXT NOT NULL UNIQUE,
@@ -11,7 +11,8 @@ CREATE TABLE store_settings (
     source_namespace TEXT NOT NULL DEFAULT '',
     development_http INTEGER NOT NULL DEFAULT 0 CHECK(development_http IN(0,1)),
     transfer_mode INTEGER NOT NULL DEFAULT 0 CHECK(transfer_mode IN(0,1)),
-    last_control_kind INTEGER NOT NULL DEFAULT 2 CHECK(last_control_kind BETWEEN 0 AND 2)
+    last_any_control_kind INTEGER NOT NULL DEFAULT 2 CHECK(last_any_control_kind BETWEEN 0 AND 2),
+    last_wifi_control_kind INTEGER NOT NULL DEFAULT 2 CHECK(last_wifi_control_kind BETWEEN 0 AND 2)
 ) STRICT;
 CREATE TABLE preparations (
     id TEXT PRIMARY KEY,

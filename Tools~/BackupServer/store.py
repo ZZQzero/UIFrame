@@ -70,6 +70,7 @@ class Store:
         self.stop = threading.Event()
         self.worker = None
         self.worker_error = None
+        self.closed = False
         self.owner = DirectoryOwner(self.root)
         self.db = None
         try:
@@ -103,12 +104,33 @@ class Store:
             raise
 
     def close(self):
+        if self.closed:
+            return
         self.stop.set()
         self.wake.set()
         if self.worker:
             self.worker.join()
-        self.db.close()
-        self.owner.close()
+        self.closed = True
+        primary = self.worker_error
+        # The HTTP server drains its handlers before this final ownership release.
+        # A verifier failure does not excuse leaking the DB or directory lock.
+        for close in (self.db.close, self.owner.close):
+            try:
+                close()
+            except Exception as error:
+                if primary is None:
+                    primary = error
+                elif error is not primary:
+                    print('Backup shutdown cleanup failed: ' + repr(error), file=sys.stderr)
+        if primary is not None:
+            raise primary
+
+    def require_verifier(self):
+        # Caller holds self.lock, also used to publish the worker's failure.
+        if self.worker_error is not None:
+            raise ProtocolError(503, 'ConfirmationUnavailable', 'Confirmation worker failed; explicitly restart the service') from self.worker_error
+        if self.stop.is_set():
+            raise ProtocolError(503, 'ServiceStopping', 'Backup service is stopping')
 
     def authenticate(self, authorization):
         if not authorization.startswith('Bearer '):
@@ -171,6 +193,7 @@ class Store:
         metadata = self._metadata(row)
         if row['state'] == 'confirmed':
             return dict(result, status='Confirmed', receipt=self._receipt(row, metadata))
+        self.require_verifier()
         if row['state'] == 'verifying':
             return dict(result, status='Verifying', nextCheckAt=now_ms() + CHECK_INTERVAL_MS)
         expires = row['expires_at']
@@ -190,6 +213,8 @@ class Store:
             raise RuntimeError('Private storage origin has not been configured')
         parameter_hash = fingerprint(dict(operation=operation, request=request))
         with self.lock, self.db:
+            if operation == 'plans':
+                self.require_verifier()
             existing = self.db.execute('SELECT fingerprint FROM requests WHERE account=? AND id=?', (account, request['requestId'])).fetchone()
             if existing and existing[0] != parameter_hash:
                 raise ProtocolError(409, 'RequestConflict', 'requestId already belongs to different parameters')
@@ -252,6 +277,7 @@ class Store:
             raise ProtocolError(403, 'UploadAuthorization', 'Invalid upload authorization')
         with self.upload_lock(upload_id):
             with self.lock:
+                self.require_verifier()
                 row = self.db.execute('SELECT * FROM attempts WHERE upload_id=?', (upload_id,)).fetchone()
                 if row is None or not hmac.compare_digest(signature, self._signature(row, expires)) or expires <= now_ms():
                     raise ProtocolError(403, 'UploadAuthorization', 'Upload authorization is invalid or expired')
@@ -263,6 +289,7 @@ class Store:
             incoming_id = secrets.token_hex(16)
             path = self.directory(row['account']) / (incoming_id + '.incoming')
             with self.lock, self.db:
+                self.require_verifier()
                 self.db.execute("INSERT INTO incoming(id,upload_id,path,state,created_at) VALUES(?,?,?,'writing',?)",
                                 (incoming_id, upload_id, str(path), now_ms()))
         # Each incoming file has one stream owner. Its durable 'writing' row
@@ -290,6 +317,10 @@ class Store:
             self.wake.set()
             if current in ('canceled', 'rejected'):
                 raise ProtocolError(409, 'AttemptClosed', 'Attempt closed during upload')
+            # Keep an already published ready file for explicit restart, but do
+            # not report healthy admission after its verifier has stopped.
+            with self.lock:
+                self.require_verifier()
         except BaseException as primary:
             try:
                 with self.lock, self.db:
@@ -421,7 +452,8 @@ class Store:
                     self.wake.wait(0.5)
                     self.wake.clear()
             except Exception as error:
-                self.worker_error = error
+                with self.lock:
+                    self.worker_error = error
                 report(dict(error='Confirmation worker stopped: ' + repr(error)))
         self.worker = threading.Thread(target=run, name='BackupConfirmation')
         self.worker.start()

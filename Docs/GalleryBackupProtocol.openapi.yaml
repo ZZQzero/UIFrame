@@ -37,7 +37,9 @@ paths:
         operation returns 409; equal parameters can return a newer dynamic result.
         An already canceled attempt returns Canceled, including cancel-before-plan.
         An expired descriptor can be renewed by an explicit Plan after the client
-        has proved no prior executor is still using it.
+        has proved no prior executor is still using it. A failed verifier returns
+        503 ConfirmationUnavailable without admitting new work; explicit service
+        recovery is required and clients must not automatically retry.
       requestBody:
         required: true
         content:
@@ -49,6 +51,7 @@ paths:
         '401': {$ref: '#/components/responses/Error'}
         '409': {$ref: '#/components/responses/Error'}
         '413': {$ref: '#/components/responses/Error'}
+        '503': {$ref: '#/components/responses/Error'}
   /v2/backup/status:
     post:
       operationId: queryBackups
@@ -58,6 +61,9 @@ paths:
         cannot commit. Verifying/Pending must include nextCheckAt. No polling
         before that time, including under storage pressure. Failed/unknown
         operations require explicit reconciliation; they are not normal polling.
+        A failed verifier returns 503 for nonterminal attempts rather than a new
+        upload authorization or an unserviceable Verifying polling schedule.
+        Confirmed results remain readable.
       requestBody: {$ref: '#/components/requestBodies/Identities'}
       responses:
         '200': {$ref: '#/components/responses/Results'}
@@ -65,6 +71,7 @@ paths:
         '401': {$ref: '#/components/responses/Error'}
         '409': {$ref: '#/components/responses/Error'}
         '413': {$ref: '#/components/responses/Error'}
+        '503': {$ref: '#/components/responses/Error'}
   /v2/backup/cancellations:
     post:
       operationId: cancelBackups

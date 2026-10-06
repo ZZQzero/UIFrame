@@ -87,6 +87,7 @@ namespace Game.Media.Backup
             var values=new List<object>{(int)action,state};values.AddRange(targets);
             byte[] fingerprint;using(var sha=SHA256.Create())fingerprint=sha.ComputeHash(BackupRepository.Encode(values.ToArray()));
             values=new List<object>{id,(int)action,state,Now,targets.Length,fingerprint};values.AddRange(targets);
+            if(operationDriveFailure!=null)System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(operationDriveFailure).Throw();
             await Db(Command.Operation,cancellationToken,values.ToArray());StartOperationDriver();return id;
         }
         public async UniTask<BackupOperationStatus> QueryOperationAsync(string operationId,BackupOperationCursor cursor=null,int pageSize=100,CancellationToken cancellationToken=default)

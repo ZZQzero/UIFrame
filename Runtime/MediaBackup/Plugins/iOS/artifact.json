@@ -2,7 +2,7 @@
   "abi": 4,
   "sqlite_build_id": "d485f695fda5529bd7ae610ff823fc211c45cdd4aa28fa94b9456b82bccf10fd",
   "binary": "libuiframe_backup.a",
-  "sha256": "ab5cb3097ceeb6f9b95b309d3c466757cd03202562e6b00dd3d1f70cb20ac534",
+  "sha256": "28d13abc3c5892e6f280e7f585c43f626e8c1ec967e94dc26e278097182703b1",
   "sources": [
     {
       "path": "CMakeLists.txt",
@@ -14,11 +14,11 @@
     },
     {
       "path": "src/protocol.cpp",
-      "sha256": "98262af59027fb76e2e4d8a3093e5c73b153024e79ddfe4bce329cbaff2ca628"
+      "sha256": "6f7a62f3e8d93ffab543eb427578bb8164605a6eb97fe21055fcc27677e9d38a"
     },
     {
       "path": "src/repository.cpp",
-      "sha256": "4983db5bf1a97adb5eb6e44a92e49bc2d41b613232710df04303d6912f676ab7"
+      "sha256": "b09c5eeaefcacb8e7f7205918e2074586adcf57d3fa93552823cc82ab9ac5d83"
     },
     {
       "path": "src/repository_support.hpp",
@@ -30,7 +30,7 @@
     },
     {
       "path": "schema/catalog.sql",
-      "sha256": "ea9f200fbf56ccb447765170a3eb7e193d8af1f55a1c281aafb648c7b6af6a28"
+      "sha256": "660fc9824e5e44849d809f88582d2d417bd0e882c7b1596e2a79c36af8ad6279"
     },
     {
       "path": "build/build.py",

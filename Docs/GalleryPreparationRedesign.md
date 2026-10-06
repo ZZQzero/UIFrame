@@ -6,7 +6,7 @@
 
 将固定成员登记、容量准入、实际文件准备和执行交接分为明确阶段。这样长时间容量等待不会占住自动扫描，来源租约和任务控制范围也在最早的确定点固定。文件准备保持单一生产者，避免多文件并行预留与取消释放的复杂度；上传仍保留既有并发与 v2 服务端确认协议。
 
-这是部署前的接口／schema 调整，不保留旧登记命令的双轨兼容。业务 ABI 为 4，catalog schema 为 4，图库 schema 为 3，HTTP 协议仍为 v2，SQLite ABI 仍为 3。两库非当前版本的开发库明确拒绝，调用方使用新的测试目录；没有自动迁移或删除数据库。默认暂存上限由512MiB改为1GiB、单文件仍为512MiB，避免未知大小照片和上一张上传必然串行；仅按需占用磁盘。
+这是部署前的接口／schema 调整，不保留旧登记命令的双轨兼容。业务 ABI 为 4，catalog schema 为 5，图库 schema 为 3，HTTP 协议仍为 v2，SQLite ABI 仍为 3。两库非当前版本的开发库明确拒绝，调用方使用新的测试目录；没有自动迁移或删除数据库。默认暂存上限由512MiB改为1GiB、单文件仍为512MiB，避免未知大小照片和上一张上传必然串行；仅按需占用磁盘。
 
 ## 已落地的边界
 
@@ -37,7 +37,7 @@
 
 本轮复查上一轮的登记、容量、scope 控制、执行交接、原生调度与释放改动，并按实际引用清理遗留实现：
 
-- Prepare 每项只携带 taskId/source/version/name/mime，初始文件占用由仓库固定为 0；容量预留只由 TryPrepare 管理。移除恒为零的旧预留占位字段，业务 ABI 提升到 4，catalog schema 保持 3。该阶段的 schema 3 开发库无需迁移（后续清理已改为只接受 schema 4，见下文）；ABI 3 插件不能与新托管代码混用。
+- Prepare 每项只携带 taskId/source/version/name/mime，初始文件占用由仓库固定为 0；容量预留只由 TryPrepare 管理。移除恒为零的旧预留占位字段，业务 ABI 提升到 4，catalog schema 保持 3。该阶段的 schema 3 开发库无需迁移（其后的 schema 变化见下文）；ABI 3 插件不能与新托管代码混用。
 - 删除无生产调用方的 Schedulable (75) 命令及其分支。Attempts 仍用于实际资源所有权查询，ControlCreate / Uploads / ProtocolWake 负责调度；未交接任务不可调度的回归改为检查生产 ControlCreate 入口。
 - 删除不可达的 BackupBudgetExceededException、无用 Snapshot / Payload 方法及 relativePath 映射、旧异步扫描异常拆包分支；HTTP 状态检查改为同步方法，保留 HTTP 错误和 RetryAfter 信息。
 - accepting 更名为 registering，明确它只表示登记临界区。桌面 Plan 是否立即提交改为检查实际 preparing 状态，准备期间遵循既有 250ms / 32 项聚合规则。
@@ -75,4 +75,27 @@ SQLite 上游源码、SQLite 插件和换机／重装恢复仍不在本轮范围
 - macOS、Android arm64、iOS arm64、Windows x64业务插件均已更新。来源、二进制与现有SQLite依赖哈希一致，共同build ID为 `6a8f27ff62c357791c251e3341b14727cb911be8302c6065356eba1305574c2e`。SQLite源码及插件无改动。
 - 证据：工作区 `ReviewArtifacts/gallery-legacy-removal-2026-10-06/verification.json`、逐文件哈希、产物校验及原始日志。未运行Android／iOS真机、Windows程序或长期负载。
 
-前轮完整审查已确认的批量驱动故障准入／关闭传播、Android排队Job更新、混合网络策略合批、参考服务核验线程故障处理，是独立行为问题，未计入本次旧代码清理的修复成果。详情与复现保留在 `ReviewArtifacts/gallery-complete-followup-2026-10-06/review.md`，不能将本次回归通过解释为这些问题已解决。
+前轮完整审查已确认的批量驱动故障准入／关闭传播、Android排队Job更新、混合网络策略合批、参考服务核验线程故障处理，当时未计入旧代码清理的修复成果；现已在下述后续修复处理。详情与复现保留在 `ReviewArtifacts/gallery-complete-followup-2026-10-06/review.md`，当时的清理回归不作为这些问题的修复证据，修复验证见下文。
+
+## 故障修复与开发数据检查
+
+用户授权清理旧开发库并修复完整审查的 F1–F4。项目目录和 `~/Library/Application Support/DefaultCompany/{UIFrameTest,uiframe-audit-20261006-unity}` 中未找到 library.sqlite／catalog.sqlite 文件，因此没有删除现有数据。应用只支持当前 schema；不添加运行时自动删库、迁移或重建。SQLite 源码／插件以及换机／重装恢复继续排除。
+
+| 问题 | 修复与保护边界 |
+| --- | --- |
+| F1 批量驱动失败后仍登记工作 | SubmitOperationAsync 在持久写入前检查驱动故障；重复ID也通过同一准入规则，已有结果通过查询读取。未完成等待保持原异常；已完成结果不被改写。Shutdown 汇集该故障，按异常身份去重，尝试其余资源释放后传播，显式重开可继续未完成阶段。 |
+| F2 Android旧排队条件阻塞新工作 | 排队Job记录绝对最早运行时间及网络／执行模式，只有满足当前请求时复用；更早工作或条件变化通过schedule更新，拒绝更新会报错且不把新任务标成已调度。发布更新前在启动使用的同一锁下重查Run，活跃Run只唤醒，不替换其系统所有者。 |
+| F3 Wi-Fi请求阻塞任意网络任务 | 合批成员同时固定scope、epoch、wifi_only，每种网络策略各有当前和未来Query名额，轮换记录也各自独立。Android先填充两个有界候选，再按网络可用性、取消优先、到期／创建顺序选择，仍只执行1个控制和2张照片。iOS最多检查4个候选并交给对应会话，维持16个系统任务及照片上限；全局满额仍等待实际释放。聚合窗口只取本组成员时间，另一组新成员不会借用旧时间提前发送。 |
+| F4 服务核验线程故障仍授权上传 | 在同一锁下发布故障并检查新Plan、未确认状态和PUT准入，返回明确503。已确认查询／下载及取消保留；在途文件完成持久发布后报告故障，ready文件保留给显式重启核验。关闭等待worker结束，尝试数据库和目录锁释放，并保留原异常；不自动重启worker或重试请求。 |
+
+catalog schema 提升为5，仅替换网络策略各自的持久轮换字段；library schema 3、业务ABI4、SQLite ABI3和HTTP v2保持不变。新名额限制的是排队请求数，不能当作流／凭据释放事实。暂停、取消、权限代次与迟到回执继续经过原状态机；没有把所有旧任务改成当前配置的网络策略。
+
+### 故障修复验证
+
+- F1 Unity用例、F2延后Job用例、F3网络分组用例、F4真实HTTP／在途上传用例先在修复前执行并失败；修复后通过。原始失败证据单独保留，未覆盖为成功日志。
+- 最终Unity媒体与备份回归88项：87通过、0失败、1跳过（需要Android构建目标）。包含原异常身份、故障后零新登记、已完成结果可读、关闭释放后重开，以及真实HTTP上传／回执／下载／历史清理。
+- 服务端42项全部通过，新增核验线程故障、在途ready保留、数据库关闭再报错仍释放目录锁等行为验证。OpenAPI 3.1及8组正反契约样例通过。
+- 最终原生CTest、13项准入、30项协议、5组网络调度、48个中断窗口、2个核对恢复窗口及范围分页通过。网络用例覆盖不同执行端、两组名额、独立聚合与轮换、暂停／取消／重开、实际释放；非当前catalog schema 1／2／3／4／6拒绝且文件不改写。
+- Android API36 Java编译、生产JNI／仓库绑定通过，覆盖调度更新拒绝、活跃Run不被替换、可用网络选择和前台服务异步确认不死锁。iOS15最低版本语法检查和生产响应／截止时间辅助逻辑通过。
+- 四平台业务插件已安装并验证源码、二进制和现有SQLite依赖身份，共同build ID为 `2df411c52531bed74f26dade7e7dd551a1b898b6ca61829f88874e9859aee227`。SQLite源码和插件无改动。
+- 证据：工作区 `ReviewArtifacts/gallery-fault-fixes-2026-10-06/verification.json`、源码快照、产物校验、开发库搜索记录和原始日志。Android／iOS真机后台行为、Windows实际执行和长期负载仍未覆盖；回归通过不等于零缺陷保证。

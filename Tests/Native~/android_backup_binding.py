@@ -47,8 +47,17 @@ public class Context {
     public Object getSystemService(String name){return jobs;}
     public String getPackageName(){return "fixture";}
     public android.content.pm.PackageManager getPackageManager(){throw new UnsupportedOperationException();}
-    public ComponentName startService(Intent intent){throw new UnsupportedOperationException();}
-    public ComponentName startForegroundService(Intent intent){throw new UnsupportedOperationException();}
+    public Runnable foregroundCallback;
+    public ComponentName startService(Intent intent){return startForegroundService(intent);}
+    public ComponentName startForegroundService(Intent intent){if(foregroundCallback==null)throw new UnsupportedOperationException();new Thread(foregroundCallback).start();return new ComponentName(this,Object.class);}
+}''',
+    'android/content/Intent.java': '''
+package android.content;
+public class Intent {
+    private final java.util.Map<String,String> extras=new java.util.HashMap<>();
+    public Intent(Context context,Class<?> type){}
+    public Intent putExtra(String key,String value){extras.put(key,value);return this;}
+    public String getStringExtra(String key){return extras.get(key);}
 }''',
     'android/content/ComponentName.java': '''
 package android.content;
@@ -61,18 +70,21 @@ public class PersistableBundle {
     public String getString(String key){return values.get(key);}
     public void putBoolean(String key,boolean value){values.put(key,Boolean.toString(value));}
     public boolean getBoolean(String key){return Boolean.parseBoolean(values.get(key));}
+    public void putLong(String key,long value){values.put(key,Long.toString(value));}
+    public long getLong(String key){return values.containsKey(key)?Long.parseLong(values.get(key)):0;}
+    public boolean containsKey(String key){return values.containsKey(key);}
 }''',
     'android/app/job/JobInfo.java': '''
 package android.app.job;
 public class JobInfo {
     public static final int NETWORK_TYPE_ANY=1,NETWORK_TYPE_UNMETERED=2;
-    public int id;public boolean user;public long latency;public android.os.PersistableBundle extras;
+    public int id,network;public boolean user;public long latency;public android.os.PersistableBundle extras;
     public android.os.PersistableBundle getExtras(){return extras;}
     public static class Builder {
         private final JobInfo value=new JobInfo();
         public Builder(int id,android.content.ComponentName component){value.id=id;}
         public Builder setExtras(android.os.PersistableBundle extras){value.extras=extras;return this;}
-        public Builder setRequiredNetworkType(int type){return this;}
+        public Builder setRequiredNetworkType(int type){value.network=type;return this;}
         public Builder setPersisted(boolean persisted){return this;}
         public Builder setUserInitiated(boolean user){value.user=user;return this;}
         public Builder setEstimatedNetworkBytes(long down,long up){return this;}
@@ -149,6 +161,58 @@ public class BindingTest {
                 BackupRepository.Row task=repository.call(7,"cc").get(0);
                 check(task.number("state")==4 && task.flag("credential_released"),"Idle pause retained credentials");
             }
+        }
+        // A queued job may be reused only while it still meets the latest request.
+        try(BackupRepository repository=new BackupRepository(context,"9".repeat(64))) {
+            prepare(context,repository,hash,true,"bb","cc");
+            java.lang.reflect.Method schedule=BackupBridge.class.getDeclaredMethod("schedule",Context.class,BackupRepository.class,long.class);schedule.setAccessible(true);
+            long later=BackupBridge.utcTicks()+600000000L;
+            schedule.invoke(null,context,repository,later);int before=context.jobs.submissions;
+            check(context.jobs.getPendingJob(BackupBridge.jobId(repository.id)).latency>0,"Future wake was not delayed");
+            check(context.jobs.getPendingJob(BackupBridge.jobId(repository.id)).network==android.app.job.JobInfo.NETWORK_TYPE_UNMETERED,"Wi-Fi work lost its network constraint");
+            schedule.invoke(null,context,repository,0L);
+            check(context.jobs.submissions==before+1,"New immediate work inherited an old delayed job");
+            check(context.jobs.getPendingJob(BackupBridge.jobId(repository.id)).latency==0,"Immediate work is still delayed");
+            before=context.jobs.submissions;schedule.invoke(null,context,repository,later);
+            check(context.jobs.submissions==before,"An earlier pending wake was postponed or replaced");
+            prepare(context,repository,hash,false,"ee","ff");context.jobs.reject=true;
+            try{schedule.invoke(null,context,repository,0L);throw new AssertionError("Rejected network update reported success");}
+            catch(java.lang.reflect.InvocationTargetException expected){check(expected.getCause() instanceof IOException,"Lost network update failure");}
+            check(!repository.call(7,"ff").get(0).flag("system_scheduled"),"Rejected network update admitted new work");
+            check(context.jobs.getPendingJob(BackupBridge.jobId(repository.id)).network==android.app.job.JobInfo.NETWORK_TYPE_UNMETERED,"Rejected update removed the previous job");
+            context.jobs.reject=false;schedule.invoke(null,context,repository,0L);
+            check(context.jobs.getPendingJob(BackupBridge.jobId(repository.id)).network==android.app.job.JobInfo.NETWORK_TYPE_ANY,"Any-network work remained behind a Wi-Fi job");
+            repository.call(80,"ce",1,BackupBridge.utcTicks(),false,true);
+            repository.call(80,"cf",1,BackupBridge.utcTicks(),false,true);
+            java.util.List<BackupRepository.Row> controls=repository.call(89,1,"");
+            check(controls.size()==2,"Mixed policy requests were not separated");
+            BackupRepository.Row ready=BackupBridge.readyControl(controls,BackupBridge.utcTicks(),true,false);
+            check(ready!=null && !ready.flag("wifi_only"),"An unavailable Wi-Fi request blocked an eligible control");
+            check(BackupBridge.readyControl(controls,BackupBridge.utcTicks(),false,false)==null,"Offline execution was admitted");
+            check(BackupBridge.readyControl(controls,0L,true,true)==null,"A future control was started early");
+            // Equal deadlines retain arrival order; cancellation preempts both groups.
+            java.util.List<String> columns=java.util.Arrays.asList("state","not_before_utc","wifi_only","created_utc","kind");
+            BackupRepository.Row first=new BackupRepository.Row(columns,new Object[]{0L,0L,0L,20L,0L});
+            BackupRepository.Row second=new BackupRepository.Row(columns,new Object[]{0L,0L,1L,10L,0L});
+            check(BackupBridge.readyControl(java.util.Arrays.asList(first,second),1L,true,true)==second,"Older eligible control starved");
+            first=new BackupRepository.Row(columns,new Object[]{0L,0L,0L,20L,2L});
+            check(BackupBridge.readyControl(java.util.Arrays.asList(first,second),1L,true,true)==first,"Cancellation lost priority");
+            repository.call(99,false,1);context.jobs.reject=true;
+            try{schedule.invoke(null,context,repository,0L);throw new AssertionError("Rejected job update reported success");}
+            catch(java.lang.reflect.InvocationTargetException expected){check(expected.getCause() instanceof IOException,"Lost update failure");}
+            context.jobs.reject=false;schedule.invoke(null,context,repository,0L);
+            check(context.jobs.getPendingJob(BackupBridge.jobId(repository.id)).user,"Changed execution mode was not scheduled");
+        }
+        // Foreground service acknowledgement acquires LOCK on another thread.
+        // schedule must release it before awaiting that acknowledgement.
+        try(BackupRepository repository=new BackupRepository(context,"8".repeat(64))) {
+            prepare(context,repository,hash);repository.call(99,false,1);
+            java.lang.reflect.Method schedule=BackupBridge.class.getDeclaredMethod("schedule",Context.class,BackupRepository.class,long.class);schedule.setAccessible(true);
+            android.os.Build.VERSION.SDK_INT=33;
+            context.foregroundCallback=()->BackupBridge.foregroundStarted(repository.id,null);
+            try{schedule.invoke(null,context,repository,0L);}finally{android.os.Build.VERSION.SDK_INT=34;context.foregroundCallback=null;}
+            java.lang.reflect.Field admissions=BackupBridge.class.getDeclaredField("foregroundAdmissions");admissions.setAccessible(true);
+            check(((java.util.Map<?,?>)admissions.get(null)).isEmpty(),"Foreground acknowledgement leaked admission ownership");
         }
         String identity="c".repeat(64);
         try(BackupRepository repository=new BackupRepository(context,identity)) {
@@ -246,13 +310,14 @@ public class BindingTest {
         check(((java.util.Map<?,?>)lifecycles.get(null)).isEmpty(),"Lifecycle registry leaked repositories");
         System.out.println("Android scheduling, recovery exclusion, deadline ownership and isolated cleanup passed through production JNI/repository");
     }
-    static void prepare(Context context,BackupRepository repository,String hash) throws Exception {
+    static void prepare(Context context,BackupRepository repository,String hash) throws Exception {prepare(context,repository,hash,false,"bb","cc");}
+    static void prepare(Context context,BackupRepository repository,String hash,boolean wifi,String batch,String task) throws Exception {
         repository.call(58,"aa");
-        repository.call(2,"bb","aa",1L,1L,"cc","asset:photo","v1","photo.jpg","image/jpeg","",0L);
-        repository.call(77,"cc","aa",4L,4L,1024L,2L);
-        try(FileOutputStream output=new FileOutputStream(new File(BackupRepository.root(context),repository.id+"/payloads/cc.payload"))){output.write(new byte[]{1,2,3,4});}
-        repository.call(3,"cc","aa",4L,hash,"image/jpeg",1024L,2L);
-        repository.call(96,"cc","aa",3L);repository.call(9,"cc",1L,0L,4L);repository.call(74,"cc",1L,"protected");
+        repository.call(2,batch,"aa",1L,1L,task,"asset:"+task,"v1","photo.jpg","image/jpeg","",0L);
+        repository.call(77,task,"aa",4L,4L,1024L,2L);
+        try(FileOutputStream output=new FileOutputStream(new File(BackupRepository.root(context),repository.id+"/payloads/"+task+".payload"))){output.write(new byte[]{1,2,3,4});}
+        repository.call(3,task,"aa",4L,hash,"image/jpeg",1024L,2L);
+        repository.call(96,task,"aa",3L);repository.call(9,task,1L,wifi,4L);repository.call(74,task,1L,"protected");
     }
 }'''
 }
@@ -281,7 +346,7 @@ def main():
             '-I' + str(NATIVE / 'include'), '-I' + str(args.jdk / 'include'), '-I' + str(args.jdk / 'include/darwin'),
             str(args.repository), '-Wl,-rpath,' + str(args.repository.parent), '-Wl,-rpath,' + str(args.core.parent),
             '-o', str(bridge)], check=True)
-        for identity in (letter * 64 for letter in 'abcdef'):
+        for identity in (letter * 64 for letter in 'abcdef98'):
             db = Repository(str(args.core), str(args.repository), root / 'data/UIFrameBackup', True, identity)
             db.close()
         subprocess.run([str(args.jdk / 'bin/java'), '-Djava.library.path=' + os.pathsep.join(map(str, (args.core.parent, args.repository.parent))),

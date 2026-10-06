@@ -125,7 +125,7 @@ struct Repository {
             db.batch(commands);
         }
         auto header=decode(db.batch({{"PRAGMA application_id"},{"PRAGMA user_version"}}));
-        require(header[0].rows[0][0].integer==1430667843 && header[1].rows[0][0].integer==4,"Unexpected backup catalog schema",UF_STATE);
+        require(header[0].rows[0][0].integer==1430667843 && header[1].rows[0][0].integer==5,"Unexpected backup catalog schema",UF_STATE);
         auto settings=decode(db.query({"SELECT store_id,server,account FROM store_settings WHERE singleton=1"})).back().rows;
         require(settings.size()==1 && settings[0][0].text==id,"Backup store identity mismatch",UF_STATE);
         require((server.empty() || server==settings[0][1].text) && (account.empty() || account==settings[0][2].text),"Backup server/account mismatch",UF_STATE);

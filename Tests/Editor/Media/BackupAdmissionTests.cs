@@ -38,6 +38,33 @@ namespace UIFrame.Regression
             await service.Db(Command.Seal,default,"cc",owner,6L,new string('a',64),"image/jpeg",10L,now);
             await service.Db(Command.AcceptItem,default,"cc",owner,now);
         }
+        [UnityTest] public IEnumerator FailedOperationDriverRejectsAdmissionButPreservesQueriesAndReleasesOnShutdown()=>UniTask.ToCoroutine(async()=>{
+            var config=Config();config.EnableNativeBackgroundTransfer=true;
+            var original=new IOException("Operation synchronization unavailable");int syncs=0;bool shutdown=false;
+            var service=await ImageBackupService.CreateAsync(config,request=>{
+                if(request.op=="root")return new NativeBackupStatus {root=config.StorageDirectory};
+                if(request.op=="sync"){Interlocked.Increment(ref syncs);throw original;}
+                Assert.AreEqual("wake",request.op);return new NativeBackupStatus {exists=true};
+            },true,new BackupProtocolFixture());
+            try {
+                LogAssert.Expect(LogType.Exception,new System.Text.RegularExpressions.Regex("IOException: Operation synchronization unavailable"));
+                await service.SubmitOperationAsync(new BackupOperationCommand {OperationId="aa",Action=BackupAction.Pause});
+                var field=typeof(ImageBackupService).GetField("operationDriveFailure",System.Reflection.BindingFlags.Instance|System.Reflection.BindingFlags.NonPublic);
+                await Until(()=>field.GetValue(service)!=null);
+                foreach(string id in new[]{"bb","aa"}) {
+                    Exception failure=null;try{await service.SubmitOperationAsync(new BackupOperationCommand {OperationId=id,Action=BackupAction.Pause});}catch(Exception error){failure=error;}
+                    Assert.AreSame(original,failure);
+                }
+                Assert.IsNull(await service.QueryOperationAsync("bb"),"Failed admission must not persist an undriven operation.");
+                Assert.AreEqual(BackupOperationPhase.Completed,(await service.WaitOperationAsync("aa")).Phase,"An already completed result must survive the later synchronization failure.");
+                Assert.IsEmpty((await service.QueryTasksAsync()).Items);Assert.AreEqual(1,syncs);
+                Exception closeFailure=null;try{await service.ShutdownAsync();}catch(Exception error){closeFailure=error;}finally{shutdown=true;}
+                Assert.AreSame(original,closeFailure);
+                var reopened=await ImageBackupService.CreateAsync(config,request=>request.op=="root"?new NativeBackupStatus {root=config.StorageDirectory}:new NativeBackupStatus {exists=true},true,new BackupProtocolFixture());
+                try {await reopened.SubmitOperationAsync(new BackupOperationCommand {OperationId="bb",Action=BackupAction.Pause});Assert.AreEqual(BackupOperationPhase.Completed,(await reopened.WaitOperationAsync("bb")).Phase);}
+                finally {await reopened.ShutdownAsync();}
+            } finally {if(!shutdown)try{await service.ShutdownAsync();}catch(Exception error){Assert.AreSame(original,error);}}
+        });
         [UnityTest] public IEnumerator CapacitySchedulingFailureIsNotRetriedDuringFinalization()=>UniTask.ToCoroutine(async()=>{
             var config=Config();config.EnableNativeBackgroundTransfer=true;
             var original=new IOException("Native scheduler unavailable");int wakes=0;

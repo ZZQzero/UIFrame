@@ -247,6 +247,8 @@ namespace Game.Media.Backup
             while(running || preparing || registering || pausing || drivingOperations || downloads!=0 || metadataReads!=0 || operations!=0)await UniTask.Yield();
             if(preparationFailure!=null && !ReferenceEquals(preparationFailure,executorFailure))cleanup.Run(()=>System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(preparationFailure).Throw());
             if(executorFailure!=null)cleanup.Run(()=>System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(executorFailure).Throw());
+            if(operationDriveFailure!=null && !ReferenceEquals(operationDriveFailure,preparationFailure) && !ReferenceEquals(operationDriveFailure,executorFailure))
+                cleanup.Run(()=>System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(operationDriveFailure).Throw());
             cleanup.Run(Dispose);cleanup.Throw();
         }
         public void Dispose()

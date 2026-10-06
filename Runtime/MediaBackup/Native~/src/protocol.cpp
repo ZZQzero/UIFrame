@@ -90,7 +90,7 @@ void validate_url(const std::string &url,bool development) {
     }
 }
 const std::string Work=
-    "SELECT a.*,t.state AS task_state,t.desired_action,t.file_id,t.sequence,t.source_id,t.content_version,t.scope_id,t.scope_epoch,"
+    "SELECT a.*,t.state AS task_state,t.desired_action,t.file_id,t.sequence,t.source_id,t.content_version,t.scope_id,t.scope_epoch,t.updated_utc AS queued_utc,"
     "f.relative_path,f.byte_count,lower(hex(f.sha256)) AS sha256,m.name,m.mime "
     "FROM task_attempts a INDEXED BY attempts_protocol_work CROSS JOIN tasks t ON t.id=a.task_id AND t.current_generation=a.generation "
     "CROSS JOIN file_records f ON f.id=t.file_id CROSS JOIN task_metadata m ON m.task_id=t.id ";
@@ -212,34 +212,41 @@ Bytes protocol_command(Client &db,const std::string &path,const std::string &acc
     case UFB_CONTROL_CREATE: {
         a.count(5);auto id=a.id(0);auto executor=a.number(1,0,2),now=a.number(2),future=a.number(3,0,1),flush=a.number(4,0,1);
         auto existing=select(db,Control+"WHERE c.id=?",{id});if(!existing.empty())return db.query({Control+"WHERE c.id=?",{id}},capacity);
-        auto settings=one(db,"SELECT paused,last_control_kind,source_namespace FROM store_settings");
-        // A future Query consumes a queued-system slot, not today's control slot.
-        auto due=one(db,"SELECT count(*) AS n FROM control_requests INDEXED BY controls_active WHERE released=0 AND executor=? AND not_before_utc<=? AND state<=3",{executor,now}).number("n");
-        if(due)return db.query({Control+"WHERE 0"},capacity);
-        std::vector<Row> selected;int64_t kind=-1,not_before=now;
-        std::vector<int> order{2};if(!settings.number("paused")){order.push_back(settings.number("last_control_kind")==1?0:1);order.push_back(settings.number("last_control_kind")==1?1:0);}
-        for(auto candidate:order) {
-            auto predicate=candidate==2?"t.desired_action=2 AND a.protocol_phase<3 AND a.execution_state<>1 AND a.upload_released=1":candidate==0?"t.desired_action=0 AND a.protocol_phase=0 AND t.state=1":"t.desired_action=0 AND a.protocol_phase=2 AND t.state=2 AND a.next_check_utc<=? AND a.confirm_deadline_utc>?";
-            std::vector<Value> values{executor};if(candidate==1){values.emplace_back(now);values.emplace_back(now);}
-            selected=select(db,Work+"WHERE a.credential_released=0 AND a.control_id IS NULL AND a.executor=? AND a.submission_state>=1 AND "+predicate+(candidate!=0?std::string():" AND "+admission("t"))+" ORDER BY a.next_check_utc,a.task_id LIMIT 32",values);
-            if(!selected.empty()){kind=candidate;break;}
+        auto settings=one(db,"SELECT paused,last_any_control_kind,last_wifi_control_kind,source_namespace FROM store_settings");
+        // Each immutable network policy owns one current and one future slot.
+        // A queued Wi-Fi request cannot consume an any-network scheduling slot.
+        bool due[2]={},queued[2]={};
+        for(const auto &row:select(db,"SELECT c.not_before_utc,max(a.wifi_only) AS wifi_only FROM control_requests c INDEXED BY controls_active JOIN control_items i ON i.request_id=c.id JOIN task_attempts a ON a.task_id=i.task_id AND a.generation=i.generation WHERE c.released=0 AND c.executor=? AND c.state<=3 GROUP BY c.id",{executor})) {
+            auto wifi=row.number("wifi_only");
+            if(row.number("not_before_utc")<=now)due[wifi]=true;else queued[wifi]=true;
         }
-        if(selected.empty() && future && !settings.number("paused")) {
-            auto queued=one(db,"SELECT count(*) AS n FROM control_requests INDEXED BY controls_active WHERE released=0 AND executor=? AND not_before_utc>?",{executor,now}).number("n");
-            if(!queued) {
-                selected=select(db,Work+"WHERE a.credential_released=0 AND a.control_id IS NULL AND a.executor=? AND a.submission_state>=1 AND a.protocol_phase=2 AND t.state=2 AND t.desired_action=0 AND a.next_check_utc<a.confirm_deadline_utc AND a.confirm_deadline_utc>? ORDER BY a.next_check_utc,a.task_id LIMIT 32",{executor,now});
+        std::vector<Row> selected;int64_t kind=-1,not_before=now,wifi=0;
+        for(int policy=0;policy<2 && selected.empty();++policy) {
+            if(due[policy])continue;
+            auto last=settings.number(policy?"last_wifi_control_kind":"last_any_control_kind");
+            std::vector<int> order{2};if(!settings.number("paused")){order.push_back(last==1?0:1);order.push_back(last==1?1:0);}
+            for(auto candidate:order) {
+                auto predicate=candidate==2?"t.desired_action=2 AND a.protocol_phase<3 AND a.execution_state<>1 AND a.upload_released=1":candidate==0?"t.desired_action=0 AND a.protocol_phase=0 AND t.state=1":"t.desired_action=0 AND a.protocol_phase=2 AND t.state=2 AND a.next_check_utc<=? AND a.confirm_deadline_utc>?";
+                std::vector<Value> values{executor,int64_t(policy)};if(candidate==1){values.emplace_back(now);values.emplace_back(now);}
+                selected=select(db,Work+"WHERE a.credential_released=0 AND a.control_id IS NULL AND a.executor=? AND a.wifi_only=? AND a.submission_state>=1 AND "+predicate+(candidate!=0?std::string():" AND "+admission("t"))+" ORDER BY a.next_check_utc,a.task_id LIMIT 32",values);
+                if(!selected.empty()){kind=candidate;break;}
+            }
+            not_before=now;
+            if(selected.empty() && future && !settings.number("paused") && !queued[policy]) {
+                selected=select(db,Work+"WHERE a.credential_released=0 AND a.control_id IS NULL AND a.executor=? AND a.wifi_only=? AND a.submission_state>=1 AND a.protocol_phase=2 AND t.state=2 AND t.desired_action=0 AND a.next_check_utc<a.confirm_deadline_utc AND a.confirm_deadline_utc>? ORDER BY a.next_check_utc,a.task_id LIMIT 32",{executor,int64_t(policy),now});
                 if(!selected.empty()){kind=1;not_before=selected[0].number("next_check_utc");selected.erase(std::remove_if(selected.begin(),selected.end(),[&](const Row &row){return row.number("next_check_utc")>not_before;}),selected.end());}
             }
+            if(selected.empty())continue;
+            // A sealed request also retains exactly one scope/epoch owner.
+            const auto scope=selected[0].text("scope_id");const auto epoch=selected[0].number("scope_epoch");
+            selected.erase(std::remove_if(selected.begin(),selected.end(),[&](const Row &r){return r.text("scope_id")!=scope || r.number("scope_epoch")!=epoch;}),selected.end());
+            if(!flush && kind==0 && selected.size()<32) {
+                auto first=selected[0].number("queued_utc");for(const auto &row:selected)first=std::min(first,row.number("queued_utc"));
+                if(first+Second/4>now){selected.clear();continue;}
+            }
+            wifi=policy;
         }
         if(selected.empty())return db.query({Control+"WHERE 0"},capacity);
-        // A sealed request has a fixed membership. Keep a single control owner
-        // per request so revoking one scope cannot pause independent scopes.
-        const auto scope=selected[0].text("scope_id");const auto epoch=selected[0].number("scope_epoch");
-        selected.erase(std::remove_if(selected.begin(),selected.end(),[&](const Row &r){return r.text("scope_id")!=scope || r.number("scope_epoch")!=epoch;}),selected.end());
-        if(!flush && kind==0 && selected.size()<32) {
-            auto first=one(db,"SELECT min(t.updated_utc) AS earliest FROM tasks t JOIN task_attempts a ON a.task_id=t.id AND a.generation=t.current_generation WHERE a.credential_released=0 AND a.control_id IS NULL AND a.executor=? AND a.protocol_phase=0 AND t.state=1 AND t.desired_action=0",{executor}).number("earliest");
-            if(first+Second/4>now)return db.query({Control+"WHERE 0"},capacity);
-        }
         std::string items="[";size_t count=0;
         for(auto &row:selected) {
             std::string item;
@@ -261,7 +268,7 @@ Bytes protocol_command(Client &db,const std::string &path,const std::string &acc
             auto &row=selected[i];commands.emplace_back("INSERT INTO control_items(request_id,task_id,generation) VALUES(?,?,?)",std::vector<Value>{id,row.text("task_id"),row.number("generation")},1);
             commands.emplace_back("UPDATE task_attempts SET control_id=? WHERE task_id=? AND generation=? AND control_id IS NULL",std::vector<Value>{id,row.text("task_id"),row.number("generation")},1);
         }
-        commands.emplace_back("UPDATE store_settings SET last_control_kind=? WHERE singleton=1",std::vector<Value>{kind},1);
+        commands.emplace_back(std::string("UPDATE store_settings SET ")+(wifi?"last_wifi_control_kind":"last_any_control_kind")+"=? WHERE singleton=1",std::vector<Value>{kind},1);
         commands.emplace_back(Control+"WHERE c.id=?",std::vector<Value>{id});break;
     }
     case UFB_CONTROL_SEAL: {

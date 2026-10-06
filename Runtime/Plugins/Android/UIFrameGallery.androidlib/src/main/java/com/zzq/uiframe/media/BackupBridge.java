@@ -114,6 +114,10 @@ public final class BackupBridge {
         return builder.build();
     }
     private static void schedule(Context context,BackupRepository repository,long earliest) throws Exception {
+        CompletableFuture<Void> foreground=null;
+        // Read requirements and publish the job under start()'s ownership lock.
+        // Concurrent wakes cannot overwrite newer network requirements using a
+        // snapshot read before the lock, or replace an already active Run.
         synchronized(LOCK) {
             if(failures.containsKey(repository.id))throw failures.get(repository.id);
             Run run=active.get(repository.id);
@@ -121,42 +125,48 @@ public final class BackupBridge {
                 if(run.stopped)throw new IOException("Android execution is stopping; wait for release before requesting scheduling again");
                 repository.call(BackupRepository.SYSTEM_SCHEDULED,1);run.signal();return;
             }
-        }
-        BackupRepository.Row info=repository.call(BackupRepository.INFO).get(0);
-        List<BackupRepository.Row> attempts=repository.call(BackupRepository.ATTEMPTS,0,1,100);
-        boolean pending=false,any=false;long bytes=0;
-        for(BackupRepository.Row row:attempts) {
-            if(row.number("submission_state")>=1 && !row.flag("credential_released") && (row.number("protocol_phase")<3 || row.number("desired_action")==2)) {
-                if(info.flag("paused") && row.number("desired_action")!=2)continue;
-                pending=true;any|=!row.flag("wifi_only");bytes+=row.number("byte_count");
+            BackupRepository.Row info=repository.call(BackupRepository.INFO).get(0);
+            List<BackupRepository.Row> attempts=repository.call(BackupRepository.ATTEMPTS,0,1,100);
+            boolean pending=false,any=false;long bytes=0;
+            for(BackupRepository.Row row:attempts) {
+                if(row.number("submission_state")>=1 && !row.flag("credential_released") && (row.number("protocol_phase")<3 || row.number("desired_action")==2)) {
+                    if(info.flag("paused") && row.number("desired_action")!=2)continue;
+                    pending=true;any|=!row.flag("wifi_only");bytes+=row.number("byte_count");
+                }
+            }
+            if(!pending)return;
+            boolean user=info.number("transfer_mode")==1;
+            if(user && Build.VERSION.SDK_INT<34) {
+                if(Looper.myLooper()==Looper.getMainLooper())throw new IllegalStateException("Foreground backup admission must be requested off the main thread");
+                foreground=new CompletableFuture<>();
+                if(foregroundAdmissions.putIfAbsent(repository.id,foreground)!=null)throw new IllegalStateException("Foreground admission is already pending");
+            } else {
+                JobScheduler scheduler=(JobScheduler)context.getSystemService(Context.JOB_SCHEDULER_SERVICE);
+                int id=jobId(repository.id);JobInfo previous=scheduler.getPendingJob(id);
+                long now=utcTicks(),due=user?0:Math.max(now,earliest);
+                if(previous!=null) {
+                    PersistableBundle saved=previous.getExtras();
+                    if(!repository.id.equals(saved.getString("repository")))throw new IllegalStateException("Backup scheduler identity collision");
+                    if(saved.containsKey("notBefore") && saved.getBoolean("user")==user && saved.getBoolean("anyNetwork")==any && saved.getLong("notBefore")<=due) {
+                        repository.call(BackupRepository.SYSTEM_SCHEDULED,1);return;
+                    }
+                }
+                PersistableBundle extras=new PersistableBundle();extras.putString("repository",repository.id);extras.putBoolean("user",user);
+                extras.putBoolean("anyNetwork",any);extras.putLong("notBefore",due);
+                JobInfo.Builder builder=new JobInfo.Builder(id,new ComponentName(context,BackupJobService.class)).setExtras(extras)
+                    .setRequiredNetworkType(any?JobInfo.NETWORK_TYPE_ANY:JobInfo.NETWORK_TYPE_UNMETERED).setPersisted(true);
+                if(user)builder.setUserInitiated(true).setEstimatedNetworkBytes(1024*1024,Math.max(1,bytes));
+                else if(due>now)builder.setMinimumLatency((due-now)/10000);
+                if(scheduler.schedule(builder.build())!=JobScheduler.RESULT_SUCCESS)throw new IOException("Android refused backup scheduling; user initiated work requires foreground eligibility");
+                repository.call(BackupRepository.SYSTEM_SCHEDULED,1);return;
             }
         }
-        if(!pending)return;
-        boolean user=info.number("transfer_mode")==1;
-        if(user && Build.VERSION.SDK_INT<34) {
-            if(Looper.myLooper()==Looper.getMainLooper())throw new IllegalStateException("Foreground backup admission must be requested off the main thread");
-            CompletableFuture<Void> admission=new CompletableFuture<>();
-            synchronized(LOCK){if(foregroundAdmissions.putIfAbsent(repository.id,admission)!=null)throw new IllegalStateException("Foreground admission is already pending");}
-            Intent intent=new Intent(context,BackupForegroundService.class).putExtra("repository",repository.id);
-            try {
-                if(Build.VERSION.SDK_INT>=26)context.startForegroundService(intent);else context.startService(intent);
-                admission.get(10,TimeUnit.SECONDS);
-            } finally {synchronized(LOCK){foregroundAdmissions.remove(repository.id,admission);}}
-            return;
-        }
-        JobScheduler scheduler=(JobScheduler)context.getSystemService(Context.JOB_SCHEDULER_SERVICE);
-        int id=jobId(repository.id);JobInfo previous=scheduler.getPendingJob(id);
-        if(previous!=null) {
-            if(!repository.id.equals(previous.getExtras().getString("repository")))throw new IllegalStateException("Backup scheduler identity collision");
-            repository.call(BackupRepository.SYSTEM_SCHEDULED,1);return;
-        }
-        PersistableBundle extras=new PersistableBundle();extras.putString("repository",repository.id);extras.putBoolean("user",user);
-        JobInfo.Builder builder=new JobInfo.Builder(id,new ComponentName(context,BackupJobService.class)).setExtras(extras)
-            .setRequiredNetworkType(any?JobInfo.NETWORK_TYPE_ANY:JobInfo.NETWORK_TYPE_UNMETERED).setPersisted(true);
-        if(user)builder.setUserInitiated(true).setEstimatedNetworkBytes(1024*1024,Math.max(1,bytes));
-        else if(earliest>utcTicks())builder.setMinimumLatency((earliest-utcTicks())/10000);
-        if(scheduler.schedule(builder.build())!=JobScheduler.RESULT_SUCCESS)throw new IOException("Android refused backup scheduling; user initiated work requires foreground eligibility");
-        repository.call(BackupRepository.SYSTEM_SCHEDULED,1);
+        // Service startup calls back through LOCK; never wait while holding it.
+        Intent intent=new Intent(context,BackupForegroundService.class).putExtra("repository",repository.id);
+        try {
+            if(Build.VERSION.SDK_INT>=26)context.startForegroundService(intent);else context.startService(intent);
+            foreground.get(10,TimeUnit.SECONDS);
+        } finally {synchronized(LOCK){foregroundAdmissions.remove(repository.id,foreground);}}
     }
     public static String call(Context context,String json) {
         Context app=context.getApplicationContext();
@@ -208,17 +218,16 @@ public final class BackupBridge {
                     for(Work work:new ArrayList<>(run.work.values()))if(work.future.isDone()){work.future.get();run.work.remove(work.id);}
                     synchronize(repository,run);settle(repository,run);
                     if(run.stopped)break;
-                    List<BackupRepository.Row> controls=repository.call(BackupRepository.CONTROLS,1,"");
+                    List<BackupRepository.Row> controls;
                     boolean controlling=false;int photos=0;
                     for(Work work:run.work.values())if(work.control)controlling=true;else photos++;
                     if(!controlling) {
-                        BackupRepository.Row ready=null;
-                        for(BackupRepository.Row row:controls)if(row.number("state")<=1 && row.number("not_before_utc")<=utcTicks()){ready=row;break;}
-                        if(ready==null) {
-                            List<BackupRepository.Row> created=repository.call(BackupRepository.CONTROL_CREATE,UUID.randomUUID().toString().replace("-",""),1,utcTicks(),false,false);
-                            if(!created.isEmpty() && created.get(0).number("not_before_utc")<=utcTicks())ready=created.get(0);
-                        }
-                        if(ready!=null && network.allowed(ready.flag("wifi_only")))launch(context,repository,run,network,new Work(ready,true));
+                        // Fill both policy slots before selection: a continuous
+                        // any-network producer must not starve Wi-Fi work either.
+                        for(int i=0;i<2;i++)if(repository.call(BackupRepository.CONTROL_CREATE,UUID.randomUUID().toString().replace("-",""),1,utcTicks(),false,false).isEmpty())break;
+                        controls=repository.call(BackupRepository.CONTROLS,1,"");
+                        BackupRepository.Row ready=readyControl(controls,utcTicks(),network.allowed(false),network.allowed(true));
+                        if(ready!=null)launch(context,repository,run,network,new Work(ready,true));
                     }
                     for(BackupRepository.Row row:repository.call(BackupRepository.UPLOADS,1,"")) {
                         if(photos>=2)break;
@@ -271,6 +280,17 @@ public final class BackupBridge {
             }
         },"UIFrameBackupCoordinator").start();
         return run;
+    }
+    static BackupRepository.Row readyControl(List<BackupRepository.Row> controls,long now,boolean anyNetwork,boolean wifiNetwork) {
+        BackupRepository.Row ready=null;
+        for(BackupRepository.Row row:controls) {
+            if(row.number("state")>1 || row.number("not_before_utc")>now || !(row.flag("wifi_only")?wifiNetwork:anyNetwork))continue;
+            // Cancel first, then the oldest eligible request, independent of its
+            // random ID or a different policy's unavailable network.
+            if(ready==null || row.number("kind")==2 && ready.number("kind")!=2 || (row.number("kind")==2)==(ready.number("kind")==2) &&
+                (row.number("not_before_utc")<ready.number("not_before_utc") || row.number("not_before_utc")==ready.number("not_before_utc") && row.number("created_utc")<ready.number("created_utc")))ready=row;
+        }
+        return ready;
     }
     private static void launch(Context context,BackupRepository repository,Run run,NetworkPolicy network,Work work) {
         FutureTask<Void> future=new FutureTask<Void>(()->{execute(context,repository,run,network,work);return null;}) {

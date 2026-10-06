@@ -371,13 +371,13 @@ static void *UFBQueueKey=&UFBQueueKey;
         if(_tasks.count>=16)break;
         if([row[@"state"] integerValue]<=1)[self submit:identity row:row control:YES];
     }
-    if(_tasks.count<16) {
+    for(NSUInteger slot=0;slot<4 && _tasks.count<16;slot++) {
         NSString *requestId=[[NSUUID.UUID.UUIDString lowercaseString] stringByReplacingOccurrencesOfString:@"-" withString:@""];
         long long now=UFBNow(),next=[UFBCommand(handle,UFB_PROTOCOL_WAKE,@[@2]).firstObject[@"next_utc"] longLongValue];
         BOOL future=flush || next>now+10000000LL;
         NSArray *created=UFBCommand(handle,UFB_CONTROL_CREATE,@[requestId,@2,@(now),@(future),@(flush)]);
         if(created.count)[self submit:identity row:created.firstObject control:YES];
-        else if(next>now && !future)[self aggregate:identity at:next];
+        else {if(next>now && !future)[self aggregate:identity at:next];break;}
     }
     NSUInteger photos=0,globalPhotos=0;
     for(NSString *tag in _tasks){NSArray *parts=UFBParts(tag);if([parts[1] isEqual:@"u"]){globalPhotos++;if([parts[0] isEqual:identity])photos++;}}

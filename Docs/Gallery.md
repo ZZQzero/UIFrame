@@ -22,7 +22,7 @@
 
 构建与真机验收状态见 [GalleryValidation.md](GalleryValidation.md)。计划中的性能数字为目标，不能从桌面编译或缓存预算推断手机峰值内存。
 
-当前备份使用唯一 v2 协议：有界准备、原生持久接收、批量 Plan、独立文件 PUT、服务端确认和滚动批量 Query。设计见 [后台备份协议实施计划](GalleryBackgroundProtocolPlan.md)，原实施证据见 [执行记录](GalleryBackgroundProtocolExecution.md)，当前登记／准备流程和验证见 [准备协调器重构记录](GalleryPreparationRedesign.md)。业务仓库 ABI 为 4、catalog schema 为 4，图库 library schema 为 3，通用 SQLite ABI 仍为 3。两库只接受各自当前版本，不提供旧协议、旧 schema 或 JSON 数据迁移；旧开发库明确拒绝打开，开发验证须显式选择新的空目录，不自动删库。清理范围与验证见 [部署前旧代码清理](GalleryPreparationRedesign.md#部署前旧代码清理)。
+当前备份使用唯一 v2 协议：有界准备、原生持久接收、批量 Plan、独立文件 PUT、服务端确认和滚动批量 Query。设计见 [后台备份协议实施计划](GalleryBackgroundProtocolPlan.md)，原实施证据见 [执行记录](GalleryBackgroundProtocolExecution.md)，当前登记／准备流程见 [准备协调器重构记录](GalleryPreparationRedesign.md)，最新修复与验证见 [故障修复记录](GalleryPreparationRedesign.md#故障修复与开发数据检查)。业务仓库 ABI 为 4、catalog schema 为 5，图库 library schema 为 3，通用 SQLite ABI 仍为 3。两库只接受各自当前版本，不提供旧协议、旧 schema 或 JSON 数据迁移；旧开发库明确拒绝打开，开发验证须显式选择新的空目录，不自动删库。清理范围与验证见 [部署前旧代码清理](GalleryPreparationRedesign.md#部署前旧代码清理)。
 
 ## 系统选择与图片所有权
 
@@ -250,11 +250,11 @@ var progress = await backup.QueryOperationAsync(id, cancellationToken: token);
 var finished = await backup.WaitOperationAsync(id, token);
 ```
 
-操作包括 Resume、Pause、Cancel、Retry、RetryCleanup、ClearHistory。显式目标1–128个，或按状态筛选；不能同时传两者。Selecting 每页最多128个，Running 每页最多32个。筛选按逐页当时状态及提交创建上界进行；选择完毕后目标固定。WaitingForRelease 仍未完成，实际系统资源释放后才能结束。取消 Wait 只停止等待。相同ID相同参数返回原操作，参数不同拒绝；失败阶段不自动重跑；仓库已持久记录某个操作失败时，其余独立操作继续推进。无法确认持久结果或平台同步失败时停止当前驱动，等待者观察原错误，排除故障并关闭 / 重开服务后继续未失败阶段。
+操作包括 Resume、Pause、Cancel、Retry、RetryCleanup、ClearHistory。显式目标1–128个，或按状态筛选；不能同时传两者。Selecting 每页最多128个，Running 每页最多32个。筛选按逐页当时状态及提交创建上界进行；选择完毕后目标固定。WaitingForRelease 仍未完成，实际系统资源释放后才能结束。取消 Wait 只停止等待。相同ID相同参数返回原操作，参数不同拒绝；失败阶段不自动重跑；仓库已持久记录某个操作失败时，其余独立操作继续推进。无法确认持久结果或平台同步失败时停止当前驱动，后续 SubmitOperationAsync（包括重复ID）在写入前抛出原故障；QueryOperationAsync 和已完成结果的 WaitOperationAsync 仍可读取，未完成等待观察原故障。Shutdown 尝试全部资源释放后传播同一故障。排除故障并关闭 / 重开服务后继续未失败阶段。
 
 逐项结果包括 Applied、AlreadySatisfied、NotApplicable、Missing、Pending、WaitingForRelease；执行故障由整个操作的 Failed 阶段和 Error 表达。清历史不会级联删除操作结果；明细过期后仍保留持久操作头和幂等依据，查询明确标记 `DetailsExpired`。查询未知ID返回 null。
 
-Android 自动模式使用持久 JobScheduler；用户前台主动发起时，API34以上使用用户主动数据传输 Job，API25–33使用带进度及暂停通知的前台服务。启动失败明确报告，不自动降级；每仓库最多3个工作线程，同时最多4个活跃仓库。凭据通过 AndroidKeyStore 加密保存。iOS 的控制清单与照片都使用文件式后台 URLSession，Keychain 保护凭据；所有会话最多16个系统任务，照片最多14个，为控制请求保留空间，未来 Query 使用 earliestBeginDate。平台只负责系统能力，业务状态转换统一在共享仓库。
+Android 自动模式使用持久 JobScheduler；用户前台主动发起时，API34以上使用用户主动数据传输 Job，API25–33使用带进度及暂停通知的前台服务。启动失败明确报告，不自动降级；每仓库最多3个工作线程，同时最多4个活跃仓库。凭据通过 AndroidKeyStore 加密保存。iOS 的控制清单与照片都使用文件式后台 URLSession，Keychain 保护凭据；所有会话最多16个系统任务，照片最多14个，为控制请求保留空间，未来 Query 使用 earliestBeginDate。平台只负责系统能力，业务状态转换统一在共享仓库。 同一请求只包含相同范围、代次和网络策略；Wi-Fi-only 与任意网络分别保留一个当前控制名额及一个未来 Query 名额，Plan／Query 轮换也分别持久记录。Android 仍同时执行至多1个控制请求和2张照片，选择已到期且网络允许的请求，取消优先，其余按到期／创建时间排序；已有排队Job仅在模式、网络和唤醒时间满足当前需要时复用，已运行的资源所有者只接收唤醒。iOS 分别交给相应网络约束的会话，仍受总16个系统任务、14张照片及每仓库2张照片的上限约束，满额时等待既有任务释放。
 
 系统允许时，已持久交接的照片可以在 Unity 停止后继续登记、上传和确认；未准备的照片不能凭此后台发现或导出。Android 强行停止、iOS 用户划掉及首次解锁前不承诺继续。切后台、锁屏与系统回收的完整行为仍需真机验收。回调数据库失败不报告成功，iOS 仍释放 completion handler；排除持久错误后显式 `RecoverNativeAsync`，未知服务器结果另行核对。
 

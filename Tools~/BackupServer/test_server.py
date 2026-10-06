@@ -110,6 +110,90 @@ class BackupProtocolTests(unittest.TestCase):
         self.assertTrue(all(x['status'] == 'UploadRequired' for x in results))
         self.assertEqual(1, self.store.db.execute('SELECT count(*) FROM requests').fetchone()[0])
 
+    def fail_worker(self):
+        original = sqlite3.OperationalError('Verifier fixture stopped')
+        reports = []
+        with patch.object(self.store, 'confirm_pending', side_effect=original):
+            self.store.start_worker(reports.append)
+            self.store.worker.join(5)
+        self.assertFalse(self.store.worker.is_alive())
+        self.assertIs(original, self.store.worker_error)
+        self.assertEqual(1, len(reports))
+        return original
+
+    def test_worker_failure_rejects_admission_but_preserves_confirmed_reads_and_cancel(self):
+        confirmed, _, receipt = self.backup(b'confirmed')
+        item = self.item(b'waiting'); planned = self.plan([item])[0]
+        original = self.fail_worker()
+        close_error = None
+        try:
+            before = self.store.db.execute('SELECT count(*) FROM requests').fetchone()[0]
+            incoming_before = self.store.db.execute('SELECT count(*) FROM incoming').fetchone()[0]
+            self.assertEqual(503, self.control('plans', [self.item()])[0])
+            self.assertEqual(before, self.store.db.execute('SELECT count(*) FROM requests').fetchone()[0])
+            self.assertEqual(503, self.control('status', [identity(item)])[0])
+            self.assertEqual(503, self.put(planned, b'waiting')[0])
+            self.assertEqual(incoming_before, self.store.db.execute('SELECT count(*) FROM incoming').fetchone()[0])
+            self.assertEqual('Confirmed', self.query(confirmed)['status'])
+            self.assertEqual((200, b'confirmed'), self.call('GET', '/v2/backups/' + receipt['backupId'] + '/content'))
+            self.assertEqual(200, self.call('GET', '/v2/backups')[0])
+            self.assertEqual('Canceled', self.control('cancellations', [identity(item)])[1]['items'][0]['status'])
+        finally:
+            try: self.store.close()
+            except Exception as error: close_error = error
+        self.assertIs(original, close_error)
+        # A failed shutdown must still relinquish database and directory ownership.
+        reopened = Store(self.directory.name, self.credentials)
+        reopened.close()
+
+    def test_worker_failure_during_put_preserves_ready_file_for_explicit_restart(self):
+        item = self.item(b'inflight'); planned = self.plan([item])[0]
+        started, release = threading.Event(), threading.Event()
+        class HeldBody(io.BytesIO):
+            def read(self, count):
+                started.set()
+                if not release.wait(5): raise TimeoutError('Body fixture was not released')
+                return super().read(count)
+        descriptor = planned['upload']; failures = []
+        def receive():
+            try: self.store.receive(descriptor['uploadId'], descriptor['headers'][0]['value'], 8, HeldBody(b'inflight'))
+            except Exception as error: failures.append(error)
+        writer = threading.Thread(target=receive); writer.start()
+        original = None; close_error = None
+        try:
+            self.assertTrue(started.wait(5)); original = self.fail_worker()
+            release.set(); writer.join(5); self.assertFalse(writer.is_alive())
+            self.assertEqual(1, len(failures)); self.assertEqual(503, failures[0].status)
+            incoming = self.store.db.execute('SELECT * FROM incoming').fetchone()
+            self.assertEqual('ready', incoming['state'])
+            self.assertEqual(b'inflight', Path(incoming['path']).read_bytes())
+        finally:
+            release.set(); writer.join(5)
+            try: self.store.close()
+            except Exception as error: close_error = error
+        self.assertIs(original, close_error)
+        self.store = Store(self.directory.name, self.credentials)
+        self.store.confirm_pending()
+        self.assertEqual(1, len(self.store.list_backups('alice', 0, 32)['items']))
+
+    def test_shutdown_keeps_worker_failure_and_releases_owner_after_db_close_error(self):
+        original = self.fail_worker()
+        db = self.store.db
+        class FailingClose:
+            def close(self):
+                db.close()
+                raise OSError('DB close fixture failed')
+        self.store.db = FailingClose()
+        with patch('sys.stderr', new_callable=io.StringIO) as errors:
+            with self.assertRaises(sqlite3.OperationalError) as caught:
+                self.store.close()
+            self.assertIs(original, caught.exception)
+            self.assertIn('DB close fixture failed', errors.getvalue())
+        self.assertTrue(self.store.owner.file.closed)
+        self.store.close()  # Final cleanup is idempotent, not a failed-close retry.
+        reopened = Store(self.directory.name, self.credentials)
+        reopened.close()
+
     def test_business_rejection_does_not_reject_healthy_item(self):
         results = self.plan([self.item(byteCount=MAX_FILE_BYTES + 1), self.item()])
         self.assertEqual(['Rejected', 'UploadRequired'], [x['status'] for x in results])

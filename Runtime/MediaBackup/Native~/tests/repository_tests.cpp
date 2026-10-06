@@ -223,7 +223,7 @@ int main() {
             expect(store.call(UFB_ATTEMPTS,{int64_t(0),int64_t(executor),int64_t(10)}).back().rows.empty(),"Released ownership retained in active inventory");
         }
         // Unsupported development schemas must fail without migration or data loss.
-        for(int version:{1,2,3,5}) {
+        for(int version:{1,2,3,4,6}) {
             auto schemaRoot=root/("schema-"+std::to_string(version));
             {
                 Store store(schemaRoot.u8string(),identity,true);
