@@ -117,10 +117,10 @@ namespace Game.Media.Backup
         public async UniTask<BackupPreparationFailurePage> GetPreparationFailuresAsync(int pageSize=100,BackupDiscoveryCursor cursor=null,CancellationToken token=default)
         {
             MediaThread.Check();if(pageSize<1 || pageSize>200) throw new ArgumentOutOfRangeException(nameof(pageSize));string scope=CatalogScope;
-            if(cursor!=null && (cursor.Store!=service.StoreId || cursor.Scope!=scope)) throw new ArgumentException("Cursor belongs to another scope.");
+            if(cursor!=null && (cursor.Store!=service.CursorIdentity || cursor.Scope!=scope)) throw new ArgumentException("Cursor belongs to another scope.");
             var rows=(await service.Db(Command.Discoveries,token,scope,cursor?.Source??"",cursor?.Version??"",4,pageSize)).Rows;
             var items=rows.Select(r=>new BackupPreparationFailure { Source=r.Text("source_id"),Version=r.Text("content_version"),Name=r.Text("name"),Error=r.Text("error") }).ToList().AsReadOnly();
-            var last=items.Count==0?null:items[items.Count-1];return new BackupPreparationFailurePage { Items=items,Next=items.Count==pageSize?new BackupDiscoveryCursor { Store=service.StoreId,Scope=scope,Source=last.Source,Version=last.Version }:null };
+            var last=items.Count==0?null:items[items.Count-1];return new BackupPreparationFailurePage { Items=items,Next=items.Count==pageSize?new BackupDiscoveryCursor { Store=service.CursorIdentity,Scope=scope,Source=last.Source,Version=last.Version }:null };
         }
         public async UniTask RetryPreparationFailuresAsync(CancellationToken token=default)
         {

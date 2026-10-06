@@ -49,11 +49,11 @@ namespace Game.Media.Backup
         {
             using var operation=EnterOperation();
             if(pageSize<1 || pageSize>199)throw new ArgumentOutOfRangeException(nameof(pageSize));
-            if(cursor!=null && cursor.Store!=StoreId)throw new ArgumentException("Cursor belongs to another backup repository.");
+            if(cursor!=null && cursor.Store!=CursorIdentity)throw new ArgumentException("Cursor belongs to another backup repository.");
             long after=cursor?.Sequence??0;var result=await Db(Command.Changes,cancellationToken,after,pageSize);
             var header=result.Tables[0][0];bool refresh=header.Flag("requires_refresh");
             var items=refresh?Array.Empty<BackupChange>():(IReadOnlyList<BackupChange>)result.Rows.Select(row=>new BackupChange {Sequence=row.Number("sequence"),TaskId=row.Text("object_id"),Generation=row.Number("generation"),Removed=row.Number("kind")==2}).ToList().AsReadOnly();
-            return new BackupChangePage {Items=items,RequiresRefresh=refresh,Next=new BackupChangeCursor {Store=StoreId,Sequence=refresh?header.Number("retained_after_seq"):items.Count==0?after:items[items.Count-1].Sequence}};
+            return new BackupChangePage {Items=items,RequiresRefresh=refresh,Next=new BackupChangeCursor {Store=CursorIdentity,Sequence=refresh?header.Number("retained_after_seq"):items.Count==0?after:items[items.Count-1].Sequence}};
         }
         public async UniTask RecoverNativeAsync(CancellationToken cancellationToken=default)
         {
@@ -95,12 +95,12 @@ namespace Game.Media.Backup
         async UniTask<BackupOperationStatus> QueryOperationCoreAsync(string operationId,BackupOperationCursor cursor,int pageSize,CancellationToken cancellationToken)
         {
             ValidateId(operationId,nameof(operationId));if(pageSize<1 || pageSize>200)throw new ArgumentOutOfRangeException(nameof(pageSize));
-            if(cursor!=null && (cursor.Store!=StoreId || cursor.Operation!=operationId))throw new ArgumentException("Cursor belongs to another operation.");
+            if(cursor!=null && (cursor.Store!=CursorIdentity || cursor.Operation!=operationId))throw new ArgumentException("Cursor belongs to another operation.");
             var rows=(await Db(Command.OperationStatus,cancellationToken,operationId)).Rows;if(rows.Count==0)return null;
             var status=Operation(rows[0]);if(status.DetailsExpired)return status;
             var items=(await Db(Command.OperationItems,cancellationToken,operationId,cursor?.After??"",pageSize)).Rows;
             status.Items=items.Select(r=>new BackupOperationItem {TaskId=r.Text("task_id"),Outcome=(BackupOperationOutcome)r.Number("outcome"),Reason=r.Text("error")}).ToList().AsReadOnly();
-            if(items.Count==pageSize)status.Next=new BackupOperationCursor {Store=StoreId,Operation=operationId,After=status.Items[items.Count-1].TaskId};
+            if(items.Count==pageSize)status.Next=new BackupOperationCursor {Store=CursorIdentity,Operation=operationId,After=status.Items[items.Count-1].TaskId};
             return status;
         }
         public async UniTask<BackupOperationStatus> WaitOperationAsync(string operationId,CancellationToken cancellationToken=default)

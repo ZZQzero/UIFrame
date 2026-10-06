@@ -39,6 +39,7 @@ namespace Game.Media.Backup
         public bool NativeWifiOnly => nativeWifiOnly;
         public string Account => account;
         internal string StoreId => repository.StoreId;
+        internal string CursorIdentity { get; }
         internal string RepositoryRoot => repository.Root;
         internal static long Now => DateTime.UtcNow.Ticks;
         async UniTask<NativeBackupStatus> Platform(NativeBackupRequest request)
@@ -132,7 +133,11 @@ namespace Game.Media.Backup
                     if(attempts.Count<100) break;
                 } while(true);
                 }
-                paused=repository.Execute(Command.Info).Single.Flag("paused");
+                var info=repository.Execute(Command.Info).Single;
+                paused=info.Flag("paused");
+                // StoreId routes an account; independently created catalogs also
+                // need their persisted namespace to distinguish paging positions.
+                CursorIdentity=StoreId+":"+info.Text("source_namespace");
                 client=new HttpClient(handler??new HttpClientHandler { AllowAutoRedirect=false }) { Timeout=System.Threading.Timeout.InfiniteTimeSpan };
             }
             catch { try { repository.Dispose(); } catch(Exception cleanup) { Debug.LogException(cleanup); } throw; }
@@ -161,11 +166,11 @@ namespace Game.Media.Backup
             using var operation=EnterOperation();
             Check(); query=query??new BackupTaskQuery(); int size=query.PageSize; var state=query.State; var cursor=query.Cursor;
             if(size<1 || size>200 || state.HasValue && !Enum.IsDefined(typeof(BackupState),state.Value)) throw new ArgumentOutOfRangeException(nameof(query));
-            if(cursor!=null && (cursor.Store!=StoreId || cursor.State!=state)) throw new ArgumentException("Cursor belongs to another repository or filter.");
+            if(cursor!=null && (cursor.Store!=CursorIdentity || cursor.State!=state)) throw new ArgumentException("Cursor belongs to another repository or filter.");
             long upper=cursor?.Upper??(await Db(Command.Info,cancellationToken)).Single.Number("upper_sequence");
             var rows=(await Db(Command.Tasks,cancellationToken,cursor?.After??0,upper,state.HasValue?(int)state.Value:-1,size)).Rows;
             var items=rows.Select(TaskInfo).ToList().AsReadOnly();
-            return new BackupTaskPage(items,rows.Count==size?new BackupTaskCursor(StoreId,state,items[items.Count-1].sequence,upper):null);
+            return new BackupTaskPage(items,rows.Count==size?new BackupTaskCursor(CursorIdentity,state,items[items.Count-1].sequence,upper):null);
         }
         public async UniTask<BackupTaskInfo> GetTaskAsync(string taskId,CancellationToken cancellationToken=default)
         {using var operation=EnterOperation();return await GetTaskCoreAsync(taskId,cancellationToken);}
@@ -188,19 +193,19 @@ namespace Game.Media.Backup
         {
             using var operation=EnterOperation();
             if(pageSize<1 || pageSize>200) throw new ArgumentOutOfRangeException(nameof(pageSize));
-            if(cursor!=null && cursor.Store!=StoreId) throw new ArgumentException("Cursor belongs to another repository.");
+            if(cursor!=null && cursor.Store!=CursorIdentity) throw new ArgumentException("Cursor belongs to another repository.");
             var rows=(await Db(Command.Receipts,cancellationToken,cursor?.AfterTime??0,cursor?.AfterId??"",pageSize)).Rows;
             var records=rows.Select(Receipt).ToList().AsReadOnly(); var last=records.Count==0?null:records[records.Count-1];
-            return new BackupReceiptPage(records,records.Count==pageSize?new BackupReceiptCursor(StoreId,last.ConfirmedUtc.Ticks,last.BackupId):null);
+            return new BackupReceiptPage(records,records.Count==pageSize?new BackupReceiptCursor(CursorIdentity,last.ConfirmedUtc.Ticks,last.BackupId):null);
         }
         public async UniTask<BackupFileCleanupPage> QueryCleanupFailuresAsync(int pageSize=100,BackupFileCleanupCursor cursor=null,CancellationToken cancellationToken=default)
         {
             using var operation=EnterOperation();
             if(pageSize<1 || pageSize>200)throw new ArgumentOutOfRangeException(nameof(pageSize));
-            if(cursor!=null && cursor.Store!=StoreId)throw new ArgumentException("Cursor belongs to another repository.");
+            if(cursor!=null && cursor.Store!=CursorIdentity)throw new ArgumentException("Cursor belongs to another repository.");
             var rows=(await Db(Command.CleanupFailures,cancellationToken,cursor?.After??"",pageSize)).Rows;
             var items=rows.Select(r=>new BackupFileCleanupInfo {FileId=r.Text("id"),TaskId=r.Text("task_id"),AccountedBytes=r.Number("byte_count"),Error=r.Text("cleanup_error"),UpdatedUtc=new DateTime(r.Number("updated_utc"),DateTimeKind.Utc)}).ToList().AsReadOnly();
-            return new BackupFileCleanupPage {Items=items,Next=items.Count==pageSize?new BackupFileCleanupCursor {Store=StoreId,After=items[items.Count-1].FileId}:null};
+            return new BackupFileCleanupPage {Items=items,Next=items.Count==pageSize?new BackupFileCleanupCursor {Store=CursorIdentity,After=items[items.Count-1].FileId}:null};
         }
         public async UniTask RetryCleanupAsync(string fileId,CancellationToken cancellationToken=default)
         {

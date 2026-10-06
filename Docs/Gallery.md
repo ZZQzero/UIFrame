@@ -222,7 +222,7 @@ await backup.DownloadBackupAndVerifyAsync(receipts.Items[0].BackupId,
     absoluteDestination, token);
 ```
 
-任务游标包含仓库、筛选条件及创建上界；状态实时变化，不宣称跨页冻结快照。汇总按状态持久计数，不加载历史字典。`ReadChangesAsync` 返回有序任务变化页；日志截断返回 `RequiresRefresh`。回执与来源版本关系独立保存，清理任务历史不丢失下载依据或自动判重事实。
+任务游标包含仓库、筛选条件及创建上界；状态实时变化，不宣称跨页冻结快照。任务、回执、变化、批量操作明细、清理故障及准备失败的游标均绑定账号仓库标识与 catalog 的持久 `source_namespace`：同一账号在不同目录独立创建的库不能互用游标，原库关闭后重开仍可续页。汇总按状态持久计数，不加载历史字典。`ReadChangesAsync` 返回有序任务变化页；日志截断返回 `RequiresRefresh`。回执与来源版本关系独立保存，清理任务历史不丢失下载依据或自动判重事实。
 
 `Completed` 只来自服务端确认的任务、代次、账号、来源版本、大小和 SHA-256 回执，仓库原子提交回执与应用标记。存储 PUT 的 200 / 201 / 204 可以没有 JSON，只代表传输成功；随后进入 `Verifying`，归还上传槽位并等待 Query。界面可用 `phase` 区分 Registration、FileTransfer、Confirmation、Finished，用 `acceptance` 展示接管阶段。
 
