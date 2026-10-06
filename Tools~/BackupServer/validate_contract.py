@@ -8,7 +8,7 @@ from openapi_spec_validator import validate
 from protocol import decode_request, encode
 
 ROOT = Path(__file__).resolve().parent
-document = yaml.safe_load((ROOT.parents[1] / 'Docs/GalleryBackupProtocol.openapi.yaml').read_text())
+document = yaml.safe_load((ROOT / 'backup-protocol.openapi.yaml').read_text())
 validate(document)
 count = 0
 for fixture in json.loads((ROOT / 'fixtures/protocol-v2.json').read_text()):

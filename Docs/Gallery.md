@@ -1,4 +1,4 @@
-# 图片、图库与长期备份
+# 图片、图库与备份使用说明
 
 入口位于 `Game.Media`、`Game.Media.Backup`。所有公开入口在 Unity 主线程调用；文件复制、哈希、数据库和平台后台网络在工作线程运行。无需调用 `UI.Init()`。SQLite 是独立的 `Runtime/Sqlite` 模块；照片仓库通过独立原生库复用同一个引擎。
 
@@ -20,9 +20,9 @@
 
 `GameGallery.QueryImagesAsync` 和 `GameImageDirectory.QueryAsync` 是明确的全量快照 API，内存随元数据条数增长；大型图库使用下述索引分页。授权目录提供者按完整核对处理；SAF / 目录书签枚举仍有提供者及元数据临时文件成本，不标为可靠增量。
 
-构建与真机验收状态见 [GalleryValidation.md](GalleryValidation.md)。计划中的性能数字为目标，不能从桌面编译或缓存预算推断手机峰值内存。
+架构、状态机、协议约束与验证边界见 [设计文档](GalleryDesign.md)。计划中的性能数字为目标，不能从桌面编译或缓存预算推断手机峰值内存。
 
-当前备份使用唯一 v2 协议：有界准备、原生持久接收、批量 Plan、独立文件 PUT、服务端确认和滚动批量 Query。设计见 [后台备份协议实施计划](GalleryBackgroundProtocolPlan.md)，原实施证据见 [执行记录](GalleryBackgroundProtocolExecution.md)，当前登记／准备流程见 [准备协调器重构记录](GalleryPreparationRedesign.md)，最新修复与验证见 [故障修复记录](GalleryPreparationRedesign.md#故障修复与开发数据检查)。业务仓库 ABI 为 4、catalog schema 为 5，图库 library schema 为 3，通用 SQLite ABI 仍为 3。两库只接受各自当前版本，不提供旧协议、旧 schema 或 JSON 数据迁移；旧开发库明确拒绝打开，开发验证须显式选择新的空目录，不自动删库。清理范围与验证见 [部署前旧代码清理](GalleryPreparationRedesign.md#部署前旧代码清理)。
+当前备份使用唯一 v2 协议：有界准备、原生持久接收、批量 Plan、独立文件 PUT、服务端确认和滚动批量 Query。业务仓库 ABI 为 4、catalog schema 为 5，图库 library schema 为 3，通用 SQLite ABI 仍为 3。两库只接受各自当前版本，不提供旧协议、旧 schema 或 JSON 数据迁移；旧开发库明确拒绝打开，开发验证须显式选择新的空目录，不自动删库。
 
 ## 系统选择与图片所有权
 
@@ -316,13 +316,30 @@ python3 Tools~/BackupServer/server.py serve --root /absolute/private/backup-v2
 
 业务 API 默认8787，独立上传入口8788。业务 Bearer 只发给业务 API；照片 PUT 只使用上传描述授权，空204不带业务回执。服务根据持久待核验记录独立完成确认，不需要客户端 commit；账号内已核验内容可以复用，相同内容的不同来源仍保留各自备份记录。已发布内容不可覆盖，取消墓碑阻止迟到请求重新提交。
 
-上传授权默认24小时，到期后再过24小时由有界维护关闭未完成尝试；尚未关闭的尝试允许显式 Plan 续期，续期与过期关闭原子仲裁，旧候选不会清理续期后的文件；无引用发布对象另有24小时保留期。每轮最多64个清理候选，单文件故障持久隔离后继续其余工作，失败由 `--retry-failed-cleanup` 显式重试。已确认和仍有引用的内容不被临时TTL删除。详细启动、双 origin 和设备联网配置见 [服务 README](../Tools~/BackupServer/README.md)。参考服务不代表生产容量或正式认证方案。
+上传授权默认24小时，到期后再过24小时由有界维护关闭未完成尝试；尚未关闭的尝试允许显式 Plan 续期，续期与过期关闭原子仲裁，旧候选不会清理续期后的文件；无引用发布对象另有24小时保留期。每轮最多64个清理候选，单文件故障持久隔离后继续其余工作，失败由 `--retry-failed-cleanup` 显式重试。已确认和仍有引用的内容不被临时TTL删除。参考服务不代表生产容量或正式认证方案。
 
 `Runtime/MediaBackup/Native~/build/build.py` 依赖对应目标的已验证 SQLite 构建；`install.py` 校验来源及依赖后安装。二进制位于 `Runtime/MediaBackup/Plugins/{macOS,Windows/x86_64,Android/arm64-v8a,iOS}`。构建处理器检查来源哈希、核心版本，自动复制iOS头文件并配置链接、框架和Android keep规则，无需另建原生App。
 
-打开 `Tools/UIFrame/图片与备份` 使用索引分页、共享预览、任务分页 / 批量控制和清理预览；UGUI示例在 `Samples~/GalleryDemo`，提供任务翻页和预览后清理入口。设备能力与未完成验收见 [验证记录](GalleryValidation.md)，原生命令语义见 [RepositoryContract.md](../Runtime/MediaBackup/Native~/include/RepositoryContract.md)。
+服务初始化时创建仅当前用户可读的 `credentials.json`，包含测试账号与随机令牌；通过运行时配置提供令牌，不写入场景、日志或 Git。一个数据目录只允许一个服务进程持有；重启沿用同一目录，`.backup-owner` 持久锁文件不要手工删除。修复磁盘问题后可显式重试已隔离的清理故障：
 
-## 2026-10-01 接收、索引与内存契约补充
+```sh
+python3 Tools~/BackupServer/server.py serve --root /absolute/private/backup-v2 --retry-failed-cleanup
+```
+
+手机连接本机服务时，业务地址须用手机可达的局域网 IP；上传 origin 也须设置成相同网络可达的最终地址，例如：
+
+```sh
+python3 Tools~/BackupServer/server.py serve --root /absolute/private/backup-v2 \
+  --host 0.0.0.0 --storage-origin http://192.168.1.2:8788
+```
+
+客户端业务 URL 对应 `http://192.168.1.2:8787`。`0.0.0.0` 只是监听地址，不能作为返回给手机的上传地址。测试时须显式启用开发 HTTP 与平台网络规则；正式服务应接入认证、HTTPS、配额、存储、监控和灾备。本机参考服务和测试不证明生产容量。协议字段见 [OpenAPI](../Tools~/BackupServer/backup-protocol.openapi.yaml)，固定夹具位于 `Tools~/BackupServer/fixtures/protocol-v2.json`。
+
+打开 `Tools/UIFrame/图片与备份` 使用索引分页、共享预览、任务分页 / 批量控制和清理预览；UGUI 示例在 `Samples~/GalleryDemo`，提供任务翻页和预览后清理入口。场景中挂载 `GalleryDemo` 到独立于预览面板的应用级对象，绑定 `SelectOne`、`SelectMultiple`、`ReadAlbums`、`BackupSelected`、`PauseBackup`、`ResumeBackup`、`RefreshBackupStatus` 与 `ClearPreview`；令牌通过 `SetAccessToken` 在运行时提供。Editor 文件窗口只支持单选，多选 / 相册窗口 / 授权目录须在移动端核验。关闭预览不取消已接收任务；结束示例对象会等待 C# 服务停止，已交接的移动后台传输由系统继续管理。退出账号前先暂停备份并等待完成。
+
+虚拟图库示例使用 `LoopVerticalScrollRect`、`GalleryVirtualListDemo` 和 `GalleryThumbnailCell`。列表需配置 Viewport / RectMask2D、Content、固定尺寸单元与 RawImage；应用创建并持有 `ImageLibraryIndex` 和 scope 后调用 `InitializeAsync(library, scope)`。`ShowFirstPageAsync` / `ShowNextPageAsync` 查询最多200项元数据，`HasNextPage` 控制翻页；滚动重绑取消旧加载，离屏释放缩略图租约。关页先等待 `list.ShutdownAsync()`，再关闭图库索引。后台加载失败会写 Unity 日志，不伪装成空图片；5000张连续滚动的设备帧预算仍需产品场景验收。
+
+## 接收、索引与内存补充
 
 - 后台交接分为认领、凭据持久化后的 Handoff、系统受理；每个控制请求和照片传输分别记录系统绑定与执行阶段。系统只执行已交接代次；C#关闭或失败不能代替平台宣告凭据已释放。文件统一由共享仓库 Seal 刷盘，再由 AcceptItem 逐项接受。
 - `ReadChangesAsync` 在单个只读 SQL 快照中读取身份、权限代次、保留水位和最多200条变化；日志被截断或范围变代时返回 `RequiresRefresh`，不把空页误当已消费。
