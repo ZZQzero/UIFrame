@@ -28,7 +28,7 @@ def main():
         source=next(sqlite.glob('*uiframe_sqlite*.meta')).read_text().splitlines()
         meta.write_text('\n'.join('guid: '+uuid.uuid4().hex if x.startswith('guid:') else x for x in source)+'\n')
     (destination.parent/'build-manifest.json').write_text(json.dumps(manifest,indent=2)+'\n')
-    artifact=dict(abi=2,sqlite_build_id=manifest['sqlite_build_id'],binary=name,sha256=manifest['artifacts'][name],sources=[dict(path=k,sha256=v) for k,v in manifest['sources'].items()])
+    artifact=dict(abi=4,sqlite_build_id=manifest['sqlite_build_id'],binary=name,sha256=manifest['artifacts'][name],sources=[dict(path=k,sha256=v) for k,v in manifest['sources'].items()])
     (destination.parent/'artifact.json').write_text(json.dumps(artifact,indent=2)+'\n')
     print('Installed: '+str(destination))
 

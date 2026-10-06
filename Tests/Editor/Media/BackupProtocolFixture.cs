@@ -85,7 +85,12 @@ namespace UIFrame.Regression
     }
     internal static class BackupTestSubmission
     {
+        internal static async UniTask<BackupSubmissionResult> SubmitAndWaitAsync(this ImageBackupService service,string id,IReadOnlyList<ImageReference> images,CancellationToken token=default)
+        {
+            var submission=await service.SubmitAsync(id,images,token);
+            return await submission.WaitAsync(token);
+        }
         internal static async UniTask<IReadOnlyList<string>> SubmitPhotosAsync(this ImageBackupService service,IReadOnlyList<ImageReference> images,CancellationToken token=default)
-            =>(await service.SubmitAsync(Guid.NewGuid().ToString("N"),images,token)).AcceptedTaskIds;
+            =>(await service.SubmitAndWaitAsync(Guid.NewGuid().ToString("N"),images,token)).AcceptedTaskIds;
     }
 }

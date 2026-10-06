@@ -1,8 +1,8 @@
 {
-  "abi": 2,
+  "abi": 4,
   "sqlite_build_id": "d485f695fda5529bd7ae610ff823fc211c45cdd4aa28fa94b9456b82bccf10fd",
   "binary": "libuiframe_backup.dylib",
-  "sha256": "9b4729dcbbadd8149ee85741034bfeb8ffb433eb5af2cdbb033c07fc4d7f6c79",
+  "sha256": "ac2f63e2a19ef4fec4fc6c026a1f80c56dbf0d10f36f0678f01d9b08b5548af9",
   "sources": [
     {
       "path": "CMakeLists.txt",
@@ -14,31 +14,31 @@
     },
     {
       "path": "src/protocol.cpp",
-      "sha256": "5aa4e6693bf22b51ffbc3f1239c53010793ad78ee6ef64391338adde83293db3"
+      "sha256": "e7ab98fa88c7634ea86ffc3b9942dc334ed544bb98ec684fc5c9d59b5fc3d0a5"
     },
     {
       "path": "src/repository.cpp",
-      "sha256": "95103c4f248d92682b7f0e9adb51a55f0a91b9d5f1c8b9a1444d71d227017c3a"
+      "sha256": "e3d11d7869d421185bb0fb4f18abc53a117d01df62c441a0d079cf4179681f57"
     },
     {
       "path": "src/repository_support.hpp",
-      "sha256": "12f3df406791926e9b0c1f8631a890751c34bc135fc0418afdee8851d141246f"
+      "sha256": "bbcf80909bbd5c3cecbd1f8aeed392a4b5697b975a482b012d111c89e054e98c"
     },
     {
       "path": "include/ufbackup.h",
-      "sha256": "84e055aa47e9c8e516703e75b4bd90b350ac13bc4a656a4141fddcbd42b79d04"
+      "sha256": "3f92f9aa7a81639eb2c6c7db5ce17fdb2848663fb7ffd7acc8e1c1e2c045c618"
     },
     {
       "path": "schema/catalog.sql",
-      "sha256": "e8f9a8badebe7dbdaa75719c580e06b4a0a3c07e940d1cec46cc7b4236b2a580"
+      "sha256": "cd706ccb4f34f57bb733518cb2441a386077ca477b457dcbed2cda8d3f875c56"
     },
     {
       "path": "build/build.py",
-      "sha256": "25b2b711e4e01015ed06601f04ee9143132ec3080373baf7728e4d36cd306557"
+      "sha256": "89784ef2fb719d779285db243c2b168fc5c2f4620f62fffb33ad2b9af78b48f9"
     },
     {
       "path": "build/install.py",
-      "sha256": "ce40306fcff145d83b095640fa6f02f6fdca9dea10e3b7609169c6229aa404b6"
+      "sha256": "850a89911863411002aa50293d3e861e4a8325398d00677b9f208608f390dcb2"
     },
     {
       "path": "build/schema.py",

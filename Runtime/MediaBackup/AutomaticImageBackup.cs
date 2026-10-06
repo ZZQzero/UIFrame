@@ -46,6 +46,13 @@ namespace Game.Media.Backup
         readonly Func<bool> wifiAvailable;
         AutomaticBackupPolicy policy;
         bool busy;
+        sealed class Submission
+        {
+            internal BackupSubmission Handle;
+            internal ImageLibraryScope Source;
+            internal string CatalogScope;
+        }
+        readonly List<Submission> submissions=new List<Submission>();
         public string LastError { get; private set; }
         public DateTime? LastScanUtc { get; private set; }
         public bool IsWaitingForCapacity => service.IsWaitingForCapacity;
@@ -152,8 +159,24 @@ namespace Game.Media.Backup
             using var operation=EnterOperation();
             await ScanCoreAsync(cancellationToken,completeReconciliation);
         }
+        async UniTask ObserveCompletedSubmissions()
+        {
+            for(int i=submissions.Count-1;i>=0;i--)if(submissions[i].Handle.IsCompleted) {
+                var submission=submissions[i];submissions.RemoveAt(i);
+                try {await submission.Handle.WaitAsync();}
+                catch(BackupSubmissionException error) {
+                    if(!error.HasSharedFailure)continue;
+                    LastError=error.Message;
+                    var access=error.SharedFailures.OfType<GalleryException>().FirstOrDefault(e=>e.IsScopeAccessFailure);
+                    if(access!=null)
+                        try {await library.RecordSourceAccessFailureAsync(submission.Source,access);}catch(Exception secondary){UnityEngine.Debug.LogException(secondary);}
+                    throw;
+                }
+            }
+        }
         async UniTask ScanCoreAsync(CancellationToken cancellationToken,bool completeReconciliation)
         {
+            await ObserveCompletedSubmissions();
             var currentPolicy=policy.Copy();Validate(currentPolicy);if(!currentPolicy.enabled) throw new InvalidOperationException("Automatic backup is disabled.");
             if(currentPolicy.wifiOnly && !wifiAvailable()) return;
             if(!service.UsesNativeBackgroundTransfer)service.SetDesktopNetworkPolicy(()=>!policy.wifiOnly || wifiAvailable());
@@ -164,7 +187,7 @@ namespace Game.Media.Backup
                 var source=Scope;string scope=CatalogScope;await library.RefreshAsync(source,cancellationToken,completeReconciliation);
                 var position=await library.GetPositionAsync(source,cancellationToken);
                 var previous=(await service.Db(Command.ScopeState,cancellationToken,scope)).Rows;
-                if(previous.Count!=0 && previous[0].Text("library_id")==position.LibraryId && previous[0].Number("permission_generation")!=position.PermissionGeneration)
+                if(previous.Count!=0 && (previous[0].Flag("requires_confirmation") || previous[0].Text("library_id")==position.LibraryId && previous[0].Number("permission_generation")!=position.PermissionGeneration))
                     throw new GalleryException("ScopeConfirmationRequired","Photo access changed; confirm the current scope before continuing automatic backup.");
                 var state=(await service.Db(Command.Scope,cancellationToken,scope,source.Id,position.LibraryId,position.IndexGeneration,position.ScopeRevision,position.PermissionGeneration,currentPolicy.includeExisting)).Single;
                 bool reconcile=!state.Flag("enabled") || state.Number("consumed_seq")<position.RetainedAfter;
@@ -197,10 +220,11 @@ namespace Game.Media.Backup
                 }
                 else await ConsumeChanges(source,scope,CopyPosition(position,state.Number("consumed_seq")),cancellationToken);
                 await service.SynchronizeNativeAsync();
-                string afterSource="",afterVersion="";
+                string afterSource="",afterVersion="";int remaining=128;
                 for(;;)
                 {
-                    var pending=(await service.Db(Command.Discoveries,cancellationToken,scope,afterSource,afterVersion,0,32)).Rows;
+                    if(service.AvailablePreparationSlots==0 || remaining==0)break;
+                    var pending=(await service.Db(Command.Discoveries,cancellationToken,scope,afterSource,afterVersion,0,Math.Min(32,Math.Min(remaining,service.AvailablePreparationSlots)))).Rows;
                     if(pending.Count!=0)
                     {
                         cancellationToken.ThrowIfCancellationRequested();if(currentPolicy.wifiOnly && !wifiAvailable()) return;
@@ -210,15 +234,9 @@ namespace Game.Media.Backup
                             long bytes=candidate.Number("byte_count");
                             return new ImageReference(identity.Substring(0,colon),candidate.Text("provider_id"),candidate.Text("name"),candidate.Text("mime"),bytes>0?bytes:-1,version:candidate.Text("content_version"));
                         }).ToArray();
-                        try {await service.SubmitAsync(Guid.NewGuid().ToString("N"),images,cancellationToken);}
-                        catch(BackupSubmissionException failure) when(!failure.HasSharedFailure)
-                        {
-                            foreach(var item in failure.Result.Items.Where(x=>x.State==BackupState.Failed && x.Acceptance==BackupAcceptanceStage.Preparing))
-                            {
-                                var candidate=pending[item.Index];
-                                await service.Db(Command.Disposition,cancellationToken,scope,candidate.Text("source_id"),candidate.Text("content_version"),4,item.Error);
-                            }
-                        }
+                        if(images.Length>service.AvailablePreparationSlots)break;
+                        submissions.Add(new Submission {Handle=await service.RegisterSubmission(Guid.NewGuid().ToString("N"),images,scope,state.Number("admission_epoch"),cancellationToken),Source=source,CatalogScope=scope});
+                        remaining-=images.Length;
                         afterSource=pending[pending.Count-1].Text("source_id");afterVersion=pending[pending.Count-1].Text("content_version");
                     }
                     if(pending.Count<32) break;
@@ -228,12 +246,10 @@ namespace Game.Media.Backup
             catch(Exception error)
             {
                 primary=error;LastError=error.Message;
-                var gallery=error as GalleryException ?? (error as BackupSubmissionException)?.InnerExceptions.OfType<GalleryException>().FirstOrDefault(x=>x.IsScopeAccessFailure);
-                if(gallery!=null && gallery.IsScopeAccessFailure)
+                if(error is GalleryException gallery && gallery.IsScopeAccessFailure)
                 {
                     try {await library.RecordSourceAccessFailureAsync(Scope,gallery);}catch(Exception secondary){UnityEngine.Debug.LogException(secondary);}
                     try {await SuspendScopeAsync(default);}catch(Exception secondary){UnityEngine.Debug.LogException(secondary);}
-                    System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(gallery).Throw();
                 }
                 throw;
             }
@@ -252,7 +268,15 @@ namespace Game.Media.Backup
                 await library.RefreshAsync(Scope,token,true);
                 var position=await library.GetPositionAsync(Scope,token);
                 await SuspendScopeAsync(token);
+                // This explicit confirmation acknowledges prior scope failures.
+                // Await their actual preparation release before opening a new epoch.
+                foreach(var submission in submissions.Where(s=>s.CatalogScope==CatalogScope).ToArray()) {
+                    try {await submission.Handle.WaitAsync(token);}
+                    catch(BackupSubmissionException error) when(error.SharedFailures.All(e=>e is GalleryException gallery && gallery.IsScopeAccessFailure)) { }
+                    submissions.Remove(submission);
+                }
                 await service.Db(Command.Scope,token,CatalogScope,Scope.Id,position.LibraryId,position.IndexGeneration,position.ScopeRevision,position.PermissionGeneration,policy.includeExisting);
+                await service.Db(Command.ConfirmScope,token,CatalogScope);
             }
             catch(Exception error){primary=error;throw;}
             finally {
@@ -262,12 +286,7 @@ namespace Game.Media.Backup
         }
         async UniTask SuspendScopeAsync(CancellationToken token)
         {
-            long cursor=0;for(;;)
-            {
-                var result=(await service.Db(Command.SuspendScope,token,CatalogScope,cursor,ImageBackupService.Now)).Single;cursor=result.Number("cursor");
-                if(result.Number("count")<32)break;await UniTask.Yield(PlayerLoopTiming.Update,token);
-            }
-            await service.SynchronizeNativeAsync();
+            token.ThrowIfCancellationRequested();await service.SuspendPreparationScope(CatalogScope);
         }
         /// <summary>Explicitly discard this scope's baseline and source dispositions, retaining confirmed receipts and accepted tasks.</summary>
         public async UniTask ResetScopeAsync(CancellationToken token=default)
@@ -287,12 +306,14 @@ namespace Game.Media.Backup
                 {
                     cancellationToken.ThrowIfCancellationRequested();
                     changed=false;
+                    await ObserveCompletedSubmissions();
                     if(!policy.wifiOnly || wifiAvailable())
                     {
                         bool complete=System.Diagnostics.Stopwatch.GetTimestamp()>=nextReconciliation;
                         await ScanCoreAsync(cancellationToken,complete);
                         if(complete)nextReconciliation=System.Diagnostics.Stopwatch.GetTimestamp()+(long)policy.scanIntervalSeconds*System.Diagnostics.Stopwatch.Frequency;
                     }
+                    long preparationRevision=service.PreparationRevision;
                     long until=System.Diagnostics.Stopwatch.GetTimestamp()+(long)policy.scanIntervalSeconds*System.Diagnostics.Stopwatch.Frequency;
                     do
                     {
@@ -304,6 +325,7 @@ namespace Game.Media.Backup
                             System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(failure).Throw();
                         }
                         await UniTask.Delay(100,ignoreTimeScale:true,cancellationToken:cancellationToken);
+                        if(preparationRevision!=service.PreparationRevision || submissions.Any(s=>s.Handle.IsCompleted))changed=true;
                     } while(!changed && System.Diagnostics.Stopwatch.GetTimestamp()<until && (nextReconciliation==0 || System.Diagnostics.Stopwatch.GetTimestamp()<nextReconciliation));
                 }
             }

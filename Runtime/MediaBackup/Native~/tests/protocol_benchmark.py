@@ -72,11 +72,13 @@ def run(args, ratio):
                 indexes = range(offset, min(args.photos, offset + 32))
                 batch = format(offset + 1, '032x'); values = [batch, 'aa', now, len(indexes)]
                 for index in indexes:
-                    values += [format(index + 1, '032x'), 'asset:' + str(index), 'v1', 'fixture.jpg', 'image/jpeg', 0]
+                    values += [format(index + 1, '032x'), 'asset:' + str(index), 'v1', 'fixture.jpg', 'image/jpeg']
+                values += ["", 0]
                 db.call(2, *values)
                 for index in indexes:
                     item = format(index + 1, '032x'); data = payload(index)
                     (root / IDENTITY / 'payloads' / (item + '.payload')).write_bytes(data)
+                    db.call(77, item, 'aa', len(data), len(data), 536870912, now)
                     db.call(3, item, 'aa', len(data), hashlib.sha256(data).hexdigest(), 'image/jpeg', 536870912, now)
                     db.call(96, item, 'aa', now); db.call(9, item, 0, 0, now); db.call(74, item, 1, 'protected-api')
                 staged = sum(row['count'] for row in db.call(56)[-1] if row['state'] == 1)

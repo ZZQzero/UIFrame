@@ -52,6 +52,9 @@ namespace Game.Media.Backup
                 await Db(Command.Pause,cancellationToken,true);paused=true;
                 await SynchronizeNativeAsync();
                 await WaitExecutorRelease(null,cancellationToken);
+                using var stopping=CancellationTokenSource.CreateLinkedTokenSource(cancellationToken,lifetime.Token);
+                await UniTask.WaitUntil(()=>!preparing && !registering,cancellationToken:stopping.Token);
+                if(preparationFailure!=null)System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(preparationFailure).Throw();
             }
             finally {pausing=false;}
         }

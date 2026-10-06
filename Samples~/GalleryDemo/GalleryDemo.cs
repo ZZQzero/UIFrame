@@ -39,7 +39,7 @@ public sealed class GalleryDemo : MonoBehaviour
     public void BackupSelected() => Run(async ct =>
     {
         if (selection == null) throw new InvalidOperationException("请先选择图片。");
-        await EnsureBackup(ct);await backup.SubmitAsync(Guid.NewGuid().ToString("N"),selection.Items,ct);
+        await EnsureBackup(ct);await (await backup.SubmitAsync(Guid.NewGuid().ToString("N"),selection.Items,ct)).WaitAsync(ct);
         var summary=await backup.GetSummaryAsync(ct);long completed=summary[BackupState.Completed],failed=summary[BackupState.Failed]+summary[BackupState.NeedsAttention];
         SetStatus($"已备份 {completed} 张，失败或需处理 {failed} 张。" + (backup.UsesNativeBackgroundTransfer ? "其余已提交系统后台，请刷新状态查看结果。" : ""));
     });

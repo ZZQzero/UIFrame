@@ -90,7 +90,7 @@ void validate_url(const std::string &url,bool development) {
     }
 }
 const std::string Work=
-    "SELECT a.*,t.state AS task_state,t.desired_action,t.file_id,t.sequence,t.source_id,t.content_version,"
+    "SELECT a.*,t.state AS task_state,t.desired_action,t.file_id,t.sequence,t.source_id,t.content_version,t.scope_id,t.scope_epoch,"
     "f.relative_path,f.byte_count,lower(hex(f.sha256)) AS sha256,m.name,m.mime "
     "FROM task_attempts a INDEXED BY attempts_protocol_work CROSS JOIN tasks t ON t.id=a.task_id AND t.current_generation=a.generation "
     "CROSS JOIN file_records f ON f.id=t.file_id CROSS JOIN task_metadata m ON m.task_id=t.id ";
@@ -179,6 +179,8 @@ void finish_error(std::vector<Command> &commands,const std::string &id,int64_t g
 Bytes protocol_command(Client &db,const std::string &path,const std::string &store,const std::string &account,unsigned command,const Args &a,unsigned capacity) {
     (void)store;std::vector<Command> commands;auto directory=std::filesystem::u8path(path).parent_path();
     switch(command) {
+    case UFB_CONFIRM_SCOPE:
+        a.count(1);commands.emplace_back("UPDATE scopes SET requires_confirmation=0 WHERE id=?",std::vector<Value>{a.id(0)},1);break;
     case UFB_CONTROL:
         a.count(1);return db.query({Control+"WHERE c.id=?",{a.id(0)}},capacity);
     case UFB_PROTOCOL_WAKE:
@@ -187,18 +189,24 @@ Bytes protocol_command(Client &db,const std::string &path,const std::string &sto
         a.count(2);commands.emplace_back("UPDATE store_settings SET development_http=?,transfer_mode=? WHERE singleton=1",std::vector<Value>{a.number(0,0,1),a.number(1,0,1)},1);break;
     case UFB_ACCEPT_ITEM: {
         a.count(3);auto id=a.id(0),owner=a.id(1);auto now=a.number(2);
-        commands.emplace_back("UPDATE tasks SET state=0,updated_utc=? WHERE id=? AND state=9 AND EXISTS(SELECT 1 FROM file_records f JOIN preparations p ON p.id=f.preparation_id WHERE f.id=file_id AND f.state=1 AND p.phase=0 AND p.owner=?)",std::vector<Value>{now,id,owner},1);
+        commands.emplace_back("UPDATE tasks SET id=id WHERE id=? AND state=9 AND EXISTS(SELECT 1 FROM file_records f JOIN preparations p ON p.id=f.preparation_id WHERE f.id=file_id AND f.state=1 AND p.owner=? AND p.phase=0)",std::vector<Value>{id,owner},1);
+        commands.emplace_back("UPDATE tasks SET state=0,preparation_accepted=1,updated_utc=? WHERE id=? AND state=9 AND EXISTS(SELECT 1 FROM file_records f JOIN preparations p ON p.id=f.preparation_id WHERE f.id=file_id AND f.state=1 AND p.phase=0 AND p.stop_requested=0 AND p.owner=?) AND desired_action=0 AND (SELECT paused FROM store_settings)=0 AND "+admission("tasks"),std::vector<Value>{now,id,owner});
         commands.emplace_back("UPDATE preparations SET phase=1 WHERE id=(SELECT batch_id FROM tasks WHERE id=?) AND NOT EXISTS(SELECT 1 FROM tasks WHERE batch_id=preparations.id AND state=9)",std::vector<Value>{id});
-        commands.emplace_back("UPDATE discoveries SET disposition=2,task_id=? WHERE (source_id,content_version)=(SELECT source_id,content_version FROM tasks WHERE id=?) AND disposition=0",std::vector<Value>{id,id});break;
+        commands.emplace_back("UPDATE discoveries SET disposition=2,task_id=? WHERE (source_id,content_version)=(SELECT source_id,content_version FROM tasks WHERE id=?) AND scope_id=(SELECT scope_id FROM tasks WHERE id=?) AND EXISTS(SELECT 1 FROM tasks WHERE id=? AND state=0) AND disposition IN(0,2)",std::vector<Value>{id,id,id,id});
+        commands.emplace_back("SELECT state=0 AS accepted FROM tasks WHERE id=?",std::vector<Value>{id});break;
     }
     case UFB_FAIL_ITEM: {
         a.count(4);auto id=a.id(0),owner=a.id(1),error=a.text(2);auto now=a.number(3);
         commands.emplace_back("UPDATE tasks SET state=7,error=?,updated_utc=? WHERE id=? AND state=9 AND EXISTS(SELECT 1 FROM preparations p WHERE p.id=batch_id AND p.phase=0 AND p.owner=?)",std::vector<Value>{error,now,id,owner},1);
         commands.emplace_back("UPDATE file_records SET state=2,updated_utc=? WHERE id=(SELECT file_id FROM tasks WHERE id=?)",std::vector<Value>{now,id},1);
+        // A closed scope is acknowledged by explicit confirmation, not a
+        // per-source retry. Retain the candidate without adopting the old task.
+        commands.emplace_back("UPDATE discoveries SET disposition=0,task_id=NULL,error=NULL WHERE task_id=? AND disposition=2 AND EXISTS(SELECT 1 FROM tasks t WHERE t.id=task_id AND t.scope_id=discoveries.scope_id AND NOT "+admission("t")+")",std::vector<Value>{id});
+        commands.emplace_back("UPDATE discoveries SET disposition=4,error=? WHERE task_id=? AND scope_id=(SELECT scope_id FROM tasks WHERE id=?) AND disposition=2",std::vector<Value>{error,id,id});
         commands.emplace_back("UPDATE preparations SET phase=1 WHERE id=(SELECT batch_id FROM tasks WHERE id=?) AND NOT EXISTS(SELECT 1 FROM tasks WHERE batch_id=preparations.id AND state=9)",std::vector<Value>{id});break;
     }
     case UFB_SUBMISSION:
-        a.count(1);return db.query({"SELECT i.ordinal,i.id,t.id IS NULL AS details_expired,t.state,t.error,t.current_generation,coalesce(a.submission_state,0) AS native_accepted,coalesce(a.system_scheduled,0) AS system_scheduled,coalesce(a.protocol_phase,0) AS protocol_phase FROM preparation_items i LEFT JOIN tasks t ON t.id=i.id LEFT JOIN task_attempts a ON a.task_id=t.id AND a.generation=t.current_generation WHERE i.preparation_id=? ORDER BY ordinal LIMIT 32",{a.id(0)}},capacity);
+        a.count(1);return db.query({"SELECT i.ordinal,i.id,t.id IS NULL AS details_expired,t.state,t.error,t.current_generation,t.preparation_started,coalesce(a.submission_state,0) AS native_accepted,coalesce(a.system_scheduled,0) AS system_scheduled,coalesce(a.protocol_phase,0) AS protocol_phase FROM preparation_items i LEFT JOIN tasks t ON t.id=i.id LEFT JOIN task_attempts a ON a.task_id=t.id AND a.generation=t.current_generation WHERE i.preparation_id=? ORDER BY ordinal LIMIT 32",{a.id(0)}},capacity);
     case UFB_SYSTEM_SCHEDULED:
         a.count(1);commands.emplace_back("UPDATE task_attempts SET system_scheduled=1 WHERE executor=? AND submission_state>=1 AND credential_released=0 AND protocol_phase<3",std::vector<Value>{a.number(0,0,2)});break;
     case UFB_CONTROL_CREATE: {
@@ -213,7 +221,7 @@ Bytes protocol_command(Client &db,const std::string &path,const std::string &sto
         for(auto candidate:order) {
             auto predicate=candidate==2?"t.desired_action=2 AND a.protocol_phase<3 AND a.execution_state<>1 AND a.upload_released=1":candidate==0?"t.desired_action=0 AND a.protocol_phase=0 AND t.state=1":"t.desired_action=0 AND a.protocol_phase=2 AND t.state=2 AND a.next_check_utc<=? AND a.confirm_deadline_utc>?";
             std::vector<Value> values{executor};if(candidate==1){values.emplace_back(now);values.emplace_back(now);}
-            selected=select(db,Work+"WHERE a.credential_released=0 AND a.control_id IS NULL AND a.executor=? AND a.submission_state>=1 AND "+predicate+" ORDER BY a.next_check_utc,a.task_id LIMIT 32",values);
+            selected=select(db,Work+"WHERE a.credential_released=0 AND a.control_id IS NULL AND a.executor=? AND a.submission_state>=1 AND "+predicate+(candidate!=0?std::string():" AND "+admission("t"))+" ORDER BY a.next_check_utc,a.task_id LIMIT 32",values);
             if(!selected.empty()){kind=candidate;break;}
         }
         if(selected.empty() && future && !settings.number("paused")) {
@@ -224,6 +232,10 @@ Bytes protocol_command(Client &db,const std::string &path,const std::string &sto
             }
         }
         if(selected.empty())return db.query({Control+"WHERE 0"},capacity);
+        // A sealed request has a fixed membership. Keep a single control owner
+        // per request so revoking one scope cannot pause independent scopes.
+        const auto scope=selected[0].text("scope_id");const auto epoch=selected[0].number("scope_epoch");
+        selected.erase(std::remove_if(selected.begin(),selected.end(),[&](const Row &r){return r.text("scope_id")!=scope || r.number("scope_epoch")!=epoch;}),selected.end());
         if(!flush && kind==0 && selected.size()<32) {
             auto first=one(db,"SELECT min(t.updated_utc) AS earliest FROM tasks t JOIN task_attempts a ON a.task_id=t.id AND a.generation=t.current_generation WHERE a.credential_released=0 AND a.control_id IS NULL AND a.executor=? AND a.protocol_phase=0 AND t.state=1 AND t.desired_action=0",{executor}).number("earliest");
             if(first+Second/4>now)return db.query({Control+"WHERE 0"},capacity);
@@ -259,10 +271,13 @@ Bytes protocol_command(Client &db,const std::string &path,const std::string &sto
         if(row.number("state")==0) {std::ofstream stream(file,std::ios::binary|std::ios::trunc);stream.exceptions(std::ios::badbit|std::ios::failbit);stream.write(row.text("body").data(),std::streamsize(row.text("body").size()));stream.close();durable_payload(file,uint64_t(row.number("byte_count")));}
         commands.emplace_back("UPDATE control_requests SET state=1 WHERE id=? AND state IN(0,1) AND released=0",std::vector<Value>{id},1);commands.emplace_back(Control+"WHERE c.id=?",std::vector<Value>{id});break;
     }
-    case UFB_CONTROL_SUBMITTED:
-        a.count(2);commands.emplace_back("UPDATE control_requests SET state=2,system_task_id=? WHERE id=? AND released=0 AND (state=1 OR (state=2 AND system_task_id=?))",std::vector<Value>{a.text(1,256),a.id(0),a.text(1,256)},1);break;
-    case UFB_CONTROL_START:
-        a.count(1);commands.emplace_back("UPDATE control_requests SET state=3 WHERE id=? AND state=2 AND released=0",std::vector<Value>{a.id(0)},1);break;
+    case UFB_CONTROL_SUBMITTED: case UFB_CONTROL_START: {
+        bool submit=command==UFB_CONTROL_SUBMITTED;a.count(submit?2:1);auto id=a.id(0);
+        auto allowed="(kind=2 OR ((SELECT paused FROM store_settings)=0 AND NOT EXISTS(SELECT 1 FROM control_items i JOIN tasks t ON t.id=i.task_id WHERE i.request_id=control_requests.id AND (t.desired_action<>0 OR (control_requests.kind=0 AND NOT "+admission("t")+")))))";
+        if(submit)commands.emplace_back("UPDATE control_requests SET state=2,system_task_id=? WHERE id=? AND released=0 AND (state=1 OR (state=2 AND system_task_id=?)) AND "+allowed,std::vector<Value>{a.text(1,256),id,a.text(1,256)});
+        else commands.emplace_back("UPDATE control_requests SET state=3 WHERE id=? AND state=2 AND released=0 AND "+allowed,std::vector<Value>{id});
+        commands.emplace_back("SELECT changes() AS admitted");break;
+    }
     case UFB_CONTROL_VALIDATE: {
         a.count(2);auto request=a.id(0);auto results=validate_response(db,request,a.text(1,524288),account);
         std::string sql="SELECT '' AS task_id,0 AS generation,'' AS descriptor WHERE 0";std::vector<Value> values;
@@ -313,7 +328,7 @@ Bytes protocol_command(Client &db,const std::string &path,const std::string &sto
         for(auto &row:rows) {
             if(pause) {
                 commands.emplace_back("UPDATE task_attempts SET execution_state=4,protocol_phase=CASE WHEN ?=0 THEN protocol_phase ELSE 2 END,next_check_utc=max(next_check_utc,?),confirm_deadline_utc=CASE WHEN confirm_deadline_utc=0 THEN ? ELSE confirm_deadline_utc END WHERE task_id=? AND generation=?",std::vector<Value>{submitted,now,now+Day,row.text("task_id"),row.number("generation")},1);
-                commands.emplace_back("UPDATE tasks SET state=4,error=NULL,updated_utc=? WHERE id=? AND current_generation=? AND state<>3",std::vector<Value>{now,row.text("task_id"),row.number("generation")},1);
+                commands.emplace_back("UPDATE tasks SET state=4,desired_action=CASE WHEN "+admission("tasks")+" THEN desired_action ELSE 1 END,error=NULL,updated_utc=? WHERE id=? AND current_generation=? AND state<>3",std::vector<Value>{now,row.text("task_id"),row.number("generation")},1);
             } else finish_error(commands,row.text("task_id"),row.number("generation"),error,now);
             // A saved cancellation intent may follow an interrupted Plan/Query.
             // A failed Cancel itself is terminal until explicit reconciliation.
@@ -337,10 +352,10 @@ Bytes protocol_command(Client &db,const std::string &path,const std::string &sto
         return db.query({page+"WHERE c.released=0 AND c.executor=? AND c.id>? ORDER BY c.id LIMIT 32",{a.number(0,0,2),a.text(1,64)}},capacity);
     }
     case UFB_UPLOADS:
-        a.count(2);return db.query({Work+"WHERE a.credential_released=0 AND a.control_id IS NULL AND a.executor=? AND a.protocol_phase=1 AND t.state=1 AND a.task_id>? AND t.desired_action=0 AND (SELECT paused FROM store_settings)=0 ORDER BY a.task_id LIMIT 32",{a.number(0,0,2),a.text(1,64)}},capacity);
+        a.count(2);return db.query({Work+"WHERE a.credential_released=0 AND a.control_id IS NULL AND a.executor=? AND a.protocol_phase=1 AND t.state=1 AND a.task_id>? AND t.desired_action=0 AND (SELECT paused FROM store_settings)=0 AND "+admission("t")+" ORDER BY a.task_id LIMIT 32",{a.number(0,0,2),a.text(1,64)}},capacity);
     case UFB_UPLOAD_START: {
         a.count(4);auto id=a.id(0);auto generation=a.number(1,1),now=a.number(3);auto system=a.text(2,256);
-        commands.emplace_back("UPDATE task_attempts SET execution_state=1,upload_released=0,system_task_id=?,system_scheduled=1,payload_released=0 WHERE task_id=? AND generation=? AND protocol_phase=1 AND execution_state=0 AND upload_released=1 AND control_id IS NULL AND upload_expires_utc>? AND EXISTS(SELECT 1 FROM tasks t WHERE t.id=task_id AND t.current_generation=generation AND t.state=1 AND t.desired_action=0) AND (SELECT paused FROM store_settings)=0",std::vector<Value>{system,id,generation,now});
+        commands.emplace_back("UPDATE task_attempts SET execution_state=1,upload_released=0,system_task_id=?,system_scheduled=1,payload_released=0 WHERE task_id=? AND generation=? AND protocol_phase=1 AND execution_state=0 AND upload_released=1 AND control_id IS NULL AND upload_expires_utc>? AND EXISTS(SELECT 1 FROM tasks t WHERE t.id=task_id AND t.current_generation=generation AND t.state=1 AND t.desired_action=0 AND "+admission("t")+") AND (SELECT paused FROM store_settings)=0",std::vector<Value>{system,id,generation,now});
         commands.emplace_back("SELECT changes() AS started");break;
     }
     case UFB_UPLOAD_REJECT: {
@@ -374,7 +389,7 @@ Bytes protocol_command(Client &db,const std::string &path,const std::string &sto
         a.count(2);commands.emplace_back("UPDATE task_attempts SET credential_released=1,payload_released=1,credential_reference=NULL WHERE task_id=? AND generation=? AND (protocol_phase=3 OR EXISTS(SELECT 1 FROM tasks t WHERE t.id=task_id AND t.state=4)) AND upload_released=1 AND upload_reference IS NULL AND control_id IS NULL",std::vector<Value>{a.id(0),a.number(1,1)},1);break;
     case UFB_PROTOCOL_RESUME: {
         a.count(3);auto id=a.id(0),credential=a.text(1,16384);auto now=a.number(2);require(!credential.empty(),"Resume requires protected credentials");
-        commands.emplace_back("UPDATE tasks SET state=CASE (SELECT protocol_phase FROM task_attempts WHERE task_id=tasks.id AND generation=current_generation) WHEN 2 THEN 2 ELSE 1 END,desired_action=0,error=NULL,updated_utc=? WHERE id=? AND state IN(0,4) AND current_generation>0 AND EXISTS(SELECT 1 FROM task_attempts a WHERE a.task_id=tasks.id AND a.generation=current_generation AND a.protocol_phase<3 AND a.credential_released=1 AND a.upload_released=1 AND a.control_id IS NULL)",std::vector<Value>{now,id},1);
+        commands.emplace_back("UPDATE tasks SET scope_epoch=coalesce((SELECT admission_epoch FROM scopes WHERE id=scope_id),0),state=CASE (SELECT protocol_phase FROM task_attempts WHERE task_id=tasks.id AND generation=current_generation) WHEN 2 THEN 2 ELSE 1 END,desired_action=0,error=NULL,updated_utc=? WHERE id=? AND state IN(0,4) AND (scope_id IS NULL OR EXISTS(SELECT 1 FROM scopes WHERE id=scope_id AND enabled=1 AND requires_confirmation=0)) AND current_generation>0 AND EXISTS(SELECT 1 FROM task_attempts a WHERE a.task_id=tasks.id AND a.generation=current_generation AND a.protocol_phase<3 AND a.credential_released=1 AND a.upload_released=1 AND a.control_id IS NULL)",std::vector<Value>{now,id},1);
         commands.emplace_back("UPDATE task_attempts SET execution_state=0,protocol_phase=CASE WHEN protocol_phase=1 AND upload_reference IS NULL THEN 0 ELSE protocol_phase END,credential_reference=?,credential_released=0,system_scheduled=0 WHERE task_id=? AND generation=(SELECT current_generation FROM tasks WHERE id=?)",std::vector<Value>{credential,id,id},1);break;
     }
     case UFB_PROTOCOL_ACTIONS: {
@@ -384,8 +399,9 @@ Bytes protocol_command(Client &db,const std::string &path,const std::string &sto
         for(auto &row:rows) {
             auto id=row.text("task_id");auto generation=row.number("generation");
             if(row.number("desired_action")==2)continue;
-            if(paused || row.number("desired_action")==1) {
-                commands.emplace_back("UPDATE tasks SET state=4,error=NULL,updated_utc=? WHERE id=? AND current_generation=?",std::vector<Value>{now,id,generation},1);
+            bool revoked=row.number("protocol_phase")!=2 && !one(db,"SELECT "+admission("t")+" AS allowed FROM tasks t WHERE id=?",{id}).number("allowed");
+            if(paused || row.number("desired_action")==1 || revoked) {
+                commands.emplace_back("UPDATE tasks SET state=4,desired_action=CASE WHEN ? THEN 1 ELSE desired_action END,error=NULL,updated_utc=? WHERE id=? AND current_generation=?",std::vector<Value>{int64_t(revoked),now,id,generation},1);
                 commands.emplace_back("UPDATE task_attempts SET execution_state=4 WHERE task_id=? AND generation=?",std::vector<Value>{id,generation},1);
             } else if(row.number("protocol_phase")==2 && now>=row.number("confirm_deadline_utc"))finish_error(commands,id,generation,"Confirmation deadline reached",now);
         }

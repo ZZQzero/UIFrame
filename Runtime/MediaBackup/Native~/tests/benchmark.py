@@ -50,19 +50,19 @@ def worker(core,repository,count):
                    page+"INSERT INTO tasks(id,batch_id,source_id,content_version,state,file_id,created_utc,updated_utc) SELECT printf('%032x',n),'seed','file:'||n,'v1',3,printf('%032x',n),1,1 FROM page",
                    page+"INSERT INTO task_metadata(task_id,name,mime) SELECT printf('%032x',n),'photo.png' ,'image/png' FROM page")
         seed=time.perf_counter()-started;db.close()
-        h=C.c_uint64();s=Status(size=C.sizeof(Status),abi=2);start=time.perf_counter()
+        h=C.c_uint64();s=Status(size=C.sizeof(Status),abi=4);start=time.perf_counter()
         code=native.ufbackup_open(temporary.encode(),identity.encode(),b'https://test.invalid',b'test',0,C.byref(h),C.byref(s));assert code==0,s.message
         opened=(time.perf_counter()-start)*1000
         output=C.create_string_buffer(1024*1024)
         def measure(command,args):
             data=encode(args);samples=[]
             for i in range(120):
-                s=Status(size=C.sizeof(Status),abi=2);start=time.perf_counter()
+                s=Status(size=C.sizeof(Status),abi=4);start=time.perf_counter()
                 code=native.ufbackup_call(h,command,data,len(data),output,len(output),C.byref(s));assert code==0,s.message
                 if i>=20:samples.append((time.perf_counter()-start)*1000)
             return dict(p50_ms=statistics.median(samples),p95_ms=sorted(samples)[94],result_bytes=s.length)
         result=dict(rows=count,seed_seconds=seed,open_ms=opened,page=measure(6,[count//2,count,3,100]),summary=measure(8,[]),max_rss_bytes=resource.getrusage(resource.RUSAGE_SELF).ru_maxrss)
-        s=Status(size=C.sizeof(Status),abi=2);assert native.ufbackup_close(h,C.byref(s))==0
+        s=Status(size=C.sizeof(Status),abi=4);assert native.ufbackup_close(h,C.byref(s))==0
         result['database_bytes']=path.stat().st_size
         print(json.dumps(result))
 

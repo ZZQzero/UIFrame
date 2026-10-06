@@ -29,7 +29,7 @@ public static class MediaSmoke
             service=await ImageBackupService.CreateAsync(new BackupConfiguration {ServerUrl=settings?.serverUrl??"https://validation.invalid",Account=settings?.account??"smoke",AccessToken=()=>settings?.token??"unused-test-credential",EnableNativeBackgroundTransfer=native,
                 AllowDevelopmentHttp=settings?.allowDevelopmentHttp??false,NativeWifiOnly=settings?.wifiOnly??true,
                 StorageDirectory=native?ImageBackupService.NativeBackupStorageDirectory:Path.Combine(root,"backup")});
-            var submission=await service.SubmitAsync(Guid.NewGuid().ToString("N"),new[]{ImageReference.FromFile(path)});
+            var submission=await (await service.SubmitAsync(Guid.NewGuid().ToString("N"),new[]{ImageReference.FromFile(path)})).WaitAsync();
             if(submission.AcceptedTaskIds.Count!=1)throw new Exception("Native executor did not accept the photo");
             if(settings!=null)
             {

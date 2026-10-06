@@ -38,7 +38,7 @@ namespace UIFrame.Regression
             var primary=new InvalidOperationException("fixture network policy failed");
             service.SetDesktopNetworkPolicy(()=>throw primary);
             LogAssert.Expect(LogType.Exception,new System.Text.RegularExpressions.Regex("InvalidOperationException: fixture network policy failed"));
-            await Observe(service.SubmitAsync(Guid.NewGuid().ToString("N"),new[]{Photo("one")}));
+            await Observe(service.SubmitAndWaitAsync(Guid.NewGuid().ToString("N"),new[]{Photo("one")}));
             Assert.AreSame(primary,await Observe(service.WaitForIdleAsync()));
             LogAssert.Expect(LogType.Exception,new System.Text.RegularExpressions.Regex("IOException: fixture transport disposal failed"));
             Assert.AreSame(primary,await Observe(service.ShutdownAsync()));
@@ -87,7 +87,8 @@ namespace UIFrame.Regression
                 string owner=(string)typeof(ImageBackupService).GetField("owner",flags).GetValue(service);
                 string credential=(string)typeof(ImageBackupService).GetMethod("StoreDesktopCredential",flags).Invoke(service,new object[]{"secret"});
                 long past=DateTime.UtcNow.AddDays(-1).AddSeconds(4).Ticks;
-                await service.Db(BackupRepository.Command.Prepare,default,"aa",owner,past,1,"bb","file:fixture","v1","fixture.jpg","image/jpeg",4L);
+                await service.Db(BackupRepository.Command.Prepare,default,"aa",owner,past,1,"bb","file:fixture","v1","fixture.jpg","image/jpeg","",0L);
+                await service.Db(BackupRepository.Command.TryPrepare,default,"bb",owner,4L,4L,1024L,past);
                 File.WriteAllBytes(Path.Combine(service.RepositoryRoot,service.StoreId,"payloads/bb.payload"),new byte[]{1,2,3,4});
                 await service.Db(BackupRepository.Command.Seal,default,"bb",owner,4L,new string('a',64),"image/jpeg",1024L,past);
                 await service.Db(BackupRepository.Command.AcceptItem,default,"bb",owner,past);
@@ -123,7 +124,7 @@ namespace UIFrame.Regression
             string operation=Guid.NewGuid().ToString("N"),id;
             try {
                 service.SetDesktopNetworkPolicy(()=>false);
-                var submission=await service.SubmitAsync(operation,new[]{Photo("one"),Photo("two")});
+                var submission=await service.SubmitAndWaitAsync(operation,new[]{Photo("one"),Photo("two")});
                 Assert.AreEqual(2,submission.AcceptedTaskIds.Count);Assert.AreEqual(0,server.Plans);
                 Assert.IsTrue(submission.Items.All(x=>x.Acceptance==BackupAcceptanceStage.SystemScheduled));id=submission.Items[0].TaskId;
                 await service.PauseAsync();Assert.IsTrue(service.IsPaused);
@@ -154,7 +155,7 @@ namespace UIFrame.Regression
             try {
                 var missing=Photo("missing");File.Delete(missing.Id);string operation=Guid.NewGuid().ToString("N");
                 BackupSubmissionException failure=null;
-                try{await service.SubmitAsync(operation,new[]{missing,Photo("valid")});}catch(BackupSubmissionException error){failure=error;}
+                try{await service.SubmitAndWaitAsync(operation,new[]{missing,Photo("valid")});}catch(BackupSubmissionException error){failure=error;}
                 Assert.IsNotNull(failure);Assert.IsFalse(failure.HasSharedFailure);Assert.AreEqual(1,failure.InnerExceptions.Count);
                 Assert.AreEqual(BackupState.Failed,failure.Result.Items[0].State);Assert.AreEqual(1,failure.Result.AcceptedTaskIds.Count);
                 await service.WaitForIdleAsync();var query=await service.QuerySubmissionAsync(operation);
@@ -172,18 +173,18 @@ namespace UIFrame.Regression
                 Assert.AreEqual(2,(await service.GetSummaryAsync())[BackupState.Completed]);Assert.IsFalse(service.IsWaitingForCapacity);
             } finally {gate.TrySetResult(true);if(submission!=null)try{await submission;}catch(Exception){}await service.ShutdownAsync();}
         });
-        [UnityTest] public IEnumerator ConcurrentSubmissionFailsBeforeCallingCredentialsAgain()=>UniTask.ToCoroutine(async()=>{
+        [UnityTest] public IEnumerator RegistrationContinuesWhileAnEarlierSubmissionWaitsForCapacity()=>UniTask.ToCoroutine(async()=>{
             int credentials=0;var config=Config();config.AccessToken=()=>{credentials++;return "secret";};config.DiskBudgetBytes=4;
             var gate=Gate();var server=new BackupProtocolFixture {BeforeUpload=(item,token)=>AwaitGate(gate,token)};
             var service=await ImageBackupService.CreateAsync(config,NativeBackup.Call,false,server);
             Task<BackupSubmissionResult> first=null;
             try {
-                first=service.SubmitAsync(Guid.NewGuid().ToString("N"),new[]{Photo("first"),Photo("second")}).AsTask();
+                first=service.SubmitAndWaitAsync(Guid.NewGuid().ToString("N"),new[]{Photo("first"),Photo("second")}).AsTask();
                 await Wait(()=>service.IsWaitingForCapacity);
-                var failure=await Observe(service.SubmitAsync(Guid.NewGuid().ToString("N"),new[]{Photo("third")}));
-                Assert.IsInstanceOf<InvalidOperationException>(failure);Assert.AreEqual(1,credentials);
-                gate.TrySetResult(true);await first;await service.WaitForIdleAsync();
-                Assert.AreEqual(2,(await service.QueryTasksAsync()).Items.Count);
+                var second=await service.SubmitAsync(Guid.NewGuid().ToString("N"),new[]{Photo("third")});
+                Assert.IsFalse(second.IsCompleted);Assert.AreEqual(1,credentials);
+                gate.TrySetResult(true);await first;await second.WaitAsync();await service.WaitForIdleAsync();
+                Assert.AreEqual(3,(await service.QueryTasksAsync()).Items.Count);
             } finally {gate.TrySetResult(true);if(first!=null)try{await first;}catch(Exception){}await service.ShutdownAsync();}
         });
         [UnityTest] public IEnumerator PauseEndsPreparationCapacityWaitAndRetainsAcceptedPhoto()=>UniTask.ToCoroutine(async()=>{
@@ -192,11 +193,11 @@ namespace UIFrame.Regression
             var service=await ImageBackupService.CreateAsync(config,NativeBackup.Call,false,server);
             Task<BackupSubmissionResult> submission=null;
             try {
-                submission=service.SubmitAsync(Guid.NewGuid().ToString("N"),new[]{Photo("first"),Photo("second")}).AsTask();
+                submission=service.SubmitAndWaitAsync(Guid.NewGuid().ToString("N"),new[]{Photo("first"),Photo("second")}).AsTask();
                 await Wait(()=>service.IsWaitingForCapacity);await service.PauseAsync();
                 BackupSubmissionException failure=null;try{await submission;}catch(BackupSubmissionException error){failure=error;}
                 Assert.IsNotNull(failure);Assert.IsFalse(service.IsWaitingForCapacity);
-                Assert.AreEqual(BackupState.Paused,failure.Result.Items[0].State);
+                Assert.AreEqual(BackupState.Paused,(await service.GetTaskAsync(failure.Result.Items[0].TaskId)).state);
                 Assert.AreEqual(BackupState.Failed,failure.Result.Items[1].State);
                 Assert.IsInstanceOf<InvalidOperationException>(await Observe(service.RetryAsync(failure.Result.Items[1].TaskId)));
                 Assert.IsEmpty((await service.QueryBackupsAsync()).Items);
@@ -267,15 +268,15 @@ namespace UIFrame.Regression
                 Assert.AreEqual(1,(await service.GetSummaryAsync())[BackupState.Completed]);
             } finally {await service.ShutdownAsync();}
         });
-        [UnityTest] public IEnumerator CredentialsAreReadOncePerSubmissionAndOriginalFailureIsPreserved()=>UniTask.ToCoroutine(async()=>{
+        [UnityTest] public IEnumerator CredentialsAreReadAtHandoffAndOriginalFailureIsPreserved()=>UniTask.ToCoroutine(async()=>{
             var original=new InvalidOperationException("credential fixture");var config=Config();int reads=0;bool fail=true;
             config.AccessToken=()=>{reads++;if(fail)throw original;return "secret";};
             var server=new BackupProtocolFixture();var service=await ImageBackupService.CreateAsync(config,NativeBackup.Call,false,server);
             try {
                 Exception observed=null;try{await service.SubmitPhotosAsync(new[]{Photo("first")});}catch(Exception error){observed=error;}
-                Assert.AreSame(original,observed);Assert.IsEmpty((await service.QueryTasksAsync()).Items);Assert.AreEqual(0,server.Plans);
+                Assert.AreSame(original,((BackupSubmissionException)observed).InnerExceptions[0]);Assert.AreEqual(BackupState.Failed,(await service.QueryTasksAsync()).Items.Single().state);Assert.AreEqual(0,server.Plans);
                 fail=false;await service.SubmitPhotosAsync(new[]{Photo("second"),Photo("third")});await service.WaitForIdleAsync();
-                Assert.AreEqual(2,reads);Assert.AreEqual(2,(await service.QueryBackupsAsync()).Items.Count);
+                Assert.AreEqual(3,reads);Assert.AreEqual(2,(await service.QueryBackupsAsync()).Items.Count);
             } finally {await service.ShutdownAsync();}
         });
         [UnityTest] public IEnumerator ConcurrentWaitersObserveOneDriverAndQueuePauseReleasesOwners()=>UniTask.ToCoroutine(async()=>{
@@ -313,7 +314,7 @@ namespace UIFrame.Regression
         [UnityTest] public IEnumerator SubmissionDetailsExpireHonestlyAfterHistoryCleanup()=>UniTask.ToCoroutine(async()=>{
             var service=await ImageBackupService.CreateAsync(Config(),NativeBackup.Call,false,new BackupProtocolFixture {ConfirmOnPlan=true});
             try {
-                string id=Guid.NewGuid().ToString("N");await service.SubmitAsync(id,new[]{Photo("one")});await service.WaitForIdleAsync();
+                string id=Guid.NewGuid().ToString("N");await service.SubmitAndWaitAsync(id,new[]{Photo("one")});await service.WaitForIdleAsync();
                 await new BackupMaintenance(service).RunAsync(new BackupRetentionPolicy {HistoryAge=TimeSpan.Zero,KeepHistoryCount=0,TimeSlice=TimeSpan.FromSeconds(5)});
                 Assert.IsEmpty((await service.QueryTasksAsync()).Items);
                 var item=(await service.QuerySubmissionAsync(id)).Items.Single();Assert.IsTrue(item.DetailsExpired);Assert.IsNull(item.State);Assert.IsNull(item.Acceptance);

@@ -1,6 +1,6 @@
 # 图片与长期备份验证记录
 
-更新：2026-10-02。当前照片备份为唯一v2协议，业务仓库ABI / schema 2，SQLite核心ABI3。完整改动、命令、构建ID、B01–B24矩阵与设备执行步骤见 [本轮执行记录](GalleryBackgroundProtocolExecution.md)，清单见 [后台协议计划](GalleryBackgroundProtocolPlan.md)，最新F1–F6修复及边界见 [全量复查报告](GalleryBackgroundFullReview.md#6-修复结果与最终验证)。
+更新：2026-10-06。当前照片备份为唯一v2协议，业务仓库ABI 4 / schema 3，SQLite核心ABI3。最新登记／准备重构及验证见 [准备协调器重构记录](GalleryPreparationRedesign.md)。完整改动、命令、构建ID、B01–B24矩阵与设备执行步骤见 [本轮执行记录](GalleryBackgroundProtocolExecution.md)，清单见 [后台协议计划](GalleryBackgroundProtocolPlan.md)，最新F1–F6修复及边界见 [全量复查报告](GalleryBackgroundFullReview.md#6-修复结果与最终验证)。
 
 ## 当前v2验证
 

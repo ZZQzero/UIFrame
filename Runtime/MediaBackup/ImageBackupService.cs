@@ -29,7 +29,7 @@ namespace Game.Media.Backup
         readonly HttpClient client;
         readonly TimeSpan requestTimeout;
         readonly CancellationTokenSource lifetime=new CancellationTokenSource();
-        bool disposed, closing, running, accepting, pausing, paused;
+        bool disposed, closing, running, registering, pausing, paused;
         int downloads, metadataReads, operations;
         public BackupTransferMode TransferMode => transferMode;
         public bool IsRunning => running;
@@ -140,17 +140,21 @@ namespace Game.Media.Backup
         internal async UniTask<BackupRepository.Result> Db(Command command,CancellationToken token=default,params object[] arguments)
         {
             Check(); metadataReads++;
-            try { return await repository.ExecuteAsync(command,token,arguments); }
+            try {
+                var result=await repository.ExecuteAsync(command,token,arguments);
+                if(command==Command.CleanupRun || command==Command.SuspendScope || command==Command.StopPreparation || command==Command.Pause || command==Command.Action)SignalPreparation();
+                return result;
+            }
             finally { metadataReads--; }
         }
         static BackupTaskInfo TaskInfo(BackupRepository.Row r) => new BackupTaskInfo {
             id=r.Text("id"),batchId=r.Text("batch_id"),sequence=r.Number("sequence"),generation=r.Number("current_generation"),
             source=r.Text("source_id"),version=r.Text("content_version"),state=(BackupState)r.Number("state"),desiredAction=(int)r.Number("desired_action"),
             name=r.Text("name"),mime=r.Text("mime"),sha256=r.Text("sha256"),size=r.Number("byte_count"),
-            confirmedBytes=r.Number("confirmed_bytes"),backupId=r.Text("backup_id"),error=r.Text("error"),relativePath=r.Text("relative_path"),
+            confirmedBytes=r.Number("confirmed_bytes"),backupId=r.Text("backup_id"),error=r.Text("error"),
             nativeOwned=r.Number("executor")!=0 && (!r.Flag("payload_released") || !r.Flag("credential_released")),
             phase=(BackupProtocolPhase)r.Number("protocol_phase"),
-            acceptance=Acceptance((BackupState)r.Number("state"),r.Number("submission_state")>0,r.Flag("system_scheduled")),
+            acceptance=Acceptance((BackupState)r.Number("state"),r.Number("submission_state")>0,r.Flag("system_scheduled"),r.Flag("preparation_started")),
             cleanupPending=r.Number("file_state")==2 || r.Number("file_state")==4 || r.Number("file_state")==5,cleanupError=r.Text("cleanup_error") };
         public async UniTask<BackupTaskPage> QueryTasksAsync(BackupTaskQuery query=null,CancellationToken cancellationToken=default)
         {
@@ -222,11 +226,10 @@ namespace Game.Media.Backup
             }
             return freed;
         }
-        string Payload(BackupTaskInfo task) => Path.Combine(root,task.relativePath);
         internal static string Hash(string text) { using var sha=SHA256.Create();return Hex(sha.ComputeHash(Encoding.UTF8.GetBytes(text))); }
         static string Hex(byte[] bytes) => BitConverter.ToString(bytes).Replace("-","").ToLowerInvariant();
         void Check() { MediaThread.Check();if(disposed) throw new ObjectDisposedException(nameof(ImageBackupService)); }
-        void CheckIdle() { Check();if(running || accepting || pausing || drivingOperations || downloads!=0 || metadataReads!=0 || operations!=0) throw new InvalidOperationException("Cancel and await active service operations first."); }
+        void CheckIdle() { Check();if(running || preparing || registering || pausing || drivingOperations || downloads!=0 || metadataReads!=0 || operations!=0) throw new InvalidOperationException("Cancel and await active service operations first."); }
         internal OperationLease EnterOperation()
         {
             Check();if(closing)throw new ObjectDisposedException(nameof(ImageBackupService));operations++;return new OperationLease(this);
@@ -241,7 +244,8 @@ namespace Game.Media.Backup
         {
             Check();if(closing)throw new InvalidOperationException("Backup shutdown is already active.");closing=true;
             var cleanup=new UIFrame.CleanupFailure();cleanup.Run(lifetime.Cancel);
-            while(running || accepting || pausing || drivingOperations || downloads!=0 || metadataReads!=0 || operations!=0)await UniTask.Yield();
+            while(running || preparing || registering || pausing || drivingOperations || downloads!=0 || metadataReads!=0 || operations!=0)await UniTask.Yield();
+            if(preparationFailure!=null && !ReferenceEquals(preparationFailure,executorFailure))cleanup.Run(()=>System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(preparationFailure).Throw());
             if(executorFailure!=null)cleanup.Run(()=>System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(executorFailure).Throw());
             cleanup.Run(Dispose);cleanup.Throw();
         }
@@ -296,7 +300,6 @@ namespace Game.Media.Backup
                     }
                 });
             }
-            if (available <= 0) throw new BackupBudgetExceededException();
             string folder = destination + ".source"; Directory.CreateDirectory(folder);
             MediaResponse response;
             try
@@ -344,7 +347,7 @@ namespace Game.Media.Backup
                 using var request = Request(HttpMethod.Get, "/v2/backups/" + Uri.EscapeDataString(record.backupId) + "/content");
                 await WithResponse(request, (response, token) => UniTask.RunOnThreadPool(async () =>
                 {
-                    await CheckResponse(response, token);
+                    CheckResponse(response);
                     if (response.Content.Headers.ContentLength.HasValue && response.Content.Headers.ContentLength.Value != record.size)
                         throw new IOException("Downloaded backup size mismatch.");
                     using var input = await response.Content.ReadAsStreamAsync();
@@ -417,7 +420,7 @@ namespace Game.Media.Backup
             }
             return new UTF8Encoding(false,true).GetString(output.GetBuffer(), 0, (int)output.Length);
         }
-        static async UniTask CheckResponse(HttpResponseMessage response, CancellationToken token, string body = null)
+        static void CheckResponse(HttpResponseMessage response)
         {
             if (response.IsSuccessStatusCode) return;
             TimeSpan? retry = response.Headers.RetryAfter?.Delta;

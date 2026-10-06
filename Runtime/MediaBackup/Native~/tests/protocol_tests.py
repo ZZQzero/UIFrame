@@ -46,10 +46,12 @@ class ProtocolTests(unittest.TestCase):
         ids = ['%032x' % (self.counter * 100 + i) for i in range(count)]
         values = [batch, 'aa', NOW, count]
         for task in ids:
-            values.extend([task, 'file:' + task, 'v1', 'photo.jpg', 'image/jpeg', 0])
+            values.extend([task, 'file:' + task, 'v1', 'photo.jpg', 'image/jpeg'])
+        values.extend(["", 0])
         self.call(2, *values)
         for task in ids:
             (self.root / IDENTITY / 'payloads' / (task + '.payload')).write_bytes(DATA)
+            self.call(77, task, 'aa', len(DATA), len(DATA), 512 * 1024 * 1024, NOW)
             self.call(3, task, 'aa', len(DATA), DIGEST, 'image/jpeg', 512 * 1024 * 1024, NOW)
             self.call(96, task, 'aa', NOW)
             self.call(9, task, 0, 0, NOW)
@@ -280,10 +282,11 @@ class ProtocolTests(unittest.TestCase):
         self.assertEqual([], self.call(7, tasks[0]))
 
     def test_recover_partial_preparation_preserves_already_accepted_payload(self):
-        self.call(2, 'ff', 'aa', NOW, 2, 'a1', 'file:first', 'v1', 'one.jpg', 'image/jpeg', 0,
-                  'a2', 'file:second', 'v1', 'two.jpg', 'image/jpeg', 0)
+        self.call(2, 'ff', 'aa', NOW, 2, 'a1', 'file:first', 'v1', 'one.jpg', 'image/jpeg',
+                  'a2', 'file:second', 'v1', 'two.jpg', 'image/jpeg', '', 0)
         for task in ('a1', 'a2'):
             (self.root / IDENTITY / ('payloads/' + task + '.payload')).write_bytes(DATA)
+            self.call(77, task, 'aa', len(DATA), len(DATA), 1024, NOW)
             self.call(3, task, 'aa', len(DATA), DIGEST, 'image/jpeg', 1024, NOW)
         self.call(96, 'a1', 'aa', NOW)
         with self.assertRaises(AssertionError): self.call(97, 'a1', 'aa', 'cannot discard accepted item', NOW)
@@ -327,10 +330,11 @@ class ProtocolTests(unittest.TestCase):
         self.assertEqual(1, len(self.call(18, '', 32)))
 
     def test_single_preparation_failure_keeps_other_acceptance(self):
-        self.call(2, 'ff', 'aa', NOW, 2, 'a1', 'file:first', 'v1', 'one.jpg', 'image/jpeg', 0,
-                  'a2', 'file:second', 'v1', 'two.jpg', 'image/jpeg', 0)
+        self.call(2, 'ff', 'aa', NOW, 2, 'a1', 'file:first', 'v1', 'one.jpg', 'image/jpeg',
+                  'a2', 'file:second', 'v1', 'two.jpg', 'image/jpeg', '', 0)
         self.call(97, 'a1', 'aa', 'source read failed', NOW)
         (self.root / IDENTITY / 'payloads/a2.payload').write_bytes(DATA)
+        self.call(77, 'a2', 'aa', len(DATA), len(DATA), 1024, NOW)
         self.call(3, 'a2', 'aa', len(DATA), DIGEST, 'image/jpeg', 1024, NOW)
         self.call(96, 'a2', 'aa', NOW)
         results = self.call(98, 'ff')

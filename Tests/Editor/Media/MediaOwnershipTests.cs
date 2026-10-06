@@ -63,9 +63,10 @@ namespace UIFrame.Regression
                 string separate=Path.Combine(root,"separate.jpg");File.WriteAllBytes(separate,new byte[]{4,3,2,1});
                 string unrelated=(await service.SubmitPhotosAsync(new[]{ImageReference.FromFile(separate)}))[0];
                 gallery.Photos=new[]{Photo("first"),Photo("second")};gallery.DeniedId="second";
+                await automatic.ScanOnceAsync();await service.WaitForIdleAsync();
                 var error=await Observe(automatic.ScanOnceAsync());
-                Assert.IsInstanceOf<GalleryException>(error);
-                Assert.AreEqual("PermissionDenied",((GalleryException)error).Code);
+                Assert.IsInstanceOf<BackupSubmissionException>(error);
+                Assert.AreEqual("PermissionDenied",((BackupSubmissionException)error).InnerExceptions.OfType<GalleryException>().Single().Code);
                 Assert.AreEqual(1,(await service.GetTaskAsync(task.id)).desiredAction);
                 await service.WaitForIdleAsync();
                 Assert.AreEqual(BackupState.Paused,(await service.GetTaskAsync(task.id)).state);

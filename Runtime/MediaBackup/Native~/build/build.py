@@ -65,7 +65,7 @@ def main():
     if sources() != original: raise ValueError('Sources changed during build')
     artifacts = {p.name:hashlib.sha256(p.read_bytes()).hexdigest() for p in args.output.glob('*uiframe_backup*') if p.is_file()}
     build_id = hashlib.sha256(json.dumps(original,sort_keys=True).encode()).hexdigest()
-    manifest = dict(target=args.target, abi=2, sqlite_abi=3, sqlite_build_id=core['build_id'], build_id=build_id,
+    manifest = dict(target=args.target, abi=4, sqlite_abi=3, sqlite_build_id=core['build_id'], build_id=build_id,
                     sources=original, sanitized=args.sanitize, artifacts=artifacts, flags=flags,
                     native_tests='passed' if host_tests else 'not-run',
                     compiler_cache=[x for x in (args.output/'CMakeCache.txt').read_text().splitlines() if x.startswith(('CMAKE_CXX_COMPILER:', 'CMAKE_OSX_SYSROOT:', 'CMAKE_ANDROID_NDK:'))])

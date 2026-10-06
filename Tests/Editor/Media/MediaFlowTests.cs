@@ -88,6 +88,27 @@ namespace UIFrame.Regression
                 Assert.IsEmpty((await service.QueryTasksAsync()).Items);
             } finally {await service.ShutdownAsync();await library.ShutdownAsync();}
         });
+        [UnityTest] public IEnumerator LatePreparationAccessFailureBelongsToOriginalConfiguredSource()=>UniTask.ToCoroutine(async()=>
+        {
+            using var native=new Transport {RejectOnceOperation="stat",Images=new[]{new MediaItem {id="photo",source="library",name="photo.jpg",mime="image/jpeg",version="v1"}}};
+            var library=await ImageLibraryIndex.OpenAsync(Path.Combine(root,"index.sqlite"));
+            var service=await ImageBackupService.CreateAsync(Config(),NativeBackup.Call,false,new BackupProtocolFixture());
+            try {
+                var automatic=await AutomaticImageBackup.CreateAsync(service,library);
+                var oldScope=new ImageLibraryScope(ImageLibrarySourceKind.PhotoLibrary);
+                await automatic.ConfigureAsync(new AutomaticBackupPolicy {enabled=true,sourceKind=BackupSourceKind.PhotoLibrary,includeExisting=true,wifiOnly=false});
+                await automatic.ScanOnceAsync();long initial=(await library.GetPositionAsync(oldScope)).PermissionGeneration;
+                await service.WaitForIdleAsync();
+                string directory=Path.Combine(root,"new-source");Directory.CreateDirectory(directory);
+                await automatic.ConfigureAsync(new AutomaticBackupPolicy {enabled=true,sourceKind=BackupSourceKind.Directory,source=directory,includeExisting=true,wifiOnly=false});
+                var failure=await Observe(automatic.ScanOnceAsync());Assert.IsInstanceOf<BackupSubmissionException>(failure);
+                Assert.IsTrue(((BackupSubmissionException)failure).InnerExceptions.OfType<GalleryException>().Any(e=>e.Code=="PermissionDenied"));
+                Assert.Greater((await library.GetPositionAsync(oldScope)).PermissionGeneration,initial);
+                await automatic.ScanOnceAsync();
+                string newScope=ImageBackupService.Hash(new ImageLibraryScope(ImageLibrarySourceKind.Directory,directory).Id+":"+true);
+                Assert.IsFalse((await service.Db(Game.Media.Backup.BackupRepository.Command.ScopeState,default,newScope)).Single.Flag("requires_confirmation"));
+            } finally {await service.ShutdownAsync();await library.ShutdownAsync();}
+        });
         [UnityTest] public IEnumerator WatchThenRefreshWaitsForRegistration()=>UniTask.ToCoroutine(async()=>
         {
             using var native=new Transport {HeldOperation="observe"};
@@ -244,10 +265,13 @@ namespace UIFrame.Regression
             var service=await ImageBackupService.CreateAsync(Config());
             try {
                 string owner=(string)typeof(ImageBackupService).GetField("owner",BindingFlags.Instance|BindingFlags.NonPublic).GetValue(service);
-                await service.Db(BackupRepository.Command.Prepare,default,"aa",owner,DateTime.UtcNow.Ticks,2,"b1","file:first","v1","first.jpg","image/jpeg",4L,"b2","file:second","v1","second.jpg","image/jpeg",4L);
+                await service.Db(BackupRepository.Command.Prepare,default,"aa",owner,DateTime.UtcNow.Ticks,2,"b1","file:first","v1","first.jpg","image/jpeg","b2","file:second","v1","second.jpg","image/jpeg","",0L);
                 string folder=Path.Combine(service.RepositoryRoot,service.StoreId,"payloads");
-                foreach(var id in new[]{"b1","b2"}){Directory.CreateDirectory(Path.Combine(folder,id+".payload"));File.WriteAllText(Path.Combine(folder,id+".payload","occupied"),"fixture");}
-                foreach(var id in new[]{"b1","b2"})await service.Db(BackupRepository.Command.FailItem,default,id,owner,"interrupted preparation",DateTime.UtcNow.Ticks);
+                foreach(var id in new[]{"b1","b2"}) {
+                    await service.Db(BackupRepository.Command.TryPrepare,default,id,owner,4L,4L,100L,DateTime.UtcNow.Ticks);
+                    Directory.CreateDirectory(Path.Combine(folder,id+".payload"));File.WriteAllText(Path.Combine(folder,id+".payload","occupied"),"fixture");
+                    await service.Db(BackupRepository.Command.FailItem,default,id,owner,"interrupted preparation",DateTime.UtcNow.Ticks);
+                }
                 LogAssert.Expect(LogType.Exception,new System.Text.RegularExpressions.Regex("BackupRepositoryException"));LogAssert.Expect(LogType.Exception,new System.Text.RegularExpressions.Regex("BackupRepositoryException"));
                 await service.CleanupFilesAsync();await service.ShutdownAsync();service=await ImageBackupService.CreateAsync(Config());
                 Assert.IsTrue((await service.QueryTasksAsync()).Items.All(x=>x.state==BackupState.Failed));

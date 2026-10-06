@@ -366,8 +366,11 @@ public final class BackupBridge {
             BackupRepository.Row info=repository.call(BackupRepository.INFO).get(0);
             if(work.control) {
                 repository.call(BackupRepository.CONTROL_SEAL,work.id);
-                repository.call(BackupRepository.CONTROL_SUBMITTED,work.id,"android:"+work.id);
-                repository.call(BackupRepository.CONTROL_START,work.id);started=true;
+                if(!repository.call(BackupRepository.CONTROL_SUBMITTED,work.id,"android:"+work.id).get(0).flag("admitted") ||
+                    !repository.call(BackupRepository.CONTROL_START,work.id).get(0).flag("admitted")) {
+                    repository.call(BackupRepository.CONTROL_FAIL,work.id,"Admission closed before transfer",utcTicks(),true);settled=true;return;
+                }
+                started=true;
                 String[] paths={"/v2/backup/plans","/v2/backup/status","/v2/backup/cancellations"};
                 url=info.text("server")+paths[(int)row.number("kind")];
                 headers.put("Authorization","Bearer "+decrypt(row.text("credential_reference")));headers.put("Content-Type","application/json");

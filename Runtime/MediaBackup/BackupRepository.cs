@@ -34,11 +34,11 @@ namespace Game.Media.Backup
             Operation=40, SelectOperation=41, ApplyOperation=42, OperationStatus=43, OperationItems=44,
             HistoryPage=50, PruneTask=51, PruneOperation=52, Storage=53, Checkpoint=54,
             RecoverPreparations=55, FileSummary=56, RecoverAttempt=57, BindPreparer=58,
-            Attempt=60, Ready=62, ReservePayload=65, Operations=66, PruneChanges=67, PruneScans=68, SuspendScope=69, ResetScope=70, ResetScopePage=71, OperationCleanupPage=72, ScopeState=73, Handoff=74, Schedulable=75, CleanupFailures=76, ControlCreate=80, ControlSeal=81, ControlSubmitted=82, ControlStart=83, ControlValidate=84, ControlApply=85,
+            Attempt=60, Ready=62, Operations=66, PruneChanges=67, PruneScans=68, SuspendScope=69, ResetScope=70, ResetScopePage=71, OperationCleanupPage=72, ScopeState=73, Handoff=74, CleanupFailures=76, TryPrepare=77, PreparationEligibility=78, StopPreparation=79, ControlCreate=80, ControlSeal=81, ControlSubmitted=82, ControlStart=83, ControlValidate=84, ControlApply=85,
             ControlFail=86, ControlRecover=88, ControlRelease=87, Controls=89, Uploads=90, UploadStart=91,
             UploadEnd=92, UploadRelease=93, ProtocolActions=94, SystemScheduled=95, AcceptItem=96, FailItem=97,
             Submission=98, ProtocolConfigure=99, ProtocolCleanup=100, ProtocolReconcile=101, ProtocolRelease=102, ProtocolResume=103,
-            Control=104, ProtocolWake=105, UploadReject=106, ControlCleanupFailures=107, ControlCleanupRetry=108
+            Control=104, ProtocolWake=105, UploadReject=106, ControlCleanupFailures=107, ControlCleanupRetry=108, ConfirmScope=109
         }
         const int Limit = 1024 * 1024;
         const string Library =
@@ -55,7 +55,7 @@ namespace Game.Media.Backup
             internal int error, sqlite, committed;
             internal uint phase, length;
             [MarshalAs(UnmanagedType.ByValArray, SizeConst=256)] internal byte[] message;
-            internal static Status New() => new Status { size=284, abi=2, message=new byte[256] };
+            internal static Status New() => new Status { size=284, abi=4, message=new byte[256] };
         }
         [DllImport(Library, CallingConvention=CallingConvention.Cdecl)] static extern uint ufbackup_abi();
         [DllImport(Library, CallingConvention=CallingConvention.Cdecl)] static extern int ufbackup_open(
@@ -74,7 +74,7 @@ namespace Game.Media.Backup
         internal BackupRepository(string root, string storeId, string server, string account)
         {
             Root=Path.GetFullPath(root); StoreId=storeId; Directory=Path.Combine(Root,storeId);
-            if (ufbackup_abi()!=2) throw new InvalidOperationException("Backup repository native ABI mismatch.");
+            if (ufbackup_abi()!=4) throw new InvalidOperationException("Backup repository native ABI mismatch.");
             var status=Status.New();
             Check(ufbackup_open(Root,storeId,server,account,File.Exists(Path.Combine(Directory,"catalog.sqlite"))?0:1,out handle,ref status),status);
         }

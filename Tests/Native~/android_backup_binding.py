@@ -102,7 +102,8 @@ public class BindingTest {
             String identity=(mode==0?"a":"b").repeat(64);
             try(BackupRepository repository=new BackupRepository(context,identity)) {
                 repository.call(58,"aa");
-                repository.call(2,"bb","aa",1L,1L,"cc","asset:photo","v1","photo.jpg","image/jpeg",4L);
+                repository.call(2,"bb","aa",1L,1L,"cc","asset:photo","v1","photo.jpg","image/jpeg","",0L);
+        repository.call(77,"cc","aa",4L,4L,1024L,2L);
                 try(FileOutputStream output=new FileOutputStream(new File(BackupRepository.root(context),identity+"/payloads/cc.payload"))){output.write(new byte[]{1,2,3,4});}
                 repository.call(3,"cc","aa",4L,hash,"image/jpeg",1024L,2L);
                 repository.call(96,"cc","aa",3L);repository.call(9,"cc",1L,0L,4L);
@@ -124,7 +125,8 @@ public class BindingTest {
                 before=context.jobs.submissions;schedule.invoke(null,context,repository,0L);
                 check(context.jobs.submissions==before,"Wake replaced a pending job");
                 repository.call(58,"aa");
-                repository.call(2,"ee","aa",10L,1L,"ff","asset:later","v1","later.jpg","image/jpeg",4L);
+                repository.call(2,"ee","aa",10L,1L,"ff","asset:later","v1","later.jpg","image/jpeg","",0L);
+                repository.call(77,"ff","aa",4L,4L,1024L,11L);
                 try(FileOutputStream output=new FileOutputStream(new File(BackupRepository.root(context),identity+"/payloads/ff.payload"))){output.write(new byte[]{1,2,3,4});}
                 repository.call(3,"ff","aa",4L,hash,"image/jpeg",1024L,11L);repository.call(96,"ff","aa",12L);
                 repository.call(9,"ff",1L,0L,13L);repository.call(BackupRepository.HANDOFF,"ff",1L,"protected-reference");
@@ -151,13 +153,16 @@ public class BindingTest {
         String identity="c".repeat(64);
         try(BackupRepository repository=new BackupRepository(context,identity)) {
             repository.call(58,"aa");
-            repository.call(2,"bb","aa",1L,2L,"cc","asset:first","v1","first.jpg","image/jpeg",4L,
-                "dd","asset:second","v1","second.jpg","image/jpeg",4L);
+            repository.call(2,"bb","aa",1L,2L,"cc","asset:first","v1","first.jpg","image/jpeg",
+                "dd","asset:second","v1","second.jpg","image/jpeg","",0L);
             File broken=new File(BackupRepository.root(context),identity+"/payloads/cc.payload");
             File normal=new File(BackupRepository.root(context),identity+"/payloads/dd.payload");
+            repository.call(77,"cc","aa",4L,4L,1024L,2L);
             check(broken.mkdir(),"Could not create failing cleanup fixture");
+            repository.call(97,"cc","aa","fixture preparation failed",2L);
+            repository.call(77,"dd","aa",4L,4L,1024L,2L);
             try(FileOutputStream output=new FileOutputStream(normal)){output.write(new byte[]{1,2,3,4});}
-            for(String task:new String[]{"cc","dd"})repository.call(97,task,"aa","fixture preparation failed",2L);
+            repository.call(97,"dd","aa","fixture preparation failed",2L);
             java.lang.reflect.Method cleanup=BackupBridge.class.getDeclaredMethod("cleanup",BackupRepository.class);
             cleanup.setAccessible(true);cleanup.invoke(null,repository);
             check(android.util.Log.errors==1,"Isolated failure was not reported once");
@@ -243,7 +248,8 @@ public class BindingTest {
     }
     static void prepare(Context context,BackupRepository repository,String hash) throws Exception {
         repository.call(58,"aa");
-        repository.call(2,"bb","aa",1L,1L,"cc","asset:photo","v1","photo.jpg","image/jpeg",4L);
+        repository.call(2,"bb","aa",1L,1L,"cc","asset:photo","v1","photo.jpg","image/jpeg","",0L);
+        repository.call(77,"cc","aa",4L,4L,1024L,2L);
         try(FileOutputStream output=new FileOutputStream(new File(BackupRepository.root(context),repository.id+"/payloads/cc.payload"))){output.write(new byte[]{1,2,3,4});}
         repository.call(3,"cc","aa",4L,hash,"image/jpeg",1024L,2L);
         repository.call(96,"cc","aa",3L);repository.call(9,"cc",1L,0L,4L);repository.call(74,"cc",1L,"protected");

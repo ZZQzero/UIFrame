@@ -29,10 +29,10 @@ namespace UIFrame.Regression
             Task<BackupSubmissionResult> pending = null;
             try {
                 service.SetDesktopNetworkPolicy(() => false);
-                await service.SubmitAsync(Guid.NewGuid().ToString("N"), new[] { Photo(Path.Combine(root, "first.jpg"), 6) });
+                await service.SubmitAndWaitAsync(Guid.NewGuid().ToString("N"), new[] { Photo(Path.Combine(root, "first.jpg"), 6) });
                 var original = Photo(Path.Combine(root, "second.jpg"), 6);
                 var unknown = new ImageReference("file", original.Id, original.FileName, original.MimeType, version: original.Version);
-                pending = service.SubmitAsync(Guid.NewGuid().ToString("N"), new[] { unknown }).AsTask();
+                pending = service.SubmitAndWaitAsync(Guid.NewGuid().ToString("N"), new[] { unknown }).AsTask();
                 using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(10));
                 await UniTask.WaitUntil(() => pending.IsCompleted || service.IsWaitingForCapacity, cancellationToken: deadline.Token);
                 Assert.IsTrue(service.IsWaitingForCapacity);
@@ -71,7 +71,7 @@ namespace UIFrame.Regression
                 var sources=new[]{Photo(Path.Combine(root,"large.jpg"),6),Photo(Path.Combine(root,"small.jpg"),1)}
                     .Select(p=>new ImageReference("file",p.Id,p.FileName,p.MimeType,version:p.Version)).ToArray();
                 BackupSubmissionException failure=null;
-                try {await service.SubmitAsync(Guid.NewGuid().ToString("N"),sources);}
+                try {await service.SubmitAndWaitAsync(Guid.NewGuid().ToString("N"),sources);}
                 catch(BackupSubmissionException error){failure=error;}
                 Assert.IsNotNull(failure);Assert.IsFalse(failure.HasSharedFailure);
                 Assert.AreEqual(BackupState.Failed,failure.Result.Items[0].State);
@@ -81,19 +81,22 @@ namespace UIFrame.Regression
             } finally {await service.ShutdownAsync();}
         });
 
-        [UnityTest] public IEnumerator CancelCapacityWaitPreservesAcceptedItem() => UniTask.ToCoroutine(async () => {
+        [UnityTest] public IEnumerator CancelingWaitDoesNotCancelPreparationAndExplicitStopPreservesAcceptedItem() => UniTask.ToCoroutine(async () => {
             var service=await ImageBackupService.CreateAsync(Config(10),NativeBackup.Call,false,new BackupProtocolFixture());
             using var cancel=new CancellationTokenSource();
             try {
                 service.SetDesktopNetworkPolicy(()=>false);
-                await service.SubmitAsync(Guid.NewGuid().ToString("N"),new[]{Photo(Path.Combine(root,"accepted.jpg"),6)});
+                await service.SubmitAndWaitAsync(Guid.NewGuid().ToString("N"),new[]{Photo(Path.Combine(root,"accepted.jpg"),6)});
                 var source=Photo(Path.Combine(root,"waiting.jpg"),6);
-                var pending=service.SubmitAsync(Guid.NewGuid().ToString("N"),new[]{new ImageReference("file",source.Id,source.FileName,source.MimeType,version:source.Version)},cancel.Token).AsTask();
+                var submission=await service.SubmitAsync(Guid.NewGuid().ToString("N"),new[]{new ImageReference("file",source.Id,source.FileName,source.MimeType,version:source.Version)});
+                var pending=submission.WaitAsync(cancel.Token).AsTask();
                 using var deadline=new CancellationTokenSource(TimeSpan.FromSeconds(10));
                 await UniTask.WaitUntil(()=>pending.IsCompleted || service.IsWaitingForCapacity,cancellationToken:deadline.Token);
                 Assert.IsTrue(service.IsWaitingForCapacity);cancel.Cancel();
-                BackupSubmissionException failure=null;
-                try{await pending;}catch(BackupSubmissionException error){failure=error;}
+                bool canceled=false;try{await pending;}catch(OperationCanceledException){canceled=true;}Assert.IsTrue(canceled);
+                Assert.AreEqual(BackupState.Preparing,(await service.QueryTasksAsync()).Items.Single(t=>t.name=="waiting.jpg").state);
+                await service.CancelPreparationAsync(submission.OperationId);
+                BackupSubmissionException failure=null;try{await submission.WaitAsync();}catch(BackupSubmissionException error){failure=error;}
                 Assert.IsNotNull(failure);Assert.IsTrue(failure.InnerExceptions.Any(e=>e is OperationCanceledException));
                 var tasks=await service.QueryTasksAsync();
                 Assert.Contains(tasks.Items.Single(t=>t.name=="accepted.jpg").state,new[]{BackupState.Queued,BackupState.Uploading});

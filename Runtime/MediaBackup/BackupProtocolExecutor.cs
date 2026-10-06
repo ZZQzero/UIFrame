@@ -58,7 +58,8 @@ namespace Game.Media.Backup
         {
             using var operation=EnterOperation();
             if(nativeEnabled)throw new InvalidOperationException("Use task queries to observe the operating system's background queue.");
-            while(running)await UniTask.Delay(100,ignoreTimeScale:true,cancellationToken:cancellationToken);
+            while(running || preparing)await UniTask.Delay(100,ignoreTimeScale:true,cancellationToken:cancellationToken);
+            if(preparationFailure!=null)System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(preparationFailure).Throw();
             if(executorFailure!=null)System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(executorFailure).Throw();
         }
         async UniTask DriveDesktop()
@@ -97,7 +98,7 @@ namespace Game.Media.Backup
                             var ready=controls.FirstOrDefault(x=>x.Number("not_before_utc")<=Now && x.Number("state")<=1 && !ControlExpired(x));
                             if(ready==null)
                             {
-                                var created=await Db(Command.ControlCreate,default,Guid.NewGuid().ToString("N"),0,Now,false,!accepting);
+                                var created=await Db(Command.ControlCreate,default,Guid.NewGuid().ToString("N"),0,Now,false,!preparing);
                                 if(created.Rows.Count!=0 && created.Single.Number("not_before_utc")<=Now)ready=created.Single;
                             }
                             if(ready!=null)
@@ -159,8 +160,10 @@ namespace Game.Media.Backup
                     work.Cancellation.CancelAfter(TimeSpan.FromTicks(remaining));
                 }
                 await Db(Command.ControlSeal,work.Cancellation.Token,id);
-                await Db(Command.ControlSubmitted,work.Cancellation.Token,id,"desktop:"+id);
-                await Db(Command.ControlStart,work.Cancellation.Token,id);
+                if(!(await Db(Command.ControlSubmitted,work.Cancellation.Token,id,"desktop:"+id)).Single.Flag("admitted") ||
+                    !(await Db(Command.ControlStart,work.Cancellation.Token,id)).Single.Flag("admitted")) {
+                    await Db(Command.ControlFail,default,id,"Admission closed before transfer",Now,true);determined=true;return;
+                }
                 string response=await SendControlFile(control,work.Cancellation.Token);
                 var descriptors=(await Db(Command.ControlValidate,default,id,response)).Rows;
                 var values=new List<object>{id,response,Now,descriptors.Count};
@@ -207,7 +210,7 @@ namespace Game.Media.Backup
             request.Content=new StreamContent(file,16*1024);request.Content.Headers.ContentType=new System.Net.Http.Headers.MediaTypeHeaderValue("application/json");
             return await WithResponse(request,async (response,deadline)=>
             {
-                await CheckResponse(response,deadline);
+                CheckResponse(response);
                 if((int)response.StatusCode!=200)throw new InvalidDataException("Control request requires HTTP 200.");
                 return await ReadResponse(response,deadline);
             },token);

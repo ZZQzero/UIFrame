@@ -199,7 +199,9 @@ static void *UFBQueueKey=&UFBQueueKey;
                     UFBRequire(row!=nil,@"System task has no persisted intent");
                     if(control) {
                         if([row[@"released"] boolValue] || [row[@"state"] integerValue]>=4 || UFBControlExpired(row)){[task cancel];continue;}
-                        if([row[@"state"] integerValue]==1)UFBCommand(handle,UFB_CONTROL_SUBMITTED,@[parts[2],[self key:session task:task]]);
+                        if([row[@"state"] integerValue]==1 && ![UFBCommand(handle,UFB_CONTROL_SUBMITTED,@[parts[2],[self key:session task:task]]).firstObject[@"admitted"] boolValue]) {
+                            UFBCommand(handle,UFB_CONTROL_FAIL,@[parts[2],@"Admission closed before recovery",@(UFBNow()),@YES]);[task cancel];
+                        }
                     } else {
                         if([row[@"current_generation"] longLongValue]!=[parts[3] longLongValue] || [row[@"protocol_phase"] integerValue]!=1){[task cancel];continue;}
                         if([row[@"execution_state"] integerValue]==0 && ![UFBCommand(handle,UFB_UPLOAD_START,@[parts[2],@([parts[3] longLongValue]),[self key:session task:task],@(UFBNow())]).firstObject[@"started"] boolValue]){[task cancel];continue;}
@@ -333,7 +335,11 @@ static void *UFBQueueKey=&UFBQueueKey;
     NSURLSessionUploadTask *task=[session uploadTaskWithRequest:request fromFile:[NSURL fileURLWithPath:payload]];task.taskDescription=tag;_tasks[tag]=task;
     if(control)task.earliestBeginDate=[NSDate dateWithTimeIntervalSince1970:([row[@"not_before_utc"] longLongValue]-621355968000000000LL)/10000000.0];
     @try {
-        if(control)UFBCommand(handle,UFB_CONTROL_SUBMITTED,@[item,[self key:session task:task]]);
+        if(control) {
+            if(![UFBCommand(handle,UFB_CONTROL_SUBMITTED,@[item,[self key:session task:task]]).firstObject[@"admitted"] boolValue]) {
+                UFBCommand(handle,UFB_CONTROL_FAIL,@[item,@"Admission closed before transfer",@(UFBNow()),@YES]);[task cancel];return;
+            }
+        }
         else if(![UFBCommand(handle,UFB_UPLOAD_START,@[item,generation,[self key:session task:task],@(UFBNow())]).firstObject[@"started"] boolValue]){[task cancel];return;}
         [task resume];
     } @catch(NSException *failure){[task cancel];@throw;}

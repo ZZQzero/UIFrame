@@ -1,5 +1,7 @@
 # 照片备份 v2 执行记录
 
+本页保留原实施阶段的契约与验证记录。2026-10-06 的登记／准备解耦、ABI 4 / schema 3 及最新验证见 [准备协调器重构记录](GalleryPreparationRedesign.md)。
+
 更新：2026-10-02。对应 [实施计划](GalleryBackgroundProtocolPlan.md)，当前 API 见 [Gallery.md](Gallery.md)。
 
 客户端、共享仓库、参考服务、四平台库与本机可执行验证已交付。真机后台、24小时负载、Windows实际运行及生产云未验收；P7不能标记全部完成。当前无连接的Android / iOS设备。源码实现、宿主测试和系统实机行为分别记录。

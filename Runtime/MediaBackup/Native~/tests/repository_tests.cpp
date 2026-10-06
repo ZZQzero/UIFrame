@@ -48,9 +48,11 @@ int main() {
         {
             Store store(root.u8string(),identity,true);
             store.call(UFB_BIND_PREPARER,{"bb"});
-            store.call(UFB_PREPARE,{"aa","bb",int64_t(1),int64_t(1),"cc","file:sample","v1","sample.jpg","image/jpeg",int64_t(16)});
+            store.call(UFB_PREPARE,{"aa","bb",int64_t(1),int64_t(1),"cc","file:sample","v1","sample.jpg","image/jpeg",int64_t(0),"",int64_t(0)},UF_ARGUMENT);
+            store.call(UFB_PREPARE,{"aa","bb",int64_t(1),int64_t(1),"cc","file:sample","v1","sample.jpg","image/jpeg","",int64_t(0)});
             store.call(UFB_ACCEPT_ITEM,{"cc","bb",int64_t(2)},UF_CONDITION);
             std::ofstream(root/identity/"payloads/cc.payload")<<"0123456789abcdef";
+            store.call(UFB_TRY_PREPARE,{"cc","bb",int64_t(16),int64_t(16),int64_t(1024),int64_t(2)});
             store.call(UFB_SEAL,{"cc","bb",int64_t(16),hash,"image/jpeg",int64_t(1024),int64_t(2)});
             std::ofstream(root/identity/"payloads/cc.payload")<<"0123456789abcdef";
             store.call(UFB_ACCEPT_ITEM,{"cc","bb",int64_t(3)});
@@ -84,15 +86,17 @@ int main() {
             expect(background.call(UFB_TASK,{"cc"}).back().rows.empty(),"Eligible history was not removed");
             expect(background.call(UFB_RECEIPT,{hash}).back().rows.size()==1,"History cleanup erased receipt");
             background.call(UFB_BIND_PREPARER,{"ee"});
-            background.call(UFB_PREPARE,{"11","ee",int64_t(10),int64_t(1),"22","file:new","v1","new.jpg","image/jpeg",int64_t(1)});
+            background.call(UFB_PREPARE,{"11","ee",int64_t(10),int64_t(1),"22","file:new","v1","new.jpg","image/jpeg","",int64_t(0)});
             std::ofstream(root/identity/"payloads/22.payload")<<"x";
+            background.call(UFB_TRY_PREPARE,{"22","ee",int64_t(1),int64_t(1),int64_t(1024),int64_t(11)});
             background.call(UFB_SEAL,{"22","ee",int64_t(1),hash,"image/jpeg",int64_t(1024),int64_t(11)});
             background.call(UFB_ACCEPT_ITEM,{"22","ee",int64_t(12)});
             auto fingerprint=Value::blob(std::string(32,'a'));
             background.call(UFB_OPERATION,{"33",int64_t(1),int64_t(0),int64_t(13),int64_t(0),fingerprint});
             background.call(UFB_OPERATION,{"33",int64_t(2),int64_t(0),int64_t(13),int64_t(0),fingerprint},UF_CONDITION);
-            background.call(UFB_PREPARE,{"44","ee",int64_t(14),int64_t(1),"55","file:later","v1","later.jpg","image/jpeg",int64_t(1)});
+            background.call(UFB_PREPARE,{"44","ee",int64_t(14),int64_t(1),"55","file:later","v1","later.jpg","image/jpeg","",int64_t(0)});
             std::ofstream(root/identity/"payloads/55.payload")<<"x";
+            background.call(UFB_TRY_PREPARE,{"55","ee",int64_t(1),int64_t(1),int64_t(1024),int64_t(15)});
             background.call(UFB_SEAL,{"55","ee",int64_t(1),hash,"image/jpeg",int64_t(1024),int64_t(15)});
             background.call(UFB_ACCEPT_ITEM,{"55","ee",int64_t(16)});
             background.call(UFB_SELECT_OPERATION,{"33",int64_t(17),int64_t(128)});
@@ -123,9 +127,9 @@ int main() {
             expect(background.call(UFB_TASK,{"55"}).back().rows[0][5].integer==4,"Paused task lost its state");
             // Preparation bytes are reserved before copying; partial exported files
             // belong to the same intent and are reclaimed after preparation failure.
-            background.call(UFB_PREPARE,{"a1","ee",int64_t(45),int64_t(1),"a2","file:partial","v1","partial.jpg","image/jpeg",int64_t(0)});
-            background.call(UFB_RESERVE_PAYLOAD,{"a2","ee",int64_t(100),int64_t(1024),int64_t(46)});
-            background.call(UFB_RESERVE_PAYLOAD,{"a2","ee",int64_t(1024),int64_t(1024),int64_t(47)},UF_CONDITION);
+            background.call(UFB_PREPARE,{"a1","ee",int64_t(45),int64_t(1),"a2","file:partial","v1","partial.jpg","image/jpeg","",int64_t(0)});
+            background.call(UFB_TRY_PREPARE,{"a2","ee",int64_t(100),int64_t(100),int64_t(1024),int64_t(46)});
+            background.call(UFB_TRY_PREPARE,{"a2","ee",int64_t(100),int64_t(100),int64_t(1024),int64_t(47)},UF_STATE);
             std::filesystem::create_directory(root/identity/"payloads/a2.payload.source");
             std::ofstream(root/identity/"payloads/a2.payload.source/image.jpg")<<"123";
             background.call(UFB_FAIL_ITEM,{"a2","ee","interrupted",int64_t(48)});
@@ -140,8 +144,8 @@ int main() {
             // Permission suspension and interrupted reset use bounded durable pages.
             background.call(UFB_ACTION,{"55",int64_t(0),int64_t(50)});
             background.call(UFB_DISCOVER,{"66","77",int64_t(1),int64_t(1),int64_t(1),int64_t(11),int64_t(12),int64_t(0),int64_t(1),int64_t(12),int64_t(0),"file:later","v1","later.jpg","image/jpeg","later",int64_t(1)});
-            expect(background.call(UFB_SUSPEND_SCOPE,{"66",int64_t(0),int64_t(51)}).back().rows[0][0].integer==1,"Scope did not suspend its accepted task");
-            expect(background.call(UFB_TASK,{"55"}).back().rows[0][5].integer==4,"Permission suspension did not persist pause");
+            expect(background.call(UFB_SUSPEND_SCOPE,{"66",int64_t(0),int64_t(51)}).back().rows[0][0].integer==0,"Scope adopted an independently submitted task");
+            expect(background.call(UFB_TASK,{"55"}).back().rows[0][5].integer==0,"Scope suspension paused an independent task");
             background.call(UFB_RESET_SCOPE,{"66"});
             background.call(UFB_SCOPE,{"66","directory:photos","77",int64_t(1),int64_t(1),int64_t(1),int64_t(0)},UF_CONDITION);
             expect(background.call(UFB_RESET_SCOPE_PAGE,{"66"}).back().rows[0][0].integer==0,"Reset did not finish");
@@ -164,7 +168,7 @@ int main() {
         { Store reopened(root.u8string(),identity,false); expect(reopened.call(UFB_RECEIPTS,{int64_t(0),"",int64_t(10)}).back().rows.size()==1,"Receipt did not survive reopen"); }
         {
             Store store(root.u8string(),std::string(64,'f'),true);store.call(UFB_BIND_PREPARER,{"aa"});
-            store.call(UFB_PREPARE,{"bb","aa",int64_t(1),int64_t(2),"a1","file:bad","v1","bad.jpg","image/jpeg",int64_t(4),"a2","file:good","v1","good.jpg","image/jpeg",int64_t(4)});
+            store.call(UFB_PREPARE,{"bb","aa",int64_t(1),int64_t(2),"a1","file:bad","v1","bad.jpg","image/jpeg","a2","file:good","v1","good.jpg","image/jpeg","",int64_t(0)});
             auto folder=root/store.id/"payloads";
             std::filesystem::create_directory(folder/"a1.payload");std::ofstream(folder/"a1.payload"/"unexpected")<<"data";
             std::ofstream(folder/"a2.payload")<<"data";
@@ -188,9 +192,10 @@ int main() {
             Store store(root.u8string(),std::string(64,char('b'+executor)),true);
             store.call(UFB_BIND_PREPARER,{"aa"});
             store.call(UFB_PREPARE,{"bb","aa",int64_t(1),int64_t(2),
-                "cc","file:unknown","v1","unknown.jpg","image/jpeg",int64_t(4),
-                "dd","file:independent","v1","independent.jpg","image/jpeg",int64_t(4)});
+                "cc","file:unknown","v1","unknown.jpg","image/jpeg",
+                "dd","file:independent","v1","independent.jpg","image/jpeg","",int64_t(0)});
             for(auto task:{"cc","dd"}) {
+                store.call(UFB_TRY_PREPARE,{task,"aa",int64_t(4),int64_t(4),int64_t(1024),int64_t(2)});
                 store.call(UFB_SEAL,{task,"aa",int64_t(4),hash,"image/jpeg",int64_t(1024),int64_t(2)},UF_IO);
                 std::ofstream(root/store.id/"payloads"/(std::string(task)+".payload"))<<"data";
                 store.call(UFB_SEAL,{task,"aa",int64_t(5),hash,"image/jpeg",int64_t(1024),int64_t(2)},UF_IO);
@@ -198,7 +203,7 @@ int main() {
                 store.call(UFB_ACCEPT_ITEM,{task,"aa",int64_t(3)});
             }
             store.call(UFB_CLAIM,{"cc",int64_t(executor),int64_t(0),int64_t(4)});
-            expect(store.call(UFB_SCHEDULABLE,{int64_t(0),int64_t(executor),int64_t(10)}).back().rows.empty(),"Unhanded attempt reached scheduler");
+            expect(store.call(UFB_CONTROL_CREATE,{"ce",int64_t(executor),int64_t(4),int64_t(0),int64_t(1)}).back().rows.empty(),"Unhanded attempt reached scheduler");
             store.call(UFB_HANDOFF,{"cc",int64_t(1),"protected"});
             expect(store.call(UFB_ATTEMPTS,{int64_t(0),int64_t(executor),int64_t(10)}).back().rows.size()==1,"Active attempt inventory lost handoff");
             store.call(UFB_CONTROL_CREATE,{"ce",int64_t(executor),int64_t(4),int64_t(0),int64_t(1)});

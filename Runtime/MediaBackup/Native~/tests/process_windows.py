@@ -60,29 +60,30 @@ class Repository:
         self.native.ufbackup_call.argtypes = [C.c_uint64, C.c_uint32, C.c_char_p, C.c_uint32, C.c_void_p, C.c_uint32, C.POINTER(Status)]
         self.native.ufbackup_close.argtypes = [C.c_uint64, C.POINTER(Status)]
         self.handle = C.c_uint64()
-        status = Status(size=C.sizeof(Status), abi=2)
+        status = Status(size=C.sizeof(Status), abi=4)
         assert self.native.ufbackup_open(str(root).encode(), identity.encode(), b'https://test.invalid', b'test',
                                         int(create), C.byref(self.handle), C.byref(status)) == 0, status.message
 
     def call(self, command, *args):
         request = encode(args)
         output = C.create_string_buffer(1024 * 1024)
-        status = Status(size=C.sizeof(Status), abi=2)
+        status = Status(size=C.sizeof(Status), abi=4)
         assert self.native.ufbackup_call(self.handle, command, request, len(request), output, len(output),
                                         C.byref(status)) == 0, status.message
         return decode(output.raw[:status.length]) if status.length else []
 
     def close(self):
-        status = Status(size=C.sizeof(Status), abi=2)
+        status = Status(size=C.sizeof(Status), abi=4)
         assert self.native.ufbackup_close(self.handle, C.byref(status)) == 0, status.message
 
 
 def worker(core, library, root, stage, executor):
     db = Repository(core, library, root, True)
     db.call(58, 'aa')
-    db.call(2, 'bb', 'aa', NOW, 1, 'cc', 'file:photo', 'v1', 'photo.jpg', 'image/jpeg', 4)
+    db.call(2, 'bb', 'aa', NOW, 1, 'cc', 'file:photo', 'v1', 'photo.jpg', 'image/jpeg', '', 0)
     payload = Path(root) / IDENTITY / 'payloads/cc.payload'
     payload.write_bytes(b'test')
+    db.call(77, 'cc', 'aa', 4, 4, 1024, NOW)
     db.call(3, 'cc', 'aa', 4, HASH, 'image/jpeg', 1024, NOW)
     step = STAGES.index(stage)
     if step >= 1: db.call(96, 'cc', 'aa', NOW)

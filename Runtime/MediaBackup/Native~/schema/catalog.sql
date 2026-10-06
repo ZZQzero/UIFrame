@@ -1,5 +1,5 @@
 PRAGMA application_id=1430667843;
-PRAGMA user_version=2;
+PRAGMA user_version=3;
 CREATE TABLE store_settings (
     singleton INTEGER PRIMARY KEY CHECK(singleton=1),
     store_id TEXT NOT NULL UNIQUE,
@@ -18,6 +18,7 @@ CREATE TABLE preparations (
     id TEXT PRIMARY KEY,
     owner TEXT NOT NULL,
     phase INTEGER NOT NULL CHECK(phase BETWEEN 0 AND 3),
+    stop_requested INTEGER NOT NULL DEFAULT 0 CHECK(stop_requested IN(0,1)),
     expected_count INTEGER NOT NULL DEFAULT 0 CHECK(expected_count BETWEEN 0 AND 32),
     created_utc INTEGER NOT NULL,
     error TEXT
@@ -36,6 +37,8 @@ CREATE TABLE scopes (
     index_generation INTEGER NOT NULL CHECK(index_generation>=0),
     scope_revision INTEGER NOT NULL CHECK(scope_revision>=0),
     permission_generation INTEGER NOT NULL CHECK(permission_generation>=0),
+    requires_confirmation INTEGER NOT NULL DEFAULT 0 CHECK(requires_confirmation IN(0,1)),
+    admission_epoch INTEGER NOT NULL DEFAULT 1 CHECK(admission_epoch>0),
     consumed_seq INTEGER NOT NULL DEFAULT 0 CHECK(consumed_seq>=0),
     include_existing INTEGER NOT NULL CHECK(include_existing IN(0,1)),
     enabled INTEGER NOT NULL DEFAULT 0 CHECK(enabled IN(0,1)),
@@ -127,6 +130,10 @@ CREATE TABLE tasks (
     sequence INTEGER PRIMARY KEY AUTOINCREMENT,
     id TEXT NOT NULL UNIQUE,
     batch_id TEXT NOT NULL,
+    scope_id TEXT REFERENCES scopes(id),
+    scope_epoch INTEGER NOT NULL DEFAULT 0,
+    preparation_accepted INTEGER NOT NULL DEFAULT 0 CHECK(preparation_accepted IN(0,1)),
+    preparation_started INTEGER NOT NULL DEFAULT 0 CHECK(preparation_started IN(0,1)),
     source_id TEXT NOT NULL,
     content_version TEXT NOT NULL,
     state INTEGER NOT NULL CHECK(state IN(0,1,2,3,4,6,7,8,9)),
@@ -144,6 +151,7 @@ CREATE TABLE task_metadata (
     mime TEXT NOT NULL,
     confirmed_bytes INTEGER NOT NULL DEFAULT 0 CHECK(confirmed_bytes>=0)
 ) STRICT;
+CREATE INDEX tasks_scope ON tasks(scope_id,state,sequence);
 CREATE INDEX tasks_state_page ON tasks(state,sequence);
 CREATE INDEX tasks_batch ON tasks(batch_id,sequence);
 CREATE INDEX tasks_source ON tasks(source_id,content_version);

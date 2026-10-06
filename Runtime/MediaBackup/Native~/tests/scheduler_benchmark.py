@@ -35,7 +35,7 @@ def main():
         return ''.join(re.findall(r'"([^"\n]*)"', source.split('const std::string ' + name + '=')[1].split(';')[0]))
     base = literals('TaskFields') + literals('AttemptColumns')
     # Same predicate as the command; execute the command itself as the timed path.
-    query = base + 'WHERE t.sequence>0 AND a.executor=1 AND (a.payload_released=0 OR a.credential_released=0) AND (a.submission_state>0 OR a.execution_state>=2) ORDER BY t.sequence LIMIT 100'
+    query = base + 'WHERE t.sequence>0 AND a.executor=1 AND (a.payload_released=0 OR a.credential_released=0) ORDER BY t.sequence LIMIT 100'
     results = []
     for count in args.rows:
         with tempfile.TemporaryDirectory(prefix='ufbackup-scheduler-') as temporary:
@@ -56,19 +56,17 @@ def main():
             assert not any(re.search(r'\bSCAN t\b', row['detail']) for row in result['plan'])
             database.close()
             repository = Repository(args.core, args.repository, root, False)
-            for command, name in ((75, 'schedulable'), (23, 'attempts')):
-                result[name + '_empty'] = measure(lambda: repository.call(command, 0, 1, 100)[-1])
-                assert result[name + '_empty']['rows'] == 0
+            result['attempts_empty'] = measure(lambda: repository.call(23, 0, 1, 100)[-1])
+            assert result['attempts_empty']['rows'] == 0
             repository.close()
             database = QueryStore(args.core, root / IDENTITY / 'catalog.sqlite', 1)
             database.sql(f'UPDATE tasks SET state=1 WHERE sequence={count}',
                 f"UPDATE task_attempts SET payload_released=0,credential_released=0,execution_state=0,server_outcome=0 WHERE task_id=printf('%032x',{count})")
             database.close()
             repository = Repository(args.core, args.repository, root, False)
-            for command, name in ((75, 'schedulable'), (23, 'attempts')):
-                result[name + '_one_at_tail'] = measure(lambda: repository.call(command, 0, 1, 100)[-1])
-                assert result[name + '_one_at_tail']['rows'] == 1
-                assert repository.call(command, count, 1, 100)[-1] == []
+            result['attempts_one_at_tail'] = measure(lambda: repository.call(23, 0, 1, 100)[-1])
+            assert result['attempts_one_at_tail']['rows'] == 1
+            assert repository.call(23, count, 1, 100)[-1] == []
             for command, name, values in ((105, 'protocol_wake', [1]), (89, 'controls', [1, '']), (90, 'uploads', [1, ''])):
                 result[name] = measure(lambda: repository.call(command, *values)[-1])
             repository.close()

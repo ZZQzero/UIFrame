@@ -83,7 +83,7 @@ namespace UIFrame.Editor
             {
                 if (GUILayout.Button("备份当前图片")) Run(async ct =>
                 {
-                    await EnsureBackup(ct);await backup.SubmitAsync(Guid.NewGuid().ToString("N"),new[] { selected },ct);
+                    await EnsureBackup(ct);await (await backup.SubmitAsync(Guid.NewGuid().ToString("N"),new[] { selected },ct)).WaitAsync(ct);
                     status="图片已受理，请刷新任务查看上传和确认状态。";
                 });
             }

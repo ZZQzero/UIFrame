@@ -18,8 +18,9 @@ def main():
     if args.worker:
         db = Repository(args.core, args.repository, args.worker, True)
         db.call(58, 'aa')
-        db.call(2, 'bb', 'aa', 1, 1, 'cc', 'file:photo', 'v1', 'photo.jpg', 'image/jpeg', 4)
+        db.call(2, 'bb', 'aa', 1, 1, 'cc', 'file:photo', 'v1', 'photo.jpg', 'image/jpeg', '', 0)
         (args.worker / IDENTITY / 'payloads/cc.payload').write_bytes(b'test')
+        db.call(77, 'cc', 'aa', 4, 4, 1024, 2)
         db.call(3, 'cc', 'aa', 4, HASH, 'image/jpeg', 1024, 2)
         db.call(96, 'cc', 'aa', 3); db.call(9, 'cc', 0, 0, 4)
         db.call(74, 'cc', 1, 'protected')

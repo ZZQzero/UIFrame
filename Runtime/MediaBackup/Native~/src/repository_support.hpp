@@ -29,6 +29,10 @@ struct Args {
     }
     std::string id(size_t i) const { auto s=text(i,64); require(!s.empty() && std::all_of(s.begin(),s.end(),[](char c){return (c>='a' && c<='f') || (c>='0' && c<='9');}),"Invalid identity"); return s; }
 };
+// A task has one control owner; receipt sharing never transfers that ownership.
+inline std::string admission(const std::string &task) {
+    return "("+task+".scope_id IS NULL OR EXISTS(SELECT 1 FROM scopes s WHERE s.id="+task+".scope_id AND s.requires_confirmation=0 AND s.admission_epoch="+task+".scope_epoch))";
+}
 void durable_payload(const std::filesystem::path &payload,uint64_t bytes);
 void append_confirmation(std::vector<Command> &commands,const std::string &id,int64_t generation,
     const std::string &backup,const Value &hash,int64_t size,int64_t confirmed,int64_t now);
