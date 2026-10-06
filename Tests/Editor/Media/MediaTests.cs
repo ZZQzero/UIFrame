@@ -121,22 +121,23 @@ namespace UIFrame.Regression
         }
         [UnityTest] public IEnumerator BackupResponseLimitCoversKnownAndUnknownLengths() => UniTask.ToCoroutine(async () =>
         {
-            using(var boundary=new System.Net.Http.HttpResponseMessage { Content=new UnknownLengthContent(65536) })
-                Assert.AreEqual(65536,(await ImageBackupService.ReadResponse(boundary,default)).Length);
+            using(var boundary=new System.Net.Http.HttpResponseMessage { Content=new UnknownLengthContent(524288) })
+                Assert.AreEqual(524288,(await ImageBackupService.ReadResponse(boundary,default)).Length);
             foreach(bool known in new[]{false,true})
             {
-                using var oversized=new System.Net.Http.HttpResponseMessage { Content=known ? (System.Net.Http.HttpContent)new System.Net.Http.ByteArrayContent(new byte[65537]) : new UnknownLengthContent(65537) };
+                using var oversized=new System.Net.Http.HttpResponseMessage { Content=known ? (System.Net.Http.HttpContent)new System.Net.Http.ByteArrayContent(new byte[524289]) : new UnknownLengthContent(524289) };
                 Exception observed=null; try { await ImageBackupService.ReadResponse(oversized,default); } catch(Exception error) { observed=error; }
                 Assert.IsInstanceOf<IOException>(observed);
             }
         });
 
-        sealed class ResponseHandler : System.Net.Http.HttpMessageHandler
+        sealed class ResponseHandler : BackupProtocolFixture
         {
             internal Func<System.Net.Http.HttpResponseMessage> respond;
             internal int requests;
+            internal ResponseHandler(){ConfirmOnPlan=true;FixedBackupId="verified";}
             protected override System.Threading.Tasks.Task<System.Net.Http.HttpResponseMessage> SendAsync(System.Net.Http.HttpRequestMessage request,CancellationToken token)
-            { requests++; return System.Threading.Tasks.Task.FromResult(respond()); }
+            { if(request.Method!=System.Net.Http.HttpMethod.Get)return base.SendAsync(request,token);requests++; return System.Threading.Tasks.Task.FromResult(respond()); }
         }
         sealed class StreamResponse : System.Net.Http.HttpContent
         {
@@ -165,19 +166,22 @@ namespace UIFrame.Regression
         {
             var config=Config(); config.RequestTimeout=TimeSpan.FromMilliseconds(250);
             var handler=new ResponseHandler();
-            using var service=await ImageBackupService.CreateAsync(config,NativeBackup.Call,false,handler);
-            foreach(bool cancelByCaller in new[]{false,true})
-            {
-                var stream=new StalledStream(); handler.respond=()=>new System.Net.Http.HttpResponseMessage { Content=new StreamResponse(stream) };
-                using var cancellation=new CancellationTokenSource();
-                var pending=service.RefreshServerCapabilitiesAsync(cancellation.Token);
-                if(cancelByCaller) cancellation.Cancel();
-                Exception observed=null; try { await pending; } catch(Exception error) { observed=error; }
-                if(cancelByCaller) Assert.IsInstanceOf<OperationCanceledException>(observed); else Assert.IsInstanceOf<TimeoutException>(observed);
-                Assert.IsTrue(stream.closed);
-            }
-            handler.respond=()=>new System.Net.Http.HttpResponseMessage { Content=new System.Net.Http.StringContent("{\"protocolVersion\":1,\"account\":\"integration-user\",\"chunkBytes\":1024,\"maxFileBytes\":1048576}") };
-            await service.RefreshServerCapabilitiesAsync(); Assert.AreEqual(3,handler.requests);
+            var service=await ImageBackupService.CreateAsync(config,NativeBackup.Call,false,handler);
+            try {
+                await service.SubmitPhotosAsync(new[]{ImageReference.FromFile(imagePath)});await service.WaitForIdleAsync();
+                foreach(bool cancelByCaller in new[]{false,true})
+                {
+                    var stream=new StalledStream(); handler.respond=()=>new System.Net.Http.HttpResponseMessage { Content=new StreamResponse(stream) };
+                    using var cancellation=new CancellationTokenSource();
+                    var pending=service.DownloadBackupAndVerifyAsync("verified",Path.Combine(root,"deadline.png"),cancellation.Token);
+                    await UniTask.WaitUntil(()=>stream.reading || stream.closed);
+                    if(cancelByCaller)cancellation.Cancel();
+                    Exception observed=null;try{await pending;}catch(Exception error){observed=error;}
+                    if(cancelByCaller)Assert.IsInstanceOf<OperationCanceledException>(observed);else Assert.IsInstanceOf<TimeoutException>(observed);
+                    Assert.IsTrue(stream.closed);
+                }
+                Assert.AreEqual(2,handler.requests);
+            } finally {await service.ShutdownAsync();}
         });
 
         [Test] public void GpuImageTransformPreservesAllExifOrientationsAndAlpha()
@@ -289,57 +293,6 @@ namespace UIFrame.Regression
         }
 
 
-        [UnityTest] public IEnumerator RepositoryAcceptReopenPaginationAndAccountIsolation() => UniTask.ToCoroutine(async()=>
-        {
-            string operation=Guid.NewGuid().ToString("N"),id;
-            var service=await ImageBackupService.CreateAsync(Config());
-            try
-            {
-                id=(await service.EnqueueAsync(operation,new[]{ImageReference.FromFile(imagePath)}))[0];
-                var page=await service.QueryTasksAsync(new BackupTaskQuery {PageSize=1});Assert.AreEqual(id,page.Items[0].id);
-                Assert.IsTrue((await service.QueryPreparationAsync(operation)).Accepted);
-                await service.PauseAsync();
-            }
-            finally{await service.ShutdownAsync();}
-            service=await ImageBackupService.CreateAsync(Config());
-            try
-            {
-                Assert.IsTrue(service.IsPaused);Assert.AreEqual(id,(await service.QueryTasksAsync()).Items[0].id);
-                Assert.AreEqual(1,(await service.GetSummaryAsync())[BackupState.Queued]);
-                using var other=await ImageBackupService.CreateAsync(Config("another-account"));Assert.IsEmpty((await other.QueryTasksAsync()).Items);
-                await service.ResumeAsync();await service.CancelAsync(id);Assert.AreEqual(BackupState.Canceled,(await service.GetTaskAsync(id)).state);
-            }
-            finally{await service.ShutdownAsync();}
-        });
-        [UnityTest] public IEnumerator PreparationBudgetFailureIsAtomicAndCapacityReturns() => UniTask.ToCoroutine(async()=>
-        {
-            var config=Config();config.DiskBudgetBytes=new FileInfo(imagePath).Length;var service=await ImageBackupService.CreateAsync(config);
-            try
-            {
-                Exception failure=null;try{await service.EnqueueAsync(new[]{ImageReference.FromFile(imagePath),ImageReference.FromFile(imagePath)});}catch(Exception error){failure=error;}
-                Assert.IsInstanceOf<BackupBudgetExceededException>(failure);Assert.IsEmpty((await service.QueryTasksAsync()).Items);
-                var ids=await service.EnqueueAsync(new[]{ImageReference.FromFile(imagePath)});Assert.AreEqual(1,ids.Count);
-            }
-            finally{await service.ShutdownAsync();}
-        });
-        [UnityTest] public IEnumerator DurableOperationsAreIdempotentAndGlobalPauseIsIndependent() => UniTask.ToCoroutine(async()=>
-        {
-            var service=await ImageBackupService.CreateAsync(Config());
-            try
-            {
-                var first=(await service.EnqueueAsync(new[]{ImageReference.FromFile(imagePath)}))[0];
-                string operation=Guid.NewGuid().ToString("N");var command=new BackupOperationCommand {OperationId=operation,Action=BackupAction.Pause,TaskIds=new[]{first}};
-                await service.SubmitOperationAsync(command);Assert.AreEqual(BackupOperationPhase.Completed,(await service.WaitOperationAsync(operation)).Phase);
-                Assert.AreEqual(BackupState.Paused,(await service.GetTaskAsync(first)).state);
-                await service.SubmitOperationAsync(command);Assert.AreEqual(1,(await service.QueryOperationAsync(operation)).SelectedCount);
-                Exception failure=null;try{await service.SubmitOperationAsync(new BackupOperationCommand {OperationId=operation,Action=BackupAction.Cancel,TaskIds=new[]{first}});}catch(Exception error){failure=error;}
-                Assert.IsInstanceOf<BackupRepositoryException>(failure);
-                await service.PauseAsync();var resume=await service.SubmitOperationAsync(new BackupOperationCommand {OperationId=Guid.NewGuid().ToString("N"),Action=BackupAction.Resume,TaskIds=new[]{first}});
-                await service.WaitOperationAsync(resume);Assert.IsTrue((await service.GetSummaryAsync()).QueuePaused);
-                Assert.AreEqual(BackupState.Queued,(await service.GetTaskAsync(first)).state);
-            }
-            finally{await service.ShutdownAsync();}
-        });
         [UnityTest] public IEnumerator EqualStatDirectoryWritesChangeIndexedVersionAndRejectStalePreparation() => UniTask.ToCoroutine(async()=>
         {
             string path=Path.Combine(root,"same.jpg");File.WriteAllText(path,"AAAA");
@@ -417,7 +370,8 @@ namespace UIFrame.Regression
         });
         [UnityTest] public IEnumerator PermissionRevisionRequiresExplicitConfirmationWithoutResumingOldTasks() => UniTask.ToCoroutine(async()=>
         {
-            var service=await ImageBackupService.CreateAsync(Config());var library=await ImageLibraryIndex.OpenAsync(Path.Combine(root,"permissions.sqlite"));
+            var fixture=new BackupProtocolFixture {BeforeUpload=(item,token)=>System.Threading.Tasks.Task.Delay(Timeout.Infinite,token)};
+            var service=await ImageBackupService.CreateAsync(Config(),NativeBackup.Call,false,fixture);var library=await ImageLibraryIndex.OpenAsync(Path.Combine(root,"permissions.sqlite"));
             try {
                 var automatic=await AutomaticImageBackup.CreateAsync(service,library);
                 await automatic.ConfigureAsync(new AutomaticBackupPolicy {enabled=true,source=root,sourceKind=BackupSourceKind.Directory,includeExisting=true,wifiOnly=false});
@@ -427,6 +381,8 @@ namespace UIFrame.Regression
                 await repository.Scope(new ImageLibraryScope(ImageLibrarySourceKind.Directory,root),1,default);
                 try {await automatic.ScanOnceAsync();Assert.Fail("Changed scope continued without confirmation");}
                 catch(GalleryException error){Assert.AreEqual("ScopeConfirmationRequired",error.Code);}
+                Assert.AreEqual(1,(await service.GetTaskAsync(task.id)).desiredAction);
+                await service.WaitForIdleAsync();
                 Assert.AreEqual(BackupState.Paused,(await service.GetTaskAsync(task.id)).state);
                 await automatic.ConfirmScopeAsync();await automatic.ScanOnceAsync();
                 Assert.AreEqual(BackupState.Paused,(await service.GetTaskAsync(task.id)).state);
@@ -435,7 +391,8 @@ namespace UIFrame.Regression
         });
         [UnityTest] public IEnumerator AutomaticLoopChecksPermissionBeforeUploadingQueuedTasks() => UniTask.ToCoroutine(async()=>
         {
-            var service=await ImageBackupService.CreateAsync(Config());var library=await ImageLibraryIndex.OpenAsync(Path.Combine(root,"loop-permissions.sqlite"));
+            var fixture=new BackupProtocolFixture {BeforeUpload=(item,token)=>System.Threading.Tasks.Task.Delay(Timeout.Infinite,token)};
+            var service=await ImageBackupService.CreateAsync(Config(),NativeBackup.Call,false,fixture);var library=await ImageLibraryIndex.OpenAsync(Path.Combine(root,"loop-permissions.sqlite"));
             try {
                 var automatic=await AutomaticImageBackup.CreateAsync(service,library);
                 await automatic.ConfigureAsync(new AutomaticBackupPolicy {enabled=true,source=root,sourceKind=BackupSourceKind.Directory,includeExisting=true,wifiOnly=false});
@@ -447,58 +404,12 @@ namespace UIFrame.Regression
                 Exception failure=null;try{await automatic.RunAsync(timeout.Token);}catch(Exception error){failure=error;}
                 Assert.IsInstanceOf<GalleryException>(failure);
                 Assert.AreEqual("ScopeConfirmationRequired",((GalleryException)failure).Code);
+                Assert.AreEqual(1,(await service.GetTaskAsync(task.id)).desiredAction);
+                await service.WaitForIdleAsync();
                 Assert.AreEqual(BackupState.Paused,(await service.GetTaskAsync(task.id)).state);
                 Assert.IsEmpty((await service.QueryBackupsAsync()).Items);
                 await automatic.ConfirmScopeAsync();
             } finally {await library.ShutdownAsync();await service.ShutdownAsync();}
-        });
-        sealed class PendingSessionHandler : System.Net.Http.HttpMessageHandler
-        {
-            internal bool entered;
-            internal readonly System.Threading.Tasks.TaskCompletionSource<System.Net.Http.HttpResponseMessage> pending = new System.Threading.Tasks.TaskCompletionSource<System.Net.Http.HttpResponseMessage>(System.Threading.Tasks.TaskCreationOptions.RunContinuationsAsynchronously);
-            protected override System.Threading.Tasks.Task<System.Net.Http.HttpResponseMessage> SendAsync(System.Net.Http.HttpRequestMessage request,CancellationToken token)
-            {
-                if(request.Method==System.Net.Http.HttpMethod.Get)return System.Threading.Tasks.Task.FromResult(new System.Net.Http.HttpResponseMessage { Content=new System.Net.Http.StringContent("{\"protocolVersion\":1,\"account\":\"integration-user\",\"chunkBytes\":1024,\"maxFileBytes\":1048576}") });
-                entered=true;return pending.Task;
-            }
-        }
-        [UnityTest] public IEnumerator ConcurrentProcessingPreservesActiveOwnership() => UniTask.ToCoroutine(async()=>
-        {
-            var handler=new PendingSessionHandler();var service=await ImageBackupService.CreateAsync(Config(),NativeBackup.Call,false,handler);
-            System.Threading.Tasks.Task first=null,second=null;
-            try {
-                await service.EnqueueAsync(new[]{ImageReference.FromFile(imagePath)});
-                first=service.ProcessAsync().AsTask();second=service.ProcessAsync().AsTask();
-                using var timeout=new CancellationTokenSource(TimeSpan.FromSeconds(10));
-                await UniTask.WaitUntil(()=>handler.entered && (first.IsCompleted || second.IsCompleted),cancellationToken:timeout.Token);
-                bool runningWithLiveTransfer=service.IsRunning;
-                handler.pending.TrySetException(new IOException("Controlled upload failure"));
-                Exception firstError=null,secondError=null;
-                try{await first;}catch(Exception error){firstError=error;}
-                try{await second;}catch(Exception error){secondError=error;}
-                Assert.IsTrue(runningWithLiveTransfer,"An existing transfer must retain its execution ownership when another pass is rejected.");
-                Assert.IsNull(firstError,"A per-image HTTP failure must be persisted without losing the processing owner.");
-                Assert.IsInstanceOf<InvalidOperationException>(secondError);
-                Assert.AreEqual(BackupState.NeedsAttention,(await service.QueryTasksAsync()).Items.Single().state);
-            } finally {
-                handler.pending.TrySetException(new IOException("Fixture cleanup"));
-                if(first!=null)try{await first;}catch(Exception){}
-                if(second!=null)try{await second;}catch(Exception){}
-                await service.ShutdownAsync();
-            }
-        });
-        [UnityTest] public IEnumerator ConcurrentProcessingAdmissionIsSynchronous() => UniTask.ToCoroutine(async()=>
-        {
-            var service=await ImageBackupService.CreateAsync(Config());
-            try {
-                var first=service.ProcessAsync();var second=service.ProcessAsync();
-                Exception firstError=null,secondError=null;
-                try{await first;}catch(Exception error){firstError=error;}
-                try{await second;}catch(Exception error){secondError=error;}
-                Assert.IsNull(firstError,"The first admitted processing pass must finish successfully.");
-                Assert.IsInstanceOf<InvalidOperationException>(secondError,"Concurrent entry must be rejected before an asynchronous boundary.");
-                await service.ProcessAsync();
-            } finally {await service.ShutdownAsync();}
         });
         [UnityTest] public IEnumerator WatchStartupFailureReleasesLoopOwnership() => UniTask.ToCoroutine(async()=>
         {
@@ -615,15 +526,13 @@ namespace UIFrame.Regression
         });
         static async UniTask ConfirmForDownload(ImageBackupService service,BackupTaskInfo task)
         {
-            await service.Db(BackupRepository.Command.Claim,default,task.id,0,0,DateTime.UtcNow.Ticks,Guid.NewGuid().ToString("N"));
-            await service.Db(BackupRepository.Command.Start,default,task.id,1L);
-            await service.Db(BackupRepository.Command.Finish,default,task.id,1L,1,"verified","",DateTime.UtcNow.Ticks,task.size,task.sha256);
-            await service.Db(BackupRepository.Command.Release,default,task.id,1L,true,true);
+            await service.WaitForIdleAsync();
+            Assert.AreEqual(BackupState.Completed,(await service.GetTaskAsync(task.id)).state);
         }
         [UnityTest] public IEnumerator DownloadsBoundUnknownLengthAndVerifyBeforePublishing() => UniTask.ToCoroutine(async () =>
         {
             var handler=new ResponseHandler(); using var service=await ImageBackupService.CreateAsync(Config(),NativeBackup.Call,false,handler);
-            await service.EnqueueAsync(new[]{ImageReference.FromFile(imagePath)});
+            await service.SubmitPhotosAsync(new[]{ImageReference.FromFile(imagePath)});
             var task=(await service.QueryTasksAsync()).Items.Single(); await ConfirmForDownload(service,task);
             byte[] expected=File.ReadAllBytes(imagePath); string destination=Path.Combine(root,"restored.png");
             foreach(string mode in new[]{"oversize","short","corrupt","valid"})
@@ -644,7 +553,7 @@ namespace UIFrame.Regression
         {
             var config=Config(); config.RequestTimeout=TimeSpan.FromMilliseconds(250);
             var handler=new ResponseHandler(); using var service=await ImageBackupService.CreateAsync(config,NativeBackup.Call,false,handler);
-            await service.EnqueueAsync(new[]{ImageReference.FromFile(imagePath)});
+            await service.SubmitPhotosAsync(new[]{ImageReference.FromFile(imagePath)});
             var task=(await service.QueryTasksAsync()).Items.Single(); await ConfirmForDownload(service,task);
             foreach(bool cancelByCaller in new[]{false,true})
             {
@@ -659,87 +568,19 @@ namespace UIFrame.Regression
             }
         });
 
-        sealed class CapabilityChangeHandler : System.Net.Http.HttpMessageHandler
-        {
-            internal int requests;
-            protected override async System.Threading.Tasks.Task<System.Net.Http.HttpResponseMessage> SendAsync(System.Net.Http.HttpRequestMessage request, CancellationToken cancellationToken)
-            {
-                requests++;
-                var capability = new ServerCapabilities { protocolVersion = 1, account = "integration-user", chunkBytes = 1024, maxFileBytes = 999999, backgroundUpload = true };
-                string response;
-                if (request.Method == System.Net.Http.HttpMethod.Get) response = JsonUtility.ToJson(capability);
-                else
-                {
-                    var upload = JsonUtility.FromJson<UploadRequest>(await request.Content.ReadAsStringAsync());
-                    capability.account = "different-account";
-                    response = JsonUtility.ToJson(new UploadResponse { uploadId=upload.key, sha256=upload.sha256, size=upload.size, capabilities=capability });
-                }
-                return new System.Net.Http.HttpResponseMessage(System.Net.HttpStatusCode.OK) { Content = new System.Net.Http.StringContent(response) };
-            }
-        }
-        [UnityTest] public IEnumerator InvalidCapabilitiesInUploadResponseStopDependentQueue() => UniTask.ToCoroutine(async () =>
-        {
-            var handler=new CapabilityChangeHandler();using var service=await ImageBackupService.CreateAsync(Config(),NativeBackup.Call,false,handler);
-            await service.EnqueueAsync(new[] { ImageReference.FromFile(imagePath), ImageReference.FromFile(imagePath) });
-            Exception observed = null; try { await service.ProcessAsync(); } catch (Exception error) { observed = error; }
-            Assert.IsInstanceOf<InvalidOperationException>(observed); Assert.AreEqual(2, handler.requests);
-            Assert.AreEqual(1, (await service.QueryTasksAsync()).Items.Count(x => x.state == BackupState.NeedsAttention));
-            Assert.AreEqual(1, (await service.QueryTasksAsync()).Items.Count(x => x.state == BackupState.Queued));
-        });
-
-        [UnityTest, Category("MediaIntegration"), Explicit("Requires integration_server.py")]
-        public IEnumerator CapabilitiesAreReusedAcrossPassesAndExplicitlyRefreshable() => UniTask.ToCoroutine(async () =>
-        {
-            int requests = 0; var config = Config(); config.AccessToken = () => { requests++; return "uiframe-integration-test-token"; };
-            using var service = await ImageBackupService.CreateAsync(config);
-            await service.EnqueueAsync(new[] { ImageReference.FromFile(imagePath) }); await service.ProcessAsync();
-            Assert.AreEqual(4, requests); // capabilities, create, one chunk, commit
-            string next = Path.Combine(root, "next.png"); File.Copy(imagePath, next);
-            await service.EnqueueAsync(new[] { ImageReference.FromFile(next) }); await service.ProcessAsync();
-            Assert.AreEqual(7, requests); await service.ProcessAsync(); Assert.AreEqual(7, requests);
-            await service.RefreshServerCapabilitiesAsync(); Assert.AreEqual(8, requests);
-            Assert.IsTrue((await service.QueryTasksAsync()).Items.All(x => x.state == BackupState.Completed));
-        });
-
-        [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
-        static bool FailingPolicy(Exception original) { throw original; }
-        [UnityTest, Category("MediaIntegration"), Explicit("Requires integration_server.py")]
-        public IEnumerator PolicyExceptionStopsPassAndPreservesOriginalWithoutRetry() => UniTask.ToCoroutine(async () =>
-        {
-            var config = Config(); config.EnableTransientRetries = true;
-            using var service = await ImageBackupService.CreateAsync(config);
-            await service.EnqueueAsync(new[] { ImageReference.FromFile(imagePath), ImageReference.FromFile(imagePath) });
-            var original = new System.Net.Http.HttpRequestException("policy failure"); int calls = 0; Exception observed = null;
-            try { await service.ProcessAsync(canTransfer: () => ++calls == 2 ? FailingPolicy(original) : true); } catch (Exception error) { observed = error; }
-            Assert.AreSame(original, observed); StringAssert.Contains(nameof(FailingPolicy), observed.StackTrace);
-            Assert.AreEqual(2, calls); Assert.AreEqual(2, (await service.QueryTasksAsync()).Items.Count(x => x.state == BackupState.Queued)); Assert.IsTrue((await service.QueryTasksAsync()).Items.All(x => x.retries == 0));
-        });
-
-        [UnityTest, Category("MediaIntegration"), Explicit("Requires integration_server.py")]
-        public IEnumerator CredentialCallbackExceptionStopsPassAndPreservesOriginal() => UniTask.ToCoroutine(async () =>
-        {
-            var config = Config(); int calls = 0; var original = new InvalidOperationException("credential callback failure");
-            config.AccessToken = () => { if (++calls == 2) throw original; return "uiframe-integration-test-token"; };
-            using var service = await ImageBackupService.CreateAsync(config);
-            await service.EnqueueAsync(new[] { ImageReference.FromFile(imagePath), ImageReference.FromFile(imagePath) });
-            Exception observed = null; try { await service.ProcessAsync(); } catch (Exception error) { observed = error; }
-            Assert.AreSame(original, observed); Assert.AreEqual(2, calls);
-            Assert.AreEqual(1, (await service.QueryTasksAsync()).Items.Count(x => x.state == BackupState.Failed)); Assert.AreEqual(1, (await service.QueryTasksAsync()).Items.Count(x => x.state == BackupState.Queued));
-        });
-
         [UnityTest,Category("MediaIntegration"),Explicit("Requires integration_server.py")]
         public IEnumerator ReceiptDownloadSurvivesHistoryCleanupAndReopen() => UniTask.ToCoroutine(async()=>
         {
             var service=await ImageBackupService.CreateAsync(Config());
             try
             {
-                await service.EnqueueAsync(new[]{ImageReference.FromFile(imagePath)});await service.ProcessAsync();
+                await service.SubmitPhotosAsync(new[]{ImageReference.FromFile(imagePath)});await service.WaitForIdleAsync();
                 var record=(await service.QueryBackupsAsync()).Items.Single();
                 await new BackupMaintenance(service).RunAsync(new BackupRetentionPolicy {HistoryAge=TimeSpan.Zero,KeepHistoryCount=0,TimeSlice=TimeSpan.FromSeconds(5)});
                 Assert.IsEmpty((await service.QueryTasksAsync()).Items);
                 string target=Path.Combine(root,"restored.png");await service.DownloadBackupAndVerifyAsync(record.BackupId,target);
                 CollectionAssert.AreEqual(File.ReadAllBytes(imagePath),File.ReadAllBytes(target));
-                await service.EnqueueAsync(new[]{ImageReference.FromFile(imagePath)});await service.ProcessAsync();Assert.AreEqual(1,(await service.QueryBackupsAsync()).Items.Count);
+                await service.SubmitPhotosAsync(new[]{ImageReference.FromFile(imagePath)});await service.WaitForIdleAsync();Assert.AreEqual(1,(await service.QueryBackupsAsync()).Items.Count);
             }
             finally{await service.ShutdownAsync();}
         });

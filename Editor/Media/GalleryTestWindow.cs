@@ -83,13 +83,13 @@ namespace UIFrame.Editor
             {
                 if (GUILayout.Button("备份当前图片")) Run(async ct =>
                 {
-                    await EnsureBackup(ct); await backup.EnqueueAsync(new[] { selected }, ct); await backup.ProcessAsync(ct);
-                    var tasks=await backup.GetSummaryAsync(ct);status=$"已备份 {tasks[BackupState.Completed]}；失败或需处理 {tasks[BackupState.Failed]+tasks[BackupState.NeedsAttention]}。";
+                    await EnsureBackup(ct);await backup.SubmitAsync(Guid.NewGuid().ToString("N"),new[] { selected },ct);
+                    status="图片已受理，请刷新任务查看上传和确认状态。";
                 });
             }
             using (new EditorGUI.DisabledScope(busy || backup == null))
             {
-                if (GUILayout.Button("继续处理已保存的任务")) Run(ct => backup.ProcessAsync(ct));
+                if (GUILayout.Button("恢复已暂停的任务")) Run(ct => backup.ResumeAsync(ct));
                 if (GUILayout.Button("下载并校验最近的备份")) Run(async ct =>
                 {
                     var task=(await backup.QueryBackupsAsync(1,cancellationToken:ct)).Items.FirstOrDefault();
@@ -110,7 +110,7 @@ namespace UIFrame.Editor
                 {
                     foreach(var task in taskPage.Items)
                     {
-                        bool chosen=EditorGUILayout.ToggleLeft($"{task.name} · {task.state}",selectedTasks.Contains(task.id));
+                        bool chosen=EditorGUILayout.ToggleLeft($"{task.name} · {task.state} · {task.acceptance} · {task.phase}",selectedTasks.Contains(task.id));
                         if(chosen)selectedTasks.Add(task.id);else selectedTasks.Remove(task.id);
                     }
                     using(new EditorGUI.DisabledScope(taskPage.Next==null))if(GUILayout.Button("下一页任务"))Run(ct=>RefreshTasks(taskPage.Next,ct));

@@ -1,22 +1,23 @@
 package com.zzq.uiframe.media;
-import android.app.job.JobParameters;
-import android.app.job.JobService;
-import java.util.HashMap;
-import java.util.Map;
+import android.app.job.*;
+import android.os.Build;
+import java.util.*;
 public final class BackupJobService extends JobService {
     private final Map<Integer,BackupBridge.Run> runs=new HashMap<>();
     @Override public boolean onStartJob(JobParameters parameters) {
-        BackupBridge.Run run=BackupBridge.start(this,parameters);if(run==null)return false;
+        String identity=parameters.getExtras().getString("repository");
+        if(Build.VERSION.SDK_INT>=34 && parameters.getExtras().getBoolean("user"))
+            setNotification(parameters,BackupBridge.jobId(identity),BackupBridge.notification(this,identity),JOB_END_NOTIFICATION_POLICY_REMOVE);
+        BackupBridge.Run run=BackupBridge.start(this,identity,completed->{
+            if(runs.get(parameters.getJobId())==completed){runs.remove(parameters.getJobId());jobFinished(parameters,false);}
+        });
+        if(run==null)return false;
         runs.put(parameters.getJobId(),run);return true;
     }
-    void complete(JobParameters parameters,BackupBridge.Run run,boolean reschedule) {
-        java.util.concurrent.CountDownLatch finished=new java.util.concurrent.CountDownLatch(1);
-        new android.os.Handler(android.os.Looper.getMainLooper()).post(()->{
-            if(runs.get(parameters.getJobId())==run)runs.remove(parameters.getJobId());
-            try { jobFinished(parameters,reschedule); } finally { finished.countDown(); }
-        });
-        try { finished.await(); } catch(InterruptedException error) { Thread.currentThread().interrupt(); throw new IllegalStateException("Interrupted while releasing Android job",error); }
+    @Override public boolean onStopJob(JobParameters parameters) {
+        BackupBridge.Run run=runs.remove(parameters.getJobId());
+        if(run!=null)run.stop("Android stopped job (reason "+(Build.VERSION.SDK_INT>=31?parameters.getStopReason():-1)+")");
+        return false;
     }
-    @Override public boolean onStopJob(JobParameters parameters) {return BackupBridge.stop(runs.remove(parameters.getJobId()));}
-    @Override public void onDestroy(){for(BackupBridge.Run run:runs.values())BackupBridge.stop(run);runs.clear();super.onDestroy();}
+    @Override public void onDestroy(){for(BackupBridge.Run run:runs.values())run.stop("Job service destroyed");runs.clear();super.onDestroy();}
 }

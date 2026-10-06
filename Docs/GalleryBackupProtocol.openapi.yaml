@@ -1,0 +1,308 @@
+openapi: 3.1.0
+info:
+  title: UIFrame photo backup protocol
+  version: 2.0.0
+  description: |
+    v2 is the only supported protocol. All timestamps are UTC Unix milliseconds.
+    Control requests have immutable requestId/operation/parameters and 1–32 unique
+    task/generation pairs. Responses must have exactly the same membership; order
+    is irrelevant. Validate the complete response before applying any item.
+    Body limits: request 262144 bytes, response 524288 bytes, upload descriptor
+    8192 bytes. Account is obtained from authentication, never from request JSON.
+    A successful file PUT is not a backup receipt. The server independently
+    verifies immutable stored bytes and commits the backup without client commit.
+    HTTPS is mandatory except explicitly configured local development HTTP.
+    API and storage endpoints, including gateways, must be trusted final targets
+    and must not redirect requests. Clients never copy API credentials to storage.
+    Desktop and Android disable redirects. iOS background NSURLSession follows
+    redirects without invoking the redirect delegate; it validates the final URL
+    and rejects redirects reported by task metrics, when available. This detects
+    violations after transmission and cannot prevent or undo forwarded bytes.
+    Confirmed results from either Plan or Query apply immediately.
+    Automatic confirmation has a local 24-hour deadline and 256 Pending-response
+    budget. A nextCheckAt at or beyond the deadline requires explicit handling;
+    clients must not poll earlier than nextCheckAt to fit the deadline.
+servers:
+  - url: https://backup.example.invalid
+security:
+  - bearer: []
+paths:
+  /v2/backup/plans:
+    post:
+      operationId: planBackups
+      description: |
+        Idempotently register immutable task metadata and source versions. Reuse
+        only verified account-local content. Concurrent first uploads can have
+        separate temporary objects. Same requestId with different parameters or
+        operation returns 409; equal parameters can return a newer dynamic result.
+        An already canceled attempt returns Canceled, including cancel-before-plan.
+        An expired descriptor can be renewed by an explicit Plan after the client
+        has proved no prior executor is still using it.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/PlanRequest'}
+      responses:
+        '200': {$ref: '#/components/responses/Results'}
+        '400': {$ref: '#/components/responses/Error'}
+        '401': {$ref: '#/components/responses/Error'}
+        '409': {$ref: '#/components/responses/Error'}
+        '413': {$ref: '#/components/responses/Error'}
+  /v2/backup/status:
+    post:
+      operationId: queryBackups
+      description: |
+        Lookup by task and generation even if Plan's response was lost. Absent
+        describes a point-in-time lookup and is not proof an in-flight operation
+        cannot commit. Verifying/Pending must include nextCheckAt. No polling
+        before that time, including under storage pressure. Failed/unknown
+        operations require explicit reconciliation; they are not normal polling.
+      requestBody: {$ref: '#/components/requestBodies/Identities'}
+      responses:
+        '200': {$ref: '#/components/responses/Results'}
+        '400': {$ref: '#/components/responses/Error'}
+        '401': {$ref: '#/components/responses/Error'}
+        '409': {$ref: '#/components/responses/Error'}
+        '413': {$ref: '#/components/responses/Error'}
+  /v2/backup/cancellations:
+    post:
+      operationId: cancelBackups
+      description: |
+        Atomically arbitrate cancellation against confirmation. Always leave an
+        attempt tombstone, even before Plan. Return Canceled or an existing
+        Confirmed receipt. Never delete a confirmed backup or shared content.
+        A later generation is a different attempt; old callbacks cannot affect it.
+      requestBody: {$ref: '#/components/requestBodies/Identities'}
+      responses:
+        '200': {$ref: '#/components/responses/Results'}
+        '400': {$ref: '#/components/responses/Error'}
+        '401': {$ref: '#/components/responses/Error'}
+        '409': {$ref: '#/components/responses/Error'}
+        '413': {$ref: '#/components/responses/Error'}
+  /v2/backups:
+    get:
+      operationId: listBackups
+      parameters:
+        - {name: after, in: query, schema: {type: integer, minimum: 0, default: 0}}
+        - {name: limit, in: query, schema: {type: integer, minimum: 1, maximum: 32, default: 32}}
+      responses:
+        '200':
+          description: Bounded ascending sequence page, scoped to the authenticated account.
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [items, nextAfter]
+                properties:
+                  nextAfter: {type: integer, minimum: 0}
+                  items:
+                    type: array
+                    maxItems: 32
+                    items: {$ref: '#/components/schemas/BackupRecord'}
+        '401': {$ref: '#/components/responses/Error'}
+  /v2/backups/{backupId}/content:
+    get:
+      operationId: downloadBackup
+      parameters:
+        - {name: backupId, in: path, required: true, schema: {$ref: '#/components/schemas/Id'}}
+      responses:
+        '200':
+          description: Immutable file bytes. The client verifies size and SHA-256 before publishing its destination.
+          content:
+            application/octet-stream:
+              schema: {type: string, format: binary}
+        '401': {$ref: '#/components/responses/Error'}
+        '404': {$ref: '#/components/responses/Error'}
+components:
+  securitySchemes:
+    bearer: {type: http, scheme: bearer}
+  requestBodies:
+    Identities:
+      required: true
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/IdentityRequest'}
+  responses:
+    Results:
+      description: Complete account-bound batch result. Each item succeeds or fails independently.
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/BatchResponse'}
+    Error:
+      description: The control request failed. No partial response may be inferred.
+      content:
+        application/json:
+          schema:
+            type: object
+            additionalProperties: false
+            required: [error]
+            properties:
+              error: {$ref: '#/components/schemas/Failure'}
+  schemas:
+    Id: {type: string, pattern: '^[A-Za-z0-9._:-]{1,128}$'}
+    Sha256: {type: string, pattern: '^[a-f0-9]{64}$'}
+    Timestamp: {type: integer, format: int64, minimum: 0}
+    Identity:
+      type: object
+      required: [clientTaskId, attemptGeneration]
+      properties:
+        clientTaskId: {$ref: '#/components/schemas/Id'}
+        attemptGeneration: {type: integer, minimum: 1, maximum: 2147483647}
+    Source:
+      type: object
+      required: [sourceNamespace, sourceId, sourceVersion, sha256, byteCount]
+      properties:
+        sourceNamespace: {type: string, minLength: 1, maxLength: 1024, description: 'At most 1024 UTF-8 bytes; installation and provider namespace.'}
+        sourceId: {type: string, minLength: 1, maxLength: 1024, description: At most 1024 UTF-8 bytes.}
+        sourceVersion: {type: string, minLength: 1, maxLength: 1024, description: At most 1024 UTF-8 bytes.}
+        sha256: {$ref: '#/components/schemas/Sha256'}
+        byteCount: {type: integer, format: int64, minimum: 0}
+    PlanItem:
+      allOf:
+        - {$ref: '#/components/schemas/Identity'}
+        - {$ref: '#/components/schemas/Source'}
+        - type: object
+          required: [name, mimeType]
+          properties:
+            name: {type: string, minLength: 1, maxLength: 1024, description: At most 1024 UTF-8 bytes; no control characters.}
+            mimeType: {type: string, minLength: 1, maxLength: 128, description: At most 128 UTF-8 bytes; no control characters.}
+      unevaluatedProperties: false
+    Envelope:
+      type: object
+      required: [protocolVersion, requestId, items]
+      properties:
+        protocolVersion: {const: 2}
+        requestId: {$ref: '#/components/schemas/Id'}
+        items: {type: array, minItems: 1, maxItems: 32}
+    PlanRequest:
+      allOf:
+        - {$ref: '#/components/schemas/Envelope'}
+        - type: object
+          properties:
+            items: {type: array, items: {$ref: '#/components/schemas/PlanItem'}}
+      unevaluatedProperties: false
+    IdentityRequest:
+      allOf:
+        - {$ref: '#/components/schemas/Envelope'}
+        - type: object
+          properties:
+            items:
+              type: array
+              items:
+                allOf: [{$ref: '#/components/schemas/Identity'}]
+                unevaluatedProperties: false
+      unevaluatedProperties: false
+    Failure:
+      type: object
+      additionalProperties: false
+      required: [code, message]
+      properties:
+        code: {$ref: '#/components/schemas/Id'}
+        message: {type: string, minLength: 1, maxLength: 4096}
+    Receipt:
+      allOf:
+        - {$ref: '#/components/schemas/Identity'}
+        - {$ref: '#/components/schemas/Source'}
+        - type: object
+          required: [backupId, confirmedAt]
+          properties:
+            backupId: {$ref: '#/components/schemas/Id'}
+            confirmedAt: {$ref: '#/components/schemas/Timestamp'}
+      unevaluatedProperties: false
+    Upload:
+      description: |
+        A credential, maximum 8192 encoded bytes; store in protected platform storage.
+        PUT the stable original file to url with exactly these authorization headers.
+        Default lifetime is 24h; expiresAt is authoritative. Allowed success codes
+        do not promise business confirmation and their bodies may be empty.
+      allOf:
+        - {$ref: '#/components/schemas/Identity'}
+        - type: object
+          required: [uploadId, sha256, byteCount, url, headers, expiresAt, successStatusCodes]
+          properties:
+            uploadId: {$ref: '#/components/schemas/Id'}
+            sha256: {$ref: '#/components/schemas/Sha256'}
+            byteCount: {type: integer, minimum: 0, maximum: 536870912}
+            url: {type: string, format: uri, maxLength: 8192}
+            headers:
+              type: array
+              maxItems: 32
+              items:
+                type: object
+                additionalProperties: false
+                required: [name, value]
+                properties:
+                  name: {type: string, minLength: 1, maxLength: 128}
+                  value: {type: string, maxLength: 8192}
+            expiresAt: {$ref: '#/components/schemas/Timestamp'}
+            successStatusCodes:
+              type: array
+              minItems: 1
+              maxItems: 3
+              uniqueItems: true
+              items: {enum: [200, 201, 204]}
+      unevaluatedProperties: false
+    Result:
+      allOf:
+        - {$ref: '#/components/schemas/Identity'}
+        - oneOf:
+            - type: object
+              required: [status, receipt]
+              properties:
+                status: {const: Confirmed}
+                receipt: {$ref: '#/components/schemas/Receipt'}
+            - type: object
+              required: [status, upload]
+              properties:
+                status: {const: UploadRequired}
+                upload: {$ref: '#/components/schemas/Upload'}
+            - type: object
+              required: [status, nextCheckAt]
+              properties:
+                status: {enum: [Pending, Verifying]}
+                nextCheckAt: {$ref: '#/components/schemas/Timestamp'}
+            - type: object
+              required: [status, error]
+              properties:
+                status: {const: Rejected}
+                error: {$ref: '#/components/schemas/Failure'}
+            - type: object
+              required: [status]
+              properties:
+                status: {enum: [Canceled, Absent]}
+      unevaluatedProperties: false
+    Limits:
+      type: object
+      additionalProperties: false
+      required: [maxItems, maxRequestBytes, maxResponseBytes, maxDescriptorBytes, maxFileBytes]
+      properties:
+        maxItems: {const: 32}
+        maxRequestBytes: {const: 262144}
+        maxResponseBytes: {const: 524288}
+        maxDescriptorBytes: {const: 8192}
+        maxFileBytes: {const: 536870912}
+    BatchResponse:
+      type: object
+      additionalProperties: false
+      required: [protocolVersion, requestId, account, serverTime, limits, items]
+      properties:
+        protocolVersion: {const: 2}
+        requestId: {$ref: '#/components/schemas/Id'}
+        account: {type: string, minLength: 1, maxLength: 1024}
+        serverTime: {$ref: '#/components/schemas/Timestamp'}
+        limits: {$ref: '#/components/schemas/Limits'}
+        items: {type: array, minItems: 1, maxItems: 32, items: {$ref: '#/components/schemas/Result'}}
+    BackupRecord:
+      allOf:
+        - {$ref: '#/components/schemas/Source'}
+        - type: object
+          required: [backupId, sequence, name, mimeType, confirmedAt]
+          properties:
+            backupId: {$ref: '#/components/schemas/Id'}
+            sequence: {type: integer, minimum: 1}
+            name: {type: string}
+            mimeType: {type: string}
+            confirmedAt: {$ref: '#/components/schemas/Timestamp'}
+      unevaluatedProperties: false

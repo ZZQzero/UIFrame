@@ -5,6 +5,7 @@ import subprocess
 import sys
 import tempfile
 from process_windows import Repository, IDENTITY, HASH
+from protocol_fixture import NOW, control
 
 
 def main():
@@ -19,13 +20,17 @@ def main():
         db.call(58, 'aa')
         db.call(2, 'bb', 'aa', 1, 1, 'cc', 'file:photo', 'v1', 'photo.jpg', 'image/jpeg', 4)
         (args.worker / IDENTITY / 'payloads/cc.payload').write_bytes(b'test')
-        db.call(3, 'cc', 'aa', 4, HASH, HASH, 'image/jpeg', 1024, 2)
-        db.call(4, 'bb', 'aa', 3); db.call(9, 'cc', 0, 0, 4, 'aa')
-        db.call(12, 'cc', 1, 3, '', 'unknown', 5, 4, HASH); db.call(13, 'cc', 1, 1, 1)
-        db.call(77, 'cc')
+        db.call(3, 'cc', 'aa', 4, HASH, 'image/jpeg', 1024, 2)
+        db.call(96, 'cc', 'aa', 3); db.call(9, 'cc', 0, 0, 4)
+        db.call(74, 'cc', 1, 'protected')
+        control(db, 'ce')
+        db.call(86, 'ce', 'response lost', NOW, 0); db.call(87, 'ce'); db.call(102, 'cc', 1)
+        db.call(101, 'cc', NOW, 0, 'renewed')
+        control(db, 'cf')
         if args.retry:
-            db.call(14, 'cc', 3, 6)
-            assert not db.call(9, 'cc', 0, 0, 7, 'aa')[-1]
+            try: db.call(14, 'cc', 3, NOW)
+            except AssertionError: pass
+            else: raise AssertionError('Retry bypassed an active reconciliation')
         print('ready', flush=True)
         sys.stdin.read(1)
         return
@@ -46,16 +51,16 @@ def main():
             db = Repository(args.core, args.repository, root, False)
             try:
                 row = db.call(7, 'cc')[-1][0]
-                assert row['state'] == (0 if retry else 6) and row['current_generation'] == 1
+                assert row['state'] == 2 and row['current_generation'] == 1
                 attempt = db.call(60, 'cc', 1)[-1][0]
-                assert attempt['execution_state'] == 4 and attempt['payload_released'] == 1
-                if retry:
-                    assert db.call(9, 'cc', 0, 0, 8, 'aa')[-1][0]['current_generation'] == 2
-                    db.call(12, 'cc', 2, 2, '', 'local failure before new transfer', 9, 4, HASH)
-                    db.call(13, 'cc', 2, 1, 1)
-                    assert db.call(7, 'cc')[-1][0]['state'] == 6
-                assert db.call(77, 'cc')[-1]
-                db.call(78, HASH)
+                assert attempt['control_id'] == 'cf' and attempt['credential_released'] == 0
+                db.call(88, 'cf', 'Query interrupted', NOW, 0); db.call(87, 'cf'); db.call(102, 'cc', 1)
+                assert db.call(7, 'cc')[-1][0]['state'] == 6
+                try: db.call(14, 'cc', 3, NOW)
+                except AssertionError: pass
+                else: raise AssertionError('Unknown result allowed retry')
+                db.call(101, 'cc', NOW, 0, 'renewed-again')
+                assert db.call(7, 'cc')[-1][0]['current_generation'] == 1
             finally:
                 db.close()
             print('reconciliation with persisted retry=%s: passed' % retry)

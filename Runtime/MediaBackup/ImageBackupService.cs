@@ -21,30 +21,17 @@ namespace Game.Media.Backup
         readonly BackupRepository repository;
         readonly string root, server, account, owner;
         readonly long budget, maximum;
-        readonly bool nativeEnabled, nativeWifiOnly, retryEnabled;
-        readonly int retryLimit;
+        readonly bool nativeEnabled, nativeWifiOnly;
+        readonly BackupTransferMode transferMode;
         readonly Func<string> accessToken;
         readonly Func<NativeBackupRequest, NativeBackupStatus> nativeCall;
         readonly bool nativeAvailable;
         readonly HttpClient client;
         readonly TimeSpan requestTimeout;
         readonly CancellationTokenSource lifetime=new CancellationTokenSource();
-        CancellationTokenSource processing;
-        ServerCapabilities capabilities;
-        Exception callbackFailure, capabilityFailure;
-        bool disposed, closing, running, accepting, pausing, paused, refreshingCapabilities;
+        bool disposed, closing, running, accepting, pausing, paused;
         int downloads, metadataReads, operations;
-        TransferAttempt activeTransfer;
-        sealed class TransferAttempt : IDisposable
-        {
-            internal readonly string TaskId;
-            internal readonly CancellationTokenSource Cancellation;
-            internal bool OutcomeUnknown;
-            internal TransferAttempt(string id,CancellationToken token)
-            {TaskId=id;Cancellation=CancellationTokenSource.CreateLinkedTokenSource(token);}
-            internal void PendingResponse(){OutcomeUnknown=false;}
-            public void Dispose(){Cancellation.Dispose();}
-        }
+        public BackupTransferMode TransferMode => transferMode;
         public bool IsRunning => running;
         public bool IsPaused => paused;
         public bool SupportsNativeBackgroundTransfer => nativeAvailable;
@@ -72,8 +59,8 @@ namespace Game.Media.Backup
             var copy=new BackupConfiguration { ServerUrl=configuration.ServerUrl,Account=configuration.Account,StorageDirectory=configuration.StorageDirectory,
                 AccessToken=configuration.AccessToken,AllowDevelopmentHttp=configuration.AllowDevelopmentHttp,
                 EnableNativeBackgroundTransfer=configuration.EnableNativeBackgroundTransfer,NativeWifiOnly=configuration.NativeWifiOnly,
-                DiskBudgetBytes=configuration.DiskBudgetBytes,MaxFileBytes=configuration.MaxFileBytes,EnableTransientRetries=configuration.EnableTransientRetries,
-                MaxRetries=configuration.MaxRetries,RequestTimeout=configuration.RequestTimeout };
+                DiskBudgetBytes=configuration.DiskBudgetBytes,MaxFileBytes=configuration.MaxFileBytes,TransferMode=configuration.TransferMode,
+                RequestTimeout=configuration.RequestTimeout };
             Validate(copy,available);
             if(copy.EnableNativeBackgroundTransfer)
             {
@@ -100,24 +87,36 @@ namespace Game.Media.Backup
                 throw new ArgumentException("A server base URL without credentials, query or fragment is required.");
             if(uri.Scheme!="https" && !(c.AllowDevelopmentHttp && uri.Scheme=="http" && IsLocal(uri.Host))) throw new ArgumentException("HTTPS is required; development HTTP must use an explicit local address.");
             if(string.IsNullOrWhiteSpace(c.Account) || c.AccessToken==null) throw new ArgumentException("Account and token provider are required.");
+            ValidateProtocolText(c.Account,1024,nameof(c.Account));
             if(string.IsNullOrWhiteSpace(c.StorageDirectory) || !Path.IsPathRooted(c.StorageDirectory)) throw new ArgumentException("Absolute backup storage directory required.");
-            if(c.DiskBudgetBytes<=0 || c.MaxFileBytes<=0 || c.MaxRetries<0 || c.MaxRetries>5 || c.RequestTimeout<=TimeSpan.Zero || c.RequestTimeout.TotalMilliseconds>int.MaxValue)
+            if(c.DiskBudgetBytes<=0 || c.MaxFileBytes<=0 || c.MaxFileBytes>512L*1024*1024 || !Enum.IsDefined(typeof(BackupTransferMode),c.TransferMode) || c.RequestTimeout<=TimeSpan.Zero || c.RequestTimeout.TotalMilliseconds>int.MaxValue)
                 throw new ArgumentOutOfRangeException(nameof(c));
             if(c.EnableNativeBackgroundTransfer && !available) throw new PlatformNotSupportedException("Native background transfer requires an Android or iOS player.");
-            if(c.EnableNativeBackgroundTransfer && c.EnableTransientRetries) throw new ArgumentException("Managed retry policy cannot be combined with native background transfer.");
         }
         ImageBackupService(BackupConfiguration c,Func<NativeBackupRequest,NativeBackupStatus> bridge,bool available,HttpMessageHandler handler,CancellationToken token)
         {
             nativeCall=bridge??throw new ArgumentNullException(nameof(bridge)); nativeAvailable=available;
             server=new Uri(c.ServerUrl).AbsoluteUri.TrimEnd('/'); account=c.Account; owner=Guid.NewGuid().ToString("N");
             budget=c.DiskBudgetBytes; maximum=c.MaxFileBytes; accessToken=c.AccessToken; requestTimeout=c.RequestTimeout;
-            nativeEnabled=c.EnableNativeBackgroundTransfer; nativeWifiOnly=c.NativeWifiOnly; retryEnabled=c.EnableTransientRetries; retryLimit=c.MaxRetries;
+            nativeEnabled=c.EnableNativeBackgroundTransfer; nativeWifiOnly=c.NativeWifiOnly; transferMode=c.TransferMode;
             token.ThrowIfCancellationRequested();
             repository=new BackupRepository(c.StorageDirectory,Hash(server+"\n"+account),server,account); root=repository.Directory;
             try
             {
                 repository.Execute(Command.BindPreparer,owner);
+                repository.Execute(Command.ProtocolConfigure,c.AllowDevelopmentHttp,(int)c.TransferMode);
                 while(repository.Execute(Command.RecoverPreparations,owner,Now,32).Single.Number("recovered")!=0) token.ThrowIfCancellationRequested();
+                for(;;)
+                {
+                    var controls=repository.Execute(Command.Controls,0,"").Rows;
+                    foreach(var control in controls)
+                    {
+                        token.ThrowIfCancellationRequested();
+                        if(control.Number("state")<4)repository.Execute(Command.ControlRecover,control.Text("id"),"Desktop process ended; explicitly reconcile the server result",Now,false);
+                        repository.Execute(Command.ControlRelease,control.Text("id"));
+                    }
+                    if(controls.Count<32)break;
+                }
                 for(int executor=0;executor<=2;executor++)
                 {
                 long cursor=0;
@@ -147,9 +146,11 @@ namespace Game.Media.Backup
         static BackupTaskInfo TaskInfo(BackupRepository.Row r) => new BackupTaskInfo {
             id=r.Text("id"),batchId=r.Text("batch_id"),sequence=r.Number("sequence"),generation=r.Number("current_generation"),
             source=r.Text("source_id"),version=r.Text("content_version"),state=(BackupState)r.Number("state"),desiredAction=(int)r.Number("desired_action"),
-            name=r.Text("name"),mime=r.Text("mime"),key=r.Text("idempotency_key"),sha256=r.Text("sha256"),size=r.Number("byte_count"),
-            confirmedBytes=r.Number("confirmed_bytes"),nextAttemptUtcTicks=r.Number("next_attempt_utc"),retries=(int)r.Number("retries"),backupId=r.Text("backup_id"),error=r.Text("error"),relativePath=r.Text("relative_path"),
+            name=r.Text("name"),mime=r.Text("mime"),sha256=r.Text("sha256"),size=r.Number("byte_count"),
+            confirmedBytes=r.Number("confirmed_bytes"),backupId=r.Text("backup_id"),error=r.Text("error"),relativePath=r.Text("relative_path"),
             nativeOwned=r.Number("executor")!=0 && (!r.Flag("payload_released") || !r.Flag("credential_released")),
+            phase=(BackupProtocolPhase)r.Number("protocol_phase"),
+            acceptance=Acceptance((BackupState)r.Number("state"),r.Number("submission_state")>0,r.Flag("system_scheduled")),
             cleanupPending=r.Number("file_state")==2 || r.Number("file_state")==4 || r.Number("file_state")==5,cleanupError=r.Text("cleanup_error") };
         public async UniTask<BackupTaskPage> QueryTasksAsync(BackupTaskQuery query=null,CancellationToken cancellationToken=default)
         {
@@ -188,278 +189,6 @@ namespace Game.Media.Backup
             var records=rows.Select(Receipt).ToList().AsReadOnly(); var last=records.Count==0?null:records[records.Count-1];
             return new BackupReceiptPage(records,records.Count==pageSize?new BackupReceiptCursor(StoreId,last.ConfirmedUtc.Ticks,last.BackupId):null);
         }
-        public async UniTask<IReadOnlyList<string>> EnqueueAsync(IReadOnlyList<ImageReference> images,CancellationToken cancellationToken=default)
-        {
-            try { return await EnqueueBatchAsync(images,cancellationToken); }
-            catch(BackupSourceFailure failure) { failure.Original.Throw(); throw; }
-        }
-        internal async UniTask<IReadOnlyList<string>> EnqueueBatchAsync(IReadOnlyList<ImageReference> images,CancellationToken token,string operationId=null)
-        {
-            using var operation=EnterOperation();
-            Check(); if(images==null || images.Count<1 || images.Count>32) throw new ArgumentException("A durable preparation batch contains 1-32 images.");
-            if(accepting) throw new InvalidOperationException("Another preparation is active.");
-            var sources=images.ToArray(); if(sources.Any(x=>x==null || string.IsNullOrEmpty(x.Version))) throw new ArgumentException("Every image needs a current source identity and version.");
-            token.ThrowIfCancellationRequested(); accepting=true;
-            using var linked=CancellationTokenSource.CreateLinkedTokenSource(token,lifetime.Token); token=linked.Token;
-            string batch=operationId??Guid.NewGuid().ToString("N"); bool prepared=false,accepted=false,unknown=false;
-            var leases=new List<IDisposable>(sources.Length); var ids=new List<string>(sources.Length); var cleanup=new UIFrame.CleanupFailure();
-            try
-            {
-                var args=new List<object>{batch,owner,Now,sources.Length};
-                foreach(var image in sources)
-                {
-                    leases.Add(image.Acquire()); string id=Guid.NewGuid().ToString("N"); ids.Add(id);
-                    args.AddRange(new object[]{id,image.Source+":"+image.OriginId,image.Version,image.FileName,image.MimeType,0L});
-                }
-                await Db(Command.Prepare,token,args.ToArray()); prepared=true;
-                for(int i=0;i<sources.Length;i++)
-                {
-                    token.ThrowIfCancellationRequested(); var image=sources[i];
-                    if(image.ByteCount>maximum) throw new BackupSourceFailure(new IOException("Image exceeds the per-file backup limit."));
-                    long occupied=(await Db(Command.FileSummary,token)).Rows.Where(x=>x.Number("state")!=3).Sum(x=>x.Number("bytes"));
-                    long free=(await Db(Command.Storage,token)).Single.Number("available_bytes")-16L*1024*1024;
-                    long available=Math.Min(budget-occupied,free); if(available<=0 || image.ByteCount>available) throw new BackupBudgetExceededException();
-                    await Db(Command.ReservePayload,token,ids[i],owner,Math.Min(maximum,available),budget,Now);
-                    if(image.Source!="file")await ValidateSource(image,token);
-                    var value=await PreparePayload(image,Path.Combine(root,"payloads",ids[i]+".payload"),available,token);
-                    if(image.Source!="file")await ValidateSource(image,token);
-                    await Db(Command.Seal,token,ids[i],owner,value.size,value.hash,Hash(image.Source+":"+image.OriginId+"\n"+value.hash),value.mime,budget,Now);
-                }
-                await Db(Command.Accept,token,batch,owner,Now); accepted=true;
-            }
-            catch(Exception error)
-            {
-                unknown=error is BackupRepositoryException repositoryError && repositoryError.CommitOutcomeUnknown;
-                cleanup.Capture(error);
-            }
-            finally
-            {
-                if(prepared && !accepted && !unknown)
-                {
-                    try { await Db(Command.Abandon,default,batch,owner,Now,"Preparation did not complete");await CleanupFilesAsync(default,32); }
-                    catch(Exception error) { cleanup.Capture(error); }
-                }
-                foreach(var lease in leases) if(lease!=null) cleanup.Run(lease.Dispose);
-                accepting=false;
-            }
-            cleanup.Throw(); return ids.AsReadOnly();
-        }
-        public UniTask ProcessAsync(CancellationToken cancellationToken=default,Func<bool> canTransfer=null)
-            => ProcessTasksAsync(null,cancellationToken,canTransfer);
-        internal async UniTask ProcessTasksAsync(IReadOnlyList<string> ids,CancellationToken token,Func<bool> canTransfer=null)
-        {
-            using var operation=EnterOperation();
-            Check(); if(running || pausing || refreshingCapabilities) throw new InvalidOperationException("A backup pass, queue control or capability refresh is already active.");
-            if(nativeEnabled && canTransfer!=null) throw new ArgumentException("A managed callback cannot enforce background network policy.");
-            if(ids!=null && ids.Count>32) throw new ArgumentException("An explicit processing batch contains at most 32 tasks.");
-            token.ThrowIfCancellationRequested();
-            running=true; callbackFailure=null; capabilityFailure=null;
-            CancellationTokenSource passCancellation=null;
-            try
-            {
-                passCancellation=CancellationTokenSource.CreateLinkedTokenSource(token,lifetime.Token);
-                processing=passCancellation;token=passCancellation.Token;
-                if((await GetSummaryCoreAsync(token)).QueuePaused) return;
-                if(!CanTransfer(canTransfer)) return;
-                long upper=(await Db(Command.Info,token)).Single.Number("upper_sequence"),after=0,passTime=Now; int index=0;
-                for(;;)
-                {
-                    IReadOnlyList<BackupTaskInfo> page;
-                    if(ids==null) page=(await Db(Command.Ready,token,after,upper,passTime,100)).Rows.Select(TaskInfo).ToList();
-                    else
-                    {
-                        if(index>=ids.Count) break;
-                        var one=await GetTaskCoreAsync(ids[index++],token); if(one==null) throw new ArgumentException("Task does not exist."); page=new[]{one};
-                    }
-                    foreach(var candidate in page)
-                    {
-                        after=candidate.sequence; if(candidate.state!=BackupState.Queued && candidate.state!=BackupState.RetryScheduled || candidate.nextAttemptUtcTicks>passTime) continue;
-                        if(!CanTransfer(canTransfer)) return;
-                        await EnsureCapabilities(token);
-                        var claim=await Db(Command.Claim,token,candidate.id,nativeEnabled?(Application.platform==RuntimePlatform.Android?1:2):0,nativeWifiOnly,Now,owner);
-                        if(claim.Rows.Count==0)continue;
-                        var record=TaskInfo(claim.Single);
-                        using var transfer=new TransferAttempt(record.id,token);
-                        activeTransfer=transfer;var transferToken=transfer.Cancellation.Token;
-                        bool handedOff=false,determined=false; ExceptionDispatchInfo primary=null; Exception retryFailure=null;
-                        try
-                        {
-                            if(record.size>capabilities.maxFileBytes) throw new IOException("Image exceeds server file limit.");
-                            if(nativeEnabled)
-                            {
-                                var session=await CreateSession(record,transferToken,transfer);
-                                if(session.completed) { await Confirm(record,session); determined=true; }
-                                else
-                                {
-                                    string credential=GetAccessToken(); if(string.IsNullOrWhiteSpace(credential)) throw new InvalidOperationException("No access token available.");
-                                    transferToken.ThrowIfCancellationRequested(); handedOff=true;
-                                    try { await Platform(new NativeBackupRequest { op="submit",repository=StoreId,id=record.id,generation=record.generation,token=credential }); }
-                                    catch {
-                                        try { handedOff=(await Db(Command.Attempt,default,record.id,record.generation)).Single.Number("submission_state")>0; }
-                                        catch(Exception lookup){Debug.LogException(lookup);}
-                                        throw;
-                                    }
-                                }
-                            }
-                            else
-                            {
-                                var started=await Db(Command.Start,transferToken,record.id,record.generation);
-                                if(started.Rows.Count==0) await Finish(record,4,"Execution stopped before network admission");
-                                else
-                                {
-                                    var response=await Upload(record,transferToken,canTransfer,transfer);
-                                    if(response==null) await Finish(record,transfer.OutcomeUnknown?3:4,"Transfer deferred before commit");
-                                    else await Confirm(record,response);
-                                }
-                                determined=true;
-                            }
-                        }
-                        catch(Exception error)
-                        {
-                            if(error is BackupRepositoryException || handedOff) { primary=ExceptionDispatchInfo.Capture(error); }
-                            else
-                            {
-                            int outcome=transfer.OutcomeUnknown?3:transferToken.IsCancellationRequested?4:2;
-                            try { await Finish(record,outcome,error.ToString()); determined=true; }
-                            catch(Exception persistence) { Debug.LogException(persistence); primary=ExceptionDispatchInfo.Capture(error); }
-                            if(token.IsCancellationRequested || ReferenceEquals(error,callbackFailure) || ReferenceEquals(error,capabilityFailure)) primary=ExceptionDispatchInfo.Capture(error);
-                            if(retryEnabled && !transferToken.IsCancellationRequested && Transient(error)) retryFailure=error;
-                            }
-                        }
-                        finally
-                        {
-                            try
-                            {
-                                if(!handedOff)
-                                {
-                                    try
-                                    {
-                                        if(determined) await Db(Command.Release,default,record.id,record.generation,true,!nativeEnabled);
-                                        else await Db(Command.RecoverAttempt,default,record.id,record.generation,Now);
-                                        if(nativeEnabled)await Platform(new NativeBackupRequest {op="sync",repository=StoreId});
-                                    }
-                                    catch(Exception cleanup) { if(primary==null) primary=ExceptionDispatchInfo.Capture(cleanup); else Debug.LogException(cleanup); }
-                                }
-                            }
-                            finally {activeTransfer=null;}
-                        }
-                        primary?.Throw();
-                        if(retryFailure!=null)
-                        {
-                            long delay=retryFailure is BackupHttpException http && http.RetryAfter.HasValue?Math.Max(0,http.RetryAfter.Value.Ticks):0;
-                            await Db(Command.ScheduleRetry,default,record.id,retryLimit,Now,delay);
-                        }
-                    }
-                    if(ids==null && page.Count<100) break;
-                }
-                await CleanupFilesAsync(token);
-            }
-            finally { processing=null;running=false;callbackFailure=null;capabilityFailure=null;passCancellation?.Dispose(); }
-        }
-        async UniTask<UploadResponse> CreateSession(BackupTaskInfo record,CancellationToken token,TransferAttempt transfer)
-        {
-            var response=await JsonRequest<UploadResponse>(HttpMethod.Post,"/v1/uploads",new UploadRequest {
-                key=record.key,sha256=record.sha256,size=record.size,name=record.name,mime=record.mime,source=record.source },token,transfer);
-            ValidateResponse(record,response);if(response.capabilities!=null)SetCapabilities(response.capabilities);
-            if(!response.completed)transfer.PendingResponse();return response;
-        }
-        async UniTask<UploadResponse> Upload(BackupTaskInfo record,CancellationToken token,Func<bool> canTransfer,TransferAttempt transfer)
-        {
-            if(!CanTransfer(canTransfer)) return null;
-            var session=await CreateSession(record,token,transfer); if(session.completed) return session;
-            using var input=File.OpenRead(Payload(record)); if(input.Length!=record.size) throw new IOException("Staged backup size changed.");
-            string actual=await UniTask.RunOnThreadPool(()=>HashFile(input,token)); if(actual!=record.sha256) throw new IOException("Staged backup checksum changed.");
-            input.Position=session.offset; var buffer=new byte[capabilities.chunkBytes];
-            while(input.Position<input.Length)
-            {
-                token.ThrowIfCancellationRequested(); if(!CanTransfer(canTransfer)) return null;
-                int length=await input.ReadAsync(buffer,0,buffer.Length,token); long previous=session.offset;
-                if(length==0) throw new EndOfStreamException("Staged backup was truncated.");
-                using var body=new ByteArrayContent(buffer,0,length);
-                session=await Send<UploadResponse>(HttpMethod.Put,"/v1/uploads/"+record.key+"?offset="+previous,body,token,transfer);
-                ValidateResponse(record,session); if(session.offset!=previous+length) throw new InvalidOperationException("Unexpected server upload position.");
-                if(!session.completed)transfer.PendingResponse();
-                await Db(Command.Progress,token,record.id,record.generation,session.offset,false,Now);
-            }
-            if(!CanTransfer(canTransfer)) return null;
-            await Db(Command.Progress,token,record.id,record.generation,record.size,true,Now);
-            session=await JsonRequest<UploadResponse>(HttpMethod.Post,"/v1/uploads/"+record.key+"/commit",null,token,transfer); ValidateResponse(record,session); return session;
-        }
-        UniTask<BackupRepository.Result> Finish(BackupTaskInfo record,int outcome,string error)
-            => Db(Command.Finish,default,record.id,record.generation,outcome,"",error,Now,record.size,record.sha256);
-        async UniTask Confirm(BackupTaskInfo record,UploadResponse response)
-        {
-            ValidateResponse(record,response);
-            if(!response.completed || string.IsNullOrEmpty(response.backupId) || response.offset!=record.size) throw new InvalidOperationException("Server did not confirm the verified backup.");
-            await Db(Command.Finish,default,record.id,record.generation,1,response.backupId,"",Now,record.size,record.sha256);
-        }
-        static void ValidateResponse(BackupTaskInfo record,UploadResponse response)
-        {
-            if(response==null || response.uploadId!=record.key || response.sha256!=record.sha256 || response.size!=record.size || response.offset<0 || response.offset>record.size)
-                throw new InvalidOperationException("Server upload identity, checksum or size mismatch.");
-        }
-        public async UniTask PauseAsync(CancellationToken cancellationToken=default)
-        {
-            using var operation=EnterOperation();
-            using var linked=CancellationTokenSource.CreateLinkedTokenSource(cancellationToken,lifetime.Token);cancellationToken=linked.Token;
-            Check(); if(pausing) throw new InvalidOperationException("Another queue control operation is active."); pausing=true;
-            try
-            {
-                await Db(Command.Pause,cancellationToken,true); paused=true; processing?.Cancel();
-                if(nativeEnabled) await Platform(new NativeBackupRequest { op="pause",repository=StoreId });
-                while(running) await UniTask.Yield(PlayerLoopTiming.Update,cancellationToken);
-                await WaitNativeRelease(null,cancellationToken);
-            }
-            finally { pausing=false; }
-        }
-        async UniTask WaitNativeRelease(string taskId,CancellationToken token)
-        {
-            if(!nativeEnabled)return;
-            for(;;)
-            {
-                bool owned;
-                if(taskId!=null)owned=(await GetTaskCoreAsync(taskId,token))?.nativeOwned==true;
-                else owned=(await Db(Command.Attempts,token,0,Application.platform==RuntimePlatform.Android?1:2,1)).Rows.Count!=0;
-                if(!owned)return;
-                // Wake also surfaces repository/adapter failures; cancellation stops only this wait.
-                await Platform(new NativeBackupRequest {op="sync",repository=StoreId});
-                await UniTask.Delay(100,ignoreTimeScale:true,cancellationToken:token);
-            }
-        }
-        internal async UniTask SynchronizeNativeAsync()
-        {
-            var transfer=activeTransfer;
-            if(transfer!=null)
-            {
-                var current=await GetTaskCoreAsync(transfer.TaskId);
-                if(ReferenceEquals(activeTransfer,transfer) && current!=null && current.desiredAction!=0)transfer.Cancellation.Cancel();
-            }
-            if(nativeEnabled)await Platform(new NativeBackupRequest {op="sync",repository=StoreId});
-        }
-        public async UniTask ResumeAsync(CancellationToken cancellationToken=default)
-        {
-            using var operation=EnterOperation();
-            Check();if(pausing)throw new InvalidOperationException("Another queue control operation is active.");pausing=true;
-            try {
-                await Db(Command.Pause,cancellationToken,false);paused=false;
-                if(nativeEnabled)await Platform(new NativeBackupRequest {op="wake",repository=StoreId});
-            }
-            finally {pausing=false;}
-        }
-        public async UniTask RetryAsync(string taskId,CancellationToken cancellationToken=default)
-        {
-            using var operation=EnterOperation(); Check(); await Db(Command.Action,cancellationToken,taskId,3,Now); }
-        public async UniTask CancelAsync(string taskId,CancellationToken cancellationToken=default)
-        {
-            using var operation=EnterOperation();
-            using var linked=CancellationTokenSource.CreateLinkedTokenSource(cancellationToken,lifetime.Token);cancellationToken=linked.Token;
-            Check(); await Db(Command.Action,cancellationToken,taskId,2,Now);
-            if(nativeEnabled) await Platform(new NativeBackupRequest { op="stop",repository=StoreId,id=taskId });
-            if(activeTransfer?.TaskId==taskId)activeTransfer.Cancellation.Cancel();
-            while(activeTransfer?.TaskId==taskId)await UniTask.Yield(PlayerLoopTiming.Update,cancellationToken);
-            await WaitNativeRelease(taskId,cancellationToken);
-            await CleanupFilesAsync(cancellationToken);
-        }
         public async UniTask<BackupFileCleanupPage> QueryCleanupFailuresAsync(int pageSize=100,BackupFileCleanupCursor cursor=null,CancellationToken cancellationToken=default)
         {
             using var operation=EnterOperation();
@@ -493,31 +222,11 @@ namespace Game.Media.Backup
             }
             return freed;
         }
-        void SetCapabilities(ServerCapabilities value)
-        {
-            try
-            {
-                if(value==null || value.protocolVersion!=1 || value.account!=account || value.chunkBytes<1 || value.chunkBytes>4*1024*1024 || value.maxFileBytes<0)
-                    throw new InvalidOperationException("Server protocol or authenticated account does not match configuration.");
-                if(nativeEnabled && !value.backgroundUpload) throw new InvalidOperationException("Server does not support background uploads."); capabilities=value;
-            }
-            catch(Exception error) { capabilities=null;capabilityFailure=error;throw; }
-        }
-        async UniTask EnsureCapabilities(CancellationToken token)
-        { if(capabilities==null) SetCapabilities(await JsonRequest<ServerCapabilities>(HttpMethod.Get,"/v1/capabilities",null,token)); }
-        public async UniTask RefreshServerCapabilitiesAsync(CancellationToken cancellationToken=default)
-        {
-            using var operation=EnterOperation();
-            Check();if(running || refreshingCapabilities)throw new InvalidOperationException("Await the active backup pass or capability refresh.");
-            refreshingCapabilities=true;using var linked=CancellationTokenSource.CreateLinkedTokenSource(cancellationToken,lifetime.Token);
-            try { SetCapabilities(await JsonRequest<ServerCapabilities>(HttpMethod.Get,"/v1/capabilities",null,linked.Token)); }
-            finally { refreshingCapabilities=false; }
-        }
         string Payload(BackupTaskInfo task) => Path.Combine(root,task.relativePath);
         internal static string Hash(string text) { using var sha=SHA256.Create();return Hex(sha.ComputeHash(Encoding.UTF8.GetBytes(text))); }
         static string Hex(byte[] bytes) => BitConverter.ToString(bytes).Replace("-","").ToLowerInvariant();
         void Check() { MediaThread.Check();if(disposed) throw new ObjectDisposedException(nameof(ImageBackupService)); }
-        void CheckIdle() { Check();if(running || accepting || pausing || refreshingCapabilities || drivingOperations || downloads!=0 || metadataReads!=0 || operations!=0) throw new InvalidOperationException("Cancel and await active service operations first."); }
+        void CheckIdle() { Check();if(running || accepting || pausing || drivingOperations || downloads!=0 || metadataReads!=0 || operations!=0) throw new InvalidOperationException("Cancel and await active service operations first."); }
         internal OperationLease EnterOperation()
         {
             Check();if(closing)throw new ObjectDisposedException(nameof(ImageBackupService));operations++;return new OperationLease(this);
@@ -532,13 +241,14 @@ namespace Game.Media.Backup
         {
             Check();if(closing)throw new InvalidOperationException("Backup shutdown is already active.");closing=true;
             var cleanup=new UIFrame.CleanupFailure();cleanup.Run(lifetime.Cancel);
-            while(running || accepting || pausing || refreshingCapabilities || drivingOperations || downloads!=0 || metadataReads!=0 || operations!=0)await UniTask.Yield();
+            while(running || accepting || pausing || drivingOperations || downloads!=0 || metadataReads!=0 || operations!=0)await UniTask.Yield();
+            if(executorFailure!=null)cleanup.Run(()=>System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(executorFailure).Throw());
             cleanup.Run(Dispose);cleanup.Throw();
         }
         public void Dispose()
         {
             if(disposed) return;CheckIdle();disposed=true;var cleanup=new UIFrame.CleanupFailure();
-            cleanup.Run(client.Dispose);cleanup.Run(repository.Dispose);cleanup.Run(lifetime.Dispose);cleanup.Throw();
+            desktopCredentials.Clear();cleanup.Run(desktopSignal.Dispose);cleanup.Run(client.Dispose);cleanup.Run(repository.Dispose);cleanup.Run(lifetime.Dispose);cleanup.Throw();
         }
         static async UniTask ValidateSource(ImageReference image,CancellationToken token)
         {
@@ -632,7 +342,7 @@ namespace Game.Media.Backup
             string temporary = destination + "." + Guid.NewGuid().ToString("N") + ".part";
             try
             {
-                using var request = Request(HttpMethod.Get, "/v1/backups/" + Uri.EscapeDataString(record.backupId) + "/content");
+                using var request = Request(HttpMethod.Get, "/v2/backups/" + Uri.EscapeDataString(record.backupId) + "/content");
                 await WithResponse(request, (response, token) => UniTask.RunOnThreadPool(async () =>
                 {
                     await CheckResponse(response, token);
@@ -668,28 +378,13 @@ namespace Game.Media.Backup
             if (IPAddress.IsLoopback(ip)) return true;
             var b = ip.GetAddressBytes(); return b.Length == 4 && (b[0] == 10 || b[0] == 192 && b[1] == 168 || b[0] == 172 && b[1] >= 16 && b[1] <= 31);
         }
-        async UniTask<T> JsonRequest<T>(HttpMethod method, string path, object data, CancellationToken token,TransferAttempt transfer=null)
-        {
-            using var body = data == null ? null : new StringContent(JsonUtility.ToJson(data), Encoding.UTF8, "application/json");
-            return await Send<T>(method, path, body, token,transfer);
-        }
-        async UniTask<T> Send<T>(HttpMethod method, string path, HttpContent content, CancellationToken token,TransferAttempt transfer=null)
-        {
-            using var request = Request(method, path); request.Content = content;
-            return await WithResponse(request, async (response, requestToken) =>
-            {
-                string text = await ReadResponse(response, requestToken); await CheckResponse(response, requestToken, text);
-                return JsonUtility.FromJson<T>(text);
-            }, token,transfer);
-        }
-        async UniTask<T> WithResponse<T>(HttpRequestMessage request, Func<HttpResponseMessage, CancellationToken, UniTask<T>> consume, CancellationToken token,TransferAttempt transfer=null)
+        async UniTask<T> WithResponse<T>(HttpRequestMessage request, Func<HttpResponseMessage, CancellationToken, UniTask<T>> consume, CancellationToken token)
         {
             using var deadline = CancellationTokenSource.CreateLinkedTokenSource(token);
             deadline.CancelAfter(requestTimeout);
             try
             {
                 token.ThrowIfCancellationRequested();
-                if(transfer!=null)transfer.OutcomeUnknown=true;
                 using var response = await client.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, deadline.Token);
                 // Disposing also interrupts response streams that do not implement cancellation themselves.
                 using var interruption = deadline.Token.Register(response.Dispose);
@@ -710,37 +405,26 @@ namespace Game.Media.Backup
         }
         internal static async UniTask<string> ReadResponse(HttpResponseMessage response, CancellationToken token)
         {
-            const int limit = 64 * 1024;
-            if (response.Content.Headers.ContentLength > limit) throw new IOException("Backup response exceeds 64 KiB.");
+            const int limit = 512 * 1024;
+            if (response.Content.Headers.ContentLength > limit) throw new IOException("Backup response exceeds 512 KiB.");
             using var input = await response.Content.ReadAsStreamAsync();
             using var output = new MemoryStream(); var buffer = new byte[4096];
             while (true)
             {
                 int n = await input.ReadAsync(buffer, 0, Math.Min(buffer.Length, limit + 1 - (int)output.Length), token);
                 if (n == 0) break;
-                if (output.Length + n > limit) throw new IOException("Backup response exceeds 64 KiB.");
+                if (output.Length + n > limit) throw new IOException("Backup response exceeds 512 KiB.");
                 output.Write(buffer, 0, n);
             }
-            return Encoding.UTF8.GetString(output.GetBuffer(), 0, (int)output.Length);
+            return new UTF8Encoding(false,true).GetString(output.GetBuffer(), 0, (int)output.Length);
         }
         static async UniTask CheckResponse(HttpResponseMessage response, CancellationToken token, string body = null)
         {
             if (response.IsSuccessStatusCode) return;
             TimeSpan? retry = response.Headers.RetryAfter?.Delta;
             if (!retry.HasValue && response.Headers.RetryAfter?.Date != null) retry = response.Headers.RetryAfter.Date.Value - DateTimeOffset.UtcNow;
-            throw new BackupHttpException((int)response.StatusCode, body ?? await ReadResponse(response, token), retry);
+            throw new BackupHttpException((int)response.StatusCode, "Backup HTTP request failed with status "+(int)response.StatusCode+".", retry);
         }
-        static bool Transient(Exception error) => error is HttpRequestException || error is TimeoutException || error is BackupHttpException http &&
-            (http.StatusCode == 408 || http.StatusCode == 429 || http.StatusCode == 500 || http.StatusCode == 502 || http.StatusCode == 503 || http.StatusCode == 504);
-        bool CanTransfer(Func<bool> policy)
-        {
-            try { return policy == null || policy(); }
-            catch (Exception error) { callbackFailure = error; throw; }
-        }
-        string GetAccessToken()
-        {
-            try { return accessToken(); }
-            catch (Exception error) { callbackFailure = error; throw; }
-        }
+        string GetAccessToken() => accessToken();
     }
 }

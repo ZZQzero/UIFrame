@@ -7,6 +7,34 @@ using Command = Game.Media.Backup.BackupRepository.Command;
 
 namespace Game.Media.Backup
 {
+    public sealed class BackupControlCleanupInfo
+    {
+        public string RequestId { get; internal set; }
+        public long AccountedBytes { get; internal set; }
+        public string Error { get; internal set; }
+        public DateTime CreatedUtc { get; internal set; }
+    }
+    public sealed partial class ImageBackupService
+    {
+        /// <summary>Bounded failure page. Continue with the last RequestId; an empty page ends enumeration.</summary>
+        public async UniTask<IReadOnlyList<BackupControlCleanupInfo>> GetControlCleanupFailuresAsync(string afterRequestId="",int pageSize=100,CancellationToken cancellationToken=default)
+        {
+            using var operation=EnterOperation();
+            if(afterRequestId==null)throw new ArgumentNullException(nameof(afterRequestId));
+            if(afterRequestId.Length!=0)ValidateId(afterRequestId,nameof(afterRequestId));
+            if(pageSize<1 || pageSize>200)throw new ArgumentOutOfRangeException(nameof(pageSize));
+            var rows=(await Db(Command.ControlCleanupFailures,cancellationToken,afterRequestId,pageSize)).Rows;
+            var result=new List<BackupControlCleanupInfo>(rows.Count);
+            foreach(var row in rows)result.Add(new BackupControlCleanupInfo {RequestId=row.Text("id"),AccountedBytes=row.Number("byte_count"),Error=row.Text("cleanup_error"),CreatedUtc=new DateTime(row.Number("created_utc"),DateTimeKind.Utc)});
+            return result.AsReadOnly();
+        }
+        /// <summary>Explicitly retries only this released control file. A failure remains queryable.</summary>
+        public async UniTask RetryControlCleanupAsync(string requestId,CancellationToken cancellationToken=default)
+        {
+            using var operation=EnterOperation();ValidateId(requestId,nameof(requestId));
+            await Db(Command.ControlCleanupRetry,cancellationToken,requestId,Now);
+        }
+    }
     public sealed class BackupRetentionPolicy
     {
         public TimeSpan HistoryAge { get; set; }=TimeSpan.FromDays(30);
@@ -52,7 +80,7 @@ namespace Game.Media.Backup
     public sealed class BackupFileCleanupInfo
     {
         public string FileId { get; internal set; }
-        /// <summary>Null when preparation ended before task acceptance.</summary>
+        /// <summary>The owning task, including a failed preparation.</summary>
         public string TaskId { get; internal set; }
         /// <summary>Bytes accounted against the staging budget; interrupted preparations may retain a reservation.</summary>
         public long AccountedBytes { get; internal set; }
@@ -130,7 +158,7 @@ namespace Game.Media.Backup
                     {
                         if(elapsed.Elapsed>=p.TimeSlice){result.TimeSliceEnded=true;return Complete();}
                         var deletion=await service.Db(Command.PruneTask,token,row.Text("id"),row.Number("updated_utc"));
-                        if(deletion.Tables[1].Count!=0)result.HistoryRemoved++;else result.Skipped++;remaining--;
+                        if(deletion.Tables[2].Count!=0)result.HistoryRemoved++;else result.Skipped++;remaining--;
                     }
                 }
                 if(remaining>0 && elapsed.Elapsed<p.TimeSlice)

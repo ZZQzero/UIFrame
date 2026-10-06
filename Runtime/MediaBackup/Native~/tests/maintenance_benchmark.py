@@ -55,7 +55,7 @@ def run(core, library, count, workload):
             elif workload == 'retained-files':
                 db.sql(page + "INSERT INTO file_records SELECT printf('%032x',n),'payloads/'||printf('%032x',n)||'.payload',1024,zeroblob(32),3,'seed',NULL,1 FROM page",
                        page + "INSERT INTO tasks(id,batch_id,source_id,content_version,state,file_id,created_utc,updated_utc) SELECT printf('%032x',n),'seed','asset:'||n,'v1',3,printf('%032x',n),1,1 FROM page",
-                       page + "INSERT INTO task_metadata(task_id,name,mime,idempotency_key) SELECT printf('%032x',n),'photo.jpg','image/jpeg',printf('%064x',n) FROM page")
+                       page + "INSERT INTO task_metadata(task_id,name,mime) SELECT printf('%032x',n),'photo.jpg' ,'image/jpeg' FROM page")
             else:
                 db.sql(page + "INSERT INTO discoveries(scope_id,source_id,content_version,disposition) SELECT 'aa',printf('asset:%09d',n),'v1',3 FROM page")
         result = dict(workload=workload, rows=count, seed_seconds=time.perf_counter()-started)

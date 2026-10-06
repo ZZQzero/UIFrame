@@ -1,5 +1,5 @@
 PRAGMA application_id=1430667843;
-PRAGMA user_version=1;
+PRAGMA user_version=2;
 CREATE TABLE store_settings (
     singleton INTEGER PRIMARY KEY CHECK(singleton=1),
     store_id TEXT NOT NULL UNIQUE,
@@ -8,7 +8,11 @@ CREATE TABLE store_settings (
     paused INTEGER NOT NULL CHECK(paused IN(0,1)),
     retained_after_seq INTEGER NOT NULL DEFAULT 0 CHECK(retained_after_seq>=0),
     automatic_policy BLOB,
-    native_wifi_only INTEGER NOT NULL DEFAULT 1 CHECK(native_wifi_only IN(0,1))
+    native_wifi_only INTEGER NOT NULL DEFAULT 1 CHECK(native_wifi_only IN(0,1)),
+    source_namespace TEXT NOT NULL DEFAULT '',
+    development_http INTEGER NOT NULL DEFAULT 0 CHECK(development_http IN(0,1)),
+    transfer_mode INTEGER NOT NULL DEFAULT 0 CHECK(transfer_mode IN(0,1)),
+    last_control_kind INTEGER NOT NULL DEFAULT 2 CHECK(last_control_kind BETWEEN 0 AND 2)
 ) STRICT;
 CREATE TABLE preparations (
     id TEXT PRIMARY KEY,
@@ -24,6 +28,7 @@ CREATE TABLE preparation_items (
     id TEXT NOT NULL,
     PRIMARY KEY(preparation_id,ordinal)
 ) WITHOUT ROWID, STRICT;
+CREATE INDEX preparations_active ON preparations(created_utc,id) WHERE phase=0;
 CREATE TABLE scopes (
     id TEXT PRIMARY KEY,
     source_id TEXT NOT NULL,
@@ -124,12 +129,11 @@ CREATE TABLE tasks (
     batch_id TEXT NOT NULL,
     source_id TEXT NOT NULL,
     content_version TEXT NOT NULL,
-    state INTEGER NOT NULL CHECK(state BETWEEN 0 AND 9),
+    state INTEGER NOT NULL CHECK(state IN(0,1,2,3,4,6,7,8,9)),
     desired_action INTEGER NOT NULL DEFAULT 0 CHECK(desired_action BETWEEN 0 AND 3),
     file_id TEXT REFERENCES file_records(id),
     backup_id TEXT REFERENCES backup_receipts(backup_id),
     current_generation INTEGER NOT NULL DEFAULT 0 CHECK(current_generation>=0),
-    next_attempt_utc INTEGER NOT NULL DEFAULT 0,
     created_utc INTEGER NOT NULL,
     updated_utc INTEGER NOT NULL,
     error TEXT
@@ -138,11 +142,8 @@ CREATE TABLE task_metadata (
     task_id TEXT PRIMARY KEY REFERENCES tasks(id) ON DELETE CASCADE,
     name TEXT NOT NULL,
     mime TEXT NOT NULL,
-    idempotency_key TEXT NOT NULL,
-    confirmed_bytes INTEGER NOT NULL DEFAULT 0 CHECK(confirmed_bytes>=0),
-    retries INTEGER NOT NULL DEFAULT 0 CHECK(retries>=0)
+    confirmed_bytes INTEGER NOT NULL DEFAULT 0 CHECK(confirmed_bytes>=0)
 ) STRICT;
-CREATE INDEX tasks_schedule ON tasks(state,next_attempt_utc,sequence);
 CREATE INDEX tasks_state_page ON tasks(state,sequence);
 CREATE INDEX tasks_batch ON tasks(batch_id,sequence);
 CREATE INDEX tasks_source ON tasks(source_id,content_version);
@@ -152,8 +153,6 @@ CREATE TABLE task_attempts (
     task_id TEXT NOT NULL REFERENCES tasks(id),
     generation INTEGER NOT NULL CHECK(generation>0),
     system_task_id TEXT,
-    session_id TEXT,
-    idempotency_key TEXT NOT NULL UNIQUE,
     submission_state INTEGER NOT NULL CHECK(submission_state BETWEEN 0 AND 2),
     execution_state INTEGER NOT NULL CHECK(execution_state BETWEEN 0 AND 4),
     server_outcome INTEGER NOT NULL CHECK(server_outcome BETWEEN 0 AND 2),
@@ -162,10 +161,50 @@ CREATE TABLE task_attempts (
     executor INTEGER NOT NULL DEFAULT 0 CHECK(executor BETWEEN 0 AND 2),
     credential_reference TEXT,
     wifi_only INTEGER NOT NULL DEFAULT 1 CHECK(wifi_only IN(0,1)),
+    protocol_phase INTEGER NOT NULL DEFAULT 0 CHECK(protocol_phase BETWEEN 0 AND 3),
+    upload_reference TEXT,
+    upload_expires_utc INTEGER NOT NULL DEFAULT 0,
+    upload_released INTEGER NOT NULL DEFAULT 1 CHECK(upload_released IN(0,1)),
+    control_id TEXT,
+    next_check_utc INTEGER NOT NULL DEFAULT 0,
+    confirm_deadline_utc INTEGER NOT NULL DEFAULT 0,
+    confirm_checks INTEGER NOT NULL DEFAULT 0,
+    system_scheduled INTEGER NOT NULL DEFAULT 0 CHECK(system_scheduled IN(0,1)),
     error TEXT,
     PRIMARY KEY(task_id,generation)
 ) WITHOUT ROWID, STRICT;
 CREATE UNIQUE INDEX attempts_unreleased ON task_attempts(task_id) WHERE payload_released=0 OR credential_released=0;
+CREATE INDEX attempts_protocol_work ON task_attempts(executor,protocol_phase,next_check_utc,task_id)
+ WHERE credential_released=0 AND control_id IS NULL;
+CREATE TABLE control_requests (
+    id TEXT PRIMARY KEY,
+    kind INTEGER NOT NULL CHECK(kind BETWEEN 0 AND 2),
+    executor INTEGER NOT NULL CHECK(executor BETWEEN 0 AND 2),
+    state INTEGER NOT NULL CHECK(state BETWEEN 0 AND 5),
+    relative_path TEXT NOT NULL UNIQUE,
+    body TEXT NOT NULL CHECK(length(CAST(body AS BLOB))<=262144),
+    byte_count INTEGER NOT NULL CHECK(byte_count BETWEEN 1 AND 262144),
+    not_before_utc INTEGER NOT NULL,
+    created_utc INTEGER NOT NULL,
+    system_task_id TEXT,
+    released INTEGER NOT NULL DEFAULT 0 CHECK(released IN(0,1)),
+    cleanup_state INTEGER NOT NULL DEFAULT 0 CHECK(cleanup_state BETWEEN 0 AND 3),
+    error TEXT,
+    cleanup_error TEXT
+) STRICT;
+CREATE INDEX controls_active ON control_requests(executor,not_before_utc,id) WHERE released=0;
+CREATE INDEX controls_cleanup ON control_requests(cleanup_state,id) WHERE released=1 AND cleanup_state<>2;
+CREATE INDEX controls_budget ON control_requests(byte_count) WHERE cleanup_state<>2;
+CREATE INDEX controls_history ON control_requests(created_utc,id) WHERE released=1 AND cleanup_state=2;
+CREATE TABLE control_items (
+    request_id TEXT NOT NULL REFERENCES control_requests(id),
+    task_id TEXT NOT NULL,
+    generation INTEGER NOT NULL,
+    applied INTEGER NOT NULL DEFAULT 0 CHECK(applied IN(0,1)),
+    PRIMARY KEY(request_id,task_id,generation),
+    FOREIGN KEY(task_id,generation) REFERENCES task_attempts(task_id,generation)
+) WITHOUT ROWID, STRICT;
+CREATE INDEX control_items_task ON control_items(task_id,generation,request_id);
 CREATE TABLE operations (
     id TEXT PRIMARY KEY,
     parameter_fingerprint BLOB NOT NULL CHECK(length(parameter_fingerprint)=32),
@@ -210,7 +249,7 @@ CREATE TABLE task_counts (
     state INTEGER PRIMARY KEY CHECK(state BETWEEN 0 AND 9),
     count INTEGER NOT NULL CHECK(count>=0)
 ) STRICT;
-INSERT INTO task_counts VALUES(0,0),(1,0),(2,0),(3,0),(4,0),(5,0),(6,0),(7,0),(8,0),(9,0);
+INSERT INTO task_counts VALUES(0,0),(1,0),(2,0),(3,0),(4,0),(6,0),(7,0),(8,0),(9,0);
 CREATE TRIGGER tasks_insert AFTER INSERT ON tasks BEGIN
     UPDATE task_counts SET count=count+1 WHERE state=NEW.state;
     INSERT INTO change_log(object_id,kind,generation,created_utc) VALUES(NEW.id,0,NEW.current_generation,NEW.updated_utc);

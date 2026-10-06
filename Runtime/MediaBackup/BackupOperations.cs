@@ -43,14 +43,6 @@ namespace Game.Media.Backup
         public BackupOperationCursor Next { get; internal set; }
         public bool IsFinished => Phase==BackupOperationPhase.Completed || Phase==BackupOperationPhase.Failed;
     }
-    public sealed class BackupPreparationStatus
-    {
-        public string OperationId { get; internal set; }
-        public bool Accepted { get; internal set; }
-        public bool Abandoned { get; internal set; }
-        public string Error { get; internal set; }
-        public IReadOnlyList<string> TaskIds { get; internal set; }
-    }
     public sealed partial class ImageBackupService
     {
         public async UniTask<BackupChangePage> ReadChangesAsync(BackupChangeCursor cursor=null,int pageSize=100,CancellationToken cancellationToken=default)
@@ -75,21 +67,6 @@ namespace Game.Media.Backup
         {
             if(string.IsNullOrEmpty(value) || value.Length>64 || value.Any(c=>!(c>='0' && c<='9' || c>='a' && c<='f')))
                 throw new ArgumentException("A lowercase hexadecimal identity (1-64 characters) is required.",parameter);
-        }
-        public async UniTask<IReadOnlyList<string>> EnqueueAsync(string operationId,IReadOnlyList<ImageReference> images,CancellationToken cancellationToken=default)
-        {
-            ValidateId(operationId,nameof(operationId));
-            try { return await EnqueueBatchAsync(images,cancellationToken,operationId); }
-            catch(BackupSourceFailure failure) { failure.Original.Throw();throw; }
-        }
-        /// <summary>Reconcile an uncertain acceptance using the original caller-owned ID, including after task history is pruned.</summary>
-        public async UniTask<BackupPreparationStatus> QueryPreparationAsync(string operationId,CancellationToken cancellationToken=default)
-        {
-            using var operation=EnterOperation();
-            ValidateId(operationId,nameof(operationId));var result=await Db(Command.Preparation,cancellationToken,operationId);
-            if(result.Tables[0].Count==0)return null;var row=result.Tables[0][0];
-            return new BackupPreparationStatus { OperationId=operationId,Accepted=row.Number("phase")==1,Abandoned=row.Number("phase")==2,
-                Error=row.Text("error"),TaskIds=result.Rows.Select(r=>r.Text("id")).ToList().AsReadOnly() };
         }
         static BackupOperationStatus Operation(BackupRepository.Row row) => new BackupOperationStatus {
             OperationId=row.Text("id"),Action=(BackupAction)row.Number("action"),Phase=(BackupOperationPhase)row.Number("phase"),
@@ -189,38 +166,6 @@ namespace Game.Media.Backup
             catch(OperationCanceledException) when(lifetime.IsCancellationRequested) { }
             catch(Exception error){operationDriveFailure=error;throw;}
             finally {drivingOperations=false;}
-        }
-        /// <summary>Owns the server identity while checking and closing an incomplete session. Retry intent may be queued; a new attempt waits for this check to end.</summary>
-        public async UniTask ReconcileTaskAsync(string taskId,CancellationToken cancellationToken=default)
-        {
-            using var operation=EnterOperation();
-            using var linked=CancellationTokenSource.CreateLinkedTokenSource(cancellationToken,lifetime.Token);cancellationToken=linked.Token;
-            Check();var record=TaskInfo((await Db(Command.BeginReconcile,cancellationToken,taskId)).Single);
-            metadataReads++;var cleanup=new UIFrame.CleanupFailure();
-            try
-            {
-                UploadResponse response=null;
-                try {response=await JsonRequest<UploadResponse>(System.Net.Http.HttpMethod.Get,"/v1/uploads/"+record.key,null,cancellationToken);}
-                catch(BackupHttpException error) when(error.StatusCode==404 || error.StatusCode==410) { }
-                if(response!=null)
-                {
-                    ValidateResponse(record,response);
-                    if(response.completed)await Confirm(record,response);
-                    else
-                        // The repository lease prevents a new attempt using this
-                        // identity for the entire remote check, including DELETE.
-                        await JsonRequest<UploadResponse>(System.Net.Http.HttpMethod.Delete,"/v1/uploads/"+record.key,null,cancellationToken);
-                }
-                if(response==null || !response.completed)await Finish(record,5,"Server confirmed no committed backup; previous session closed");
-                await CleanupFilesAsync(cancellationToken);
-            }
-            catch(Exception error){cleanup.Capture(error);}
-            finally
-            {
-                try{await Db(Command.EndReconcile,default,record.key);}catch(Exception error){cleanup.Capture(error);}
-                metadataReads--;
-            }
-            cleanup.Throw();
         }
     }
 }

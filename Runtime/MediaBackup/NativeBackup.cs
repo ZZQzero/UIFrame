@@ -8,14 +8,12 @@ namespace Game.Media.Backup
     {
         public string op, repository, id, token;
         public long generation;
-        public bool wifiOnly;
+        public bool cancel;
     }
     [Serializable] internal sealed class NativeBackupStatus
     {
-        public string error, backupId, root;
-        public bool exists, released;
-        public BackupState state;
-        public long confirmedBytes;
+        public string error, root;
+        public bool exists;
     }
     internal static class NativeBackup
     {

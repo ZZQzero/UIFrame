@@ -26,15 +26,19 @@ namespace Game.Media.Backup
     {
         internal enum Command
         {
-            Info=1, Prepare=2, Seal=3, Accept=4, Abandon=5, Tasks=6, Task=7, Summary=8,
-            Claim=9, Submitted=10, Progress=11, Finish=12, Release=13, Action=14, Pause=15,
+            Info=1, Prepare=2, Seal=3, Tasks=6, Task=7, Summary=8,
+            Claim=9, Action=14, Pause=15,
             Receipts=16, Receipt=17, CleanupPage=18, CleanupRun=19, CleanupRetry=21,
-            Start=22, Attempts=23, Changes=24, Policy=25, SetPolicy=26,
+            Attempts=23, Changes=24, Policy=25, SetPolicy=26,
             Scope=30, BeginScan=31, ScanPage=32, ActivateScan=33, Discover=34, Discoveries=35, Disposition=36,
             Operation=40, SelectOperation=41, ApplyOperation=42, OperationStatus=43, OperationItems=44,
             HistoryPage=50, PruneTask=51, PruneOperation=52, Storage=53, Checkpoint=54,
             RecoverPreparations=55, FileSummary=56, RecoverAttempt=57, BindPreparer=58,
-            ScheduleRetry=59, Attempt=60, Ready=62, Preparation=64, ReservePayload=65, Operations=66, PruneChanges=67, PruneScans=68, SuspendScope=69, ResetScope=70, ResetScopePage=71, OperationCleanupPage=72, ScopeState=73, Handoff=74, Schedulable=75, CleanupFailures=76, BeginReconcile=77, EndReconcile=78
+            Attempt=60, Ready=62, ReservePayload=65, Operations=66, PruneChanges=67, PruneScans=68, SuspendScope=69, ResetScope=70, ResetScopePage=71, OperationCleanupPage=72, ScopeState=73, Handoff=74, Schedulable=75, CleanupFailures=76, ControlCreate=80, ControlSeal=81, ControlSubmitted=82, ControlStart=83, ControlValidate=84, ControlApply=85,
+            ControlFail=86, ControlRecover=88, ControlRelease=87, Controls=89, Uploads=90, UploadStart=91,
+            UploadEnd=92, UploadRelease=93, ProtocolActions=94, SystemScheduled=95, AcceptItem=96, FailItem=97,
+            Submission=98, ProtocolConfigure=99, ProtocolCleanup=100, ProtocolReconcile=101, ProtocolRelease=102, ProtocolResume=103,
+            Control=104, ProtocolWake=105, UploadReject=106, ControlCleanupFailures=107, ControlCleanupRetry=108
         }
         const int Limit = 1024 * 1024;
         const string Library =
@@ -51,7 +55,7 @@ namespace Game.Media.Backup
             internal int error, sqlite, committed;
             internal uint phase, length;
             [MarshalAs(UnmanagedType.ByValArray, SizeConst=256)] internal byte[] message;
-            internal static Status New() => new Status { size=284, abi=1, message=new byte[256] };
+            internal static Status New() => new Status { size=284, abi=2, message=new byte[256] };
         }
         [DllImport(Library, CallingConvention=CallingConvention.Cdecl)] static extern uint ufbackup_abi();
         [DllImport(Library, CallingConvention=CallingConvention.Cdecl)] static extern int ufbackup_open(
@@ -70,7 +74,7 @@ namespace Game.Media.Backup
         internal BackupRepository(string root, string storeId, string server, string account)
         {
             Root=Path.GetFullPath(root); StoreId=storeId; Directory=Path.Combine(Root,storeId);
-            if (ufbackup_abi()!=1) throw new InvalidOperationException("Backup repository native ABI mismatch.");
+            if (ufbackup_abi()!=2) throw new InvalidOperationException("Backup repository native ABI mismatch.");
             var status=Status.New();
             Check(ufbackup_open(Root,storeId,server,account,File.Exists(Path.Combine(Directory,"catalog.sqlite"))?0:1,out handle,ref status),status);
         }

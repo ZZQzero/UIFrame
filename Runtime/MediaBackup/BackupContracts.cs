@@ -13,7 +13,10 @@ using UnityEngine;
 
 namespace Game.Media.Backup
 {
-    public enum BackupState { Queued, Uploading, Verifying, Completed, Paused, RetryScheduled, NeedsAttention, Failed, Canceled, Preparing }
+    public enum BackupState { Queued, Uploading, Verifying, Completed, Paused, NeedsAttention=6, Failed, Canceled, Preparing }
+    public enum BackupTransferMode { Automatic, UserInitiated }
+    public enum BackupProtocolPhase { Registration, FileTransfer, Confirmation, Finished }
+    public enum BackupAcceptanceStage { Preparing, Prepared, NativeAccepted, SystemScheduled, Confirmed }
     internal sealed class BackupSourceFailure : Exception
     {
         internal readonly ExceptionDispatchInfo Original;
@@ -35,28 +38,56 @@ namespace Game.Media.Backup
         public bool NativeWifiOnly { get; set; } = true;
         public long DiskBudgetBytes { get; set; } = 512L * 1024 * 1024;
         public long MaxFileBytes { get; set; } = 512L * 1024 * 1024;
-        public bool EnableTransientRetries { get; set; }
-        public int MaxRetries { get; set; } = 5;
+        public BackupTransferMode TransferMode { get; set; }
         public TimeSpan RequestTimeout { get; set; } = TimeSpan.FromMinutes(2);
     }
 
     [Serializable]
     public sealed class BackupTaskInfo
     {
-        public string id, batchId, key, source, version, name, mime, sha256, backupId, error;
-        public long sequence, generation, size, confirmedBytes, nextAttemptUtcTicks;
+        public string id, batchId, source, version, name, mime, sha256, backupId, error;
+        public long sequence, generation, size, confirmedBytes;
         internal int desiredAction;
         internal string relativePath;
-        public int retries;
         public BackupState state;
         public bool nativeOwned, cleanupPending;
+        public BackupProtocolPhase phase;
+        public BackupAcceptanceStage acceptance;
         public string cleanupError;
         internal BackupTaskInfo Snapshot() => (BackupTaskInfo)MemberwiseClone();
     }
 
-    [Serializable] internal sealed class UploadRequest { public string key, sha256, name, mime, source; public long size; }
-    [Serializable] internal sealed class UploadResponse { public string uploadId, sha256, backupId; public long offset, size; public bool completed; public ServerCapabilities capabilities; }
-    [Serializable] internal sealed class ServerCapabilities { public int protocolVersion, chunkBytes; public long maxFileBytes; public string account; public bool backgroundUpload; }
+    public sealed class BackupSubmissionItem
+    {
+        public int Index { get; internal set; }
+        public string TaskId { get; internal set; }
+        public bool DetailsExpired { get; internal set; }
+        public BackupState? State { get; internal set; }
+        public BackupAcceptanceStage? Acceptance { get; internal set; }
+        public BackupProtocolPhase? Phase { get; internal set; }
+        public string Error { get; internal set; }
+    }
+    public sealed class BackupSubmissionResult
+    {
+        public string OperationId { get; internal set; }
+        public IReadOnlyList<BackupSubmissionItem> Items { get; internal set; }
+        public IReadOnlyList<string> AcceptedTaskIds => Items.Where(x=>x.Acceptance>=BackupAcceptanceStage.NativeAccepted).Select(x=>x.TaskId).ToList().AsReadOnly();
+    }
+    public sealed class BackupSubmissionException : AggregateException
+    {
+        public BackupSubmissionResult Result { get; }
+        public bool HasSharedFailure { get; }
+        internal BackupSubmissionException(BackupSubmissionResult result,IEnumerable<Exception> errors,bool sharedFailure=true)
+            :base("Some photos could not be submitted. Accepted tasks remain owned by their executor.",errors) {Result=result;HasSharedFailure=sharedFailure;}
+    }
+    [Serializable] internal sealed class BackupUploadHeader { public string name,value; }
+    [Serializable] internal sealed class BackupUploadDescriptor
+    {
+        public string uploadId,clientTaskId,sha256,url;
+        public long attemptGeneration,byteCount,expiresAt;
+        public BackupUploadHeader[] headers;
+        public int[] successStatusCodes;
+    }
     public sealed class BackupHttpException : Exception
     {
         public int StatusCode { get; }

@@ -6,7 +6,7 @@ import shutil
 
 
 def main():
-    parser=argparse.ArgumentParser();parser.add_argument('--project',type=Path,required=True);parser.add_argument('--host-project',type=Path,required=True);args=parser.parse_args()
+    parser=argparse.ArgumentParser();parser.add_argument('--project',type=Path,required=True);parser.add_argument('--host-project',type=Path,required=True);parser.add_argument('--backup-smoke-config',type=Path);args=parser.parse_args()
     package=Path(__file__).resolve().parents[2];target=args.project.resolve();base=args.host_project.resolve()
     for folder in ['Assets/UIFrame/Runtime','Assets/UIFrame/Editor','Assets/UIFrame/Tests/Editor','Packages','ProjectSettings']:(target/folder).mkdir(parents=True,exist_ok=True)
     for folder in ['Sqlite','Media','MediaBackup','MediaStorage','Plugins','Resources']:
@@ -27,6 +27,12 @@ def main():
     (target/'Assets/UIFrame/Tests/Editor/UIFrame.Regression.Editor.asmdef').write_text(json.dumps({'name':'UIFrame.Regression.Editor','references':['UIFrame.Runtime','UIFrame.Editor','UniTask','UIFrame.Sqlite'],'optionalUnityReferences':['TestAssemblies'],'includePlatforms':['Editor']}))
     shutil.copyfile(package/'Tests/Native~/UnitySmoke/MediaBuildSmoke.cs',target/'Assets/UIFrame/Editor/MediaBuildSmoke.cs')
     shutil.copyfile(package/'Tests/Native~/UnitySmoke/MediaSmoke.cs',target/'Assets/UIFrame/Runtime/MediaSmoke.cs')
+    smoke=target/'Assets/Resources/BackupSmokeConfig.json'
+    if args.backup_smoke_config:
+        settings=json.loads(args.backup_smoke_config.read_text())
+        if not all(settings.get(key) for key in ('serverUrl','account','token')):raise ValueError('Smoke configuration requires serverUrl, account and token')
+        smoke.parent.mkdir(parents=True,exist_ok=True);shutil.copyfile(args.backup_smoke_config,smoke)
+    elif smoke.exists():smoke.unlink()
     deps={}
     for name in ['com.unity.test-framework','com.unity.ext.nunit','com.cysharp.unitask','com.unity.ugui']:
         deps[name]='file:'+str(next((base/'Library/PackageCache').glob(name+'@*')))

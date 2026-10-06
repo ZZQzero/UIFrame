@@ -6,9 +6,11 @@
 
 本文落实 SQLite、图库增量刷新、缩略图缓存、批量任务管理和清理策略。基础能力与现有接口见 [Gallery.md](Gallery.md)，已执行验证见 [GalleryValidation.md](GalleryValidation.md)，早期总体方案见 [GalleryImplementationPlan.md](GalleryImplementationPlan.md)。本轮相关存储、并发和生命周期决策以本文为准。
 
+2026-10-02：网络协议与后台交接已按 [照片备份批量协议与后台执行实施计划](GalleryBackgroundProtocolPlan.md) 切换到 v2，沿用本文的共享 SQLite、图库和清理边界。本页早期上传接口由该方案接替，实际调用以 [Gallery.md](Gallery.md) 为准；本轮构建、测试及未验收项见 [执行记录](GalleryBackgroundProtocolExecution.md)。
+
 通用数据库能力单独落在 Runtime/Sqlite，见 [Sqlite 模块说明](../Runtime/Sqlite/README.md)和[实施计划](../Runtime/Sqlite/ImplementationPlan.md)。连接、事务、查询、取消与快照由通用模块负责，本文只定义图库与照片备份的业务存储；游戏存档等其他业务可以独立使用同一模块。
 
-执行记录（2026-10-01）：通用核心使用 ABI 3，业务仓库使用 ABI 1；C#、Android、iOS 已接入同一份原生业务状态机。四目标产物可复现构建，照片任务 / 策略 / 基线 / 回执的 JSON 持久化及全量 GetTasks 已移除。构建和桌面测试不能代替下列阶段的真机与长时门槛。
+执行记录（2026-10-02）：通用核心使用 ABI 3，当前业务仓库使用 ABI / schema 2；C#、Android、iOS 接入同一份原生业务状态机。四目标产物可复现构建，照片任务 / 策略 / 基线 / 回执的 JSON 持久化及全量 GetTasks 已移除，无旧 schema 迁移。构建和桌面测试不能代替下列阶段的真机与长时门槛。
 
 ## 1. 成功标准与范围
 

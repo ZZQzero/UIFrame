@@ -48,8 +48,8 @@ def main():
                 database.sql(
                     page + "INSERT INTO file_records SELECT printf('%032x',n),'payloads/'||printf('%032x',n)||'.payload',4,zeroblob(32),3,'seed',NULL,1 FROM page",
                     page + "INSERT INTO tasks(id,batch_id,source_id,content_version,state,file_id,current_generation,created_utc,updated_utc) SELECT printf('%032x',n),'seed','file:'||n,'v1',3,printf('%032x',n),1,1,1 FROM page",
-                    page + "INSERT INTO task_metadata(task_id,name,mime,idempotency_key) SELECT printf('%032x',n),'photo.jpg','image/jpeg',printf('%064x',n) FROM page",
-                    page + "INSERT INTO task_attempts(task_id,generation,idempotency_key,submission_state,execution_state,server_outcome,payload_released,credential_released,executor) SELECT printf('%032x',n),1,printf('%032x',n)||':1',2,2,1,1,1,1 FROM page")
+                    page + "INSERT INTO task_metadata(task_id,name,mime) SELECT printf('%032x',n),'photo.jpg' ,'image/jpeg' FROM page",
+                    page + "INSERT INTO task_attempts(task_id,generation,submission_state,execution_state,server_outcome,payload_released,credential_released,executor) SELECT printf('%032x',n),1,1,2,1,1,1,1 FROM page")
             result = dict(history_rows=count, seed_seconds=time.perf_counter()-started)
             result['plan'] = database.query('EXPLAIN QUERY PLAN ' + query)
             assert any('attempts_unreleased' in row['detail'] for row in result['plan'])
@@ -69,6 +69,8 @@ def main():
                 result[name + '_one_at_tail'] = measure(lambda: repository.call(command, 0, 1, 100)[-1])
                 assert result[name + '_one_at_tail']['rows'] == 1
                 assert repository.call(command, count, 1, 100)[-1] == []
+            for command, name, values in ((105, 'protocol_wake', [1]), (89, 'controls', [1, '']), (90, 'uploads', [1, ''])):
+                result[name] = measure(lambda: repository.call(command, *values)[-1])
             repository.close()
             results.append(result)
             print(json.dumps(result), flush=True)

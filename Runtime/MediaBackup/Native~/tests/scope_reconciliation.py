@@ -31,8 +31,8 @@ def discover(db, before, after, kind, source):
 def prepare(db, root, task, source):
     db.call(2, task + 'a', 'ee', 1, 1, task, source, 'v1', 'photo.jpg', 'image/jpeg', 4)
     (root / IDENTITY / ('payloads/' + task + '.payload')).write_bytes(b'test')
-    db.call(3, task, 'ee', 4, HASH, HASH, 'image/jpeg', 1024, 2)
-    db.call(4, task + 'a', 'ee', 3)
+    db.call(3, task, 'ee', 4, HASH, 'image/jpeg', 1024, 2)
+    db.call(96, task, 'ee', 3)
 
 
 def run(core, library):
@@ -95,10 +95,10 @@ def run(core, library):
             prepare(db, root, 'd0', 'asset:shared')
             assert db.call(35, 'ac', '', '', 2, 32)[-1][0]['task_id'] == 'd0'
             assert db.call(35, 'ad', '', '', 5, 32)[-1][0]['task_id'] is None
-            db.call(9, 'd0', 0, 0, 6, 'ee')
-            db.call(22, 'd0', 1)
-            db.call(12, 'd0', 1, 1, HASH, '', 7, 4, HASH)
-            db.call(13, 'd0', 1, 1, 1)
+            db.call(9, 'd0', 0, 0, 6)
+            from protocol_fixture import control, apply
+            db.call(74, 'd0', 1, 'protected-api')
+            control(db); apply(db, 'ce'); db.call(87, 'ce'); db.call(102, 'd0', 1)
             for identity in ('ac', 'ad'):
                 assert db.call(35, identity, '', '', 3, 32)[-1][0]['source_id'] == 'asset:shared'
         finally:

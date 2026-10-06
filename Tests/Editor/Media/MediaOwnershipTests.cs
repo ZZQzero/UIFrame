@@ -52,7 +52,8 @@ namespace UIFrame.Regression
         {
             using var gallery=new Gallery {Photos=new[]{Photo("first")},DeniedOperation=operation};
             string database=Path.Combine(root,"library.sqlite");
-            var library=await ImageLibraryIndex.OpenAsync(database);var service=await ImageBackupService.CreateAsync(Config());
+            var fixture=new BackupProtocolFixture {BeforeUpload=(item,token)=>item.sourceId=="library:first"?Task.Delay(Timeout.Infinite,token):Task.CompletedTask};
+            var library=await ImageLibraryIndex.OpenAsync(database);var service=await ImageBackupService.CreateAsync(Config(),NativeBackup.Call,false,fixture);
             var scope=new ImageLibraryScope(ImageLibrarySourceKind.PhotoLibrary);
             try {
                 var automatic=await AutomaticImageBackup.CreateAsync(service,library);
@@ -60,13 +61,15 @@ namespace UIFrame.Regression
                 await automatic.ScanOnceAsync();var task=(await service.QueryTasksAsync()).Items.Single();
                 var before=await library.GetPositionAsync(scope);
                 string separate=Path.Combine(root,"separate.jpg");File.WriteAllBytes(separate,new byte[]{4,3,2,1});
-                string unrelated=(await service.EnqueueAsync(new[]{ImageReference.FromFile(separate)}))[0];
+                string unrelated=(await service.SubmitPhotosAsync(new[]{ImageReference.FromFile(separate)}))[0];
                 gallery.Photos=new[]{Photo("first"),Photo("second")};gallery.DeniedId="second";
                 var error=await Observe(automatic.ScanOnceAsync());
                 Assert.IsInstanceOf<GalleryException>(error);
                 Assert.AreEqual("PermissionDenied",((GalleryException)error).Code);
+                Assert.AreEqual(1,(await service.GetTaskAsync(task.id)).desiredAction);
+                await service.WaitForIdleAsync();
                 Assert.AreEqual(BackupState.Paused,(await service.GetTaskAsync(task.id)).state);
-                Assert.AreEqual(BackupState.Queued,(await service.GetTaskAsync(unrelated)).state);
+                Assert.AreEqual(BackupState.Completed,(await service.GetTaskAsync(unrelated)).state);
                 Assert.IsEmpty((await automatic.GetPreparationFailuresAsync()).Items);
                 Assert.Greater((await library.GetPositionAsync(scope)).PermissionGeneration,before.PermissionGeneration);
                 gallery.DeniedId=null;
@@ -76,78 +79,13 @@ namespace UIFrame.Regression
                 Assert.IsInstanceOf<GalleryException>(confirmation);
                 Assert.AreEqual("ScopeConfirmationRequired",((GalleryException)confirmation).Code);
                 await automatic.ConfirmScopeAsync();await automatic.ScanOnceAsync();
+                await service.WaitForIdleAsync();
                 Assert.AreEqual(BackupState.Paused,(await service.GetTaskAsync(task.id)).state);
-                Assert.AreEqual(3,(await service.QueryTasksAsync()).Items.Count);
+                var tasks=(await service.QueryTasksAsync()).Items;
+                Assert.AreEqual(4,tasks.Count); // Keep the failed preparation and the newly authorized submission.
+                Assert.AreEqual(1,tasks.Count(x=>x.state==BackupState.Failed));
+                Assert.AreEqual(1,tasks.Count(x=>x.source=="library:first"));
             } finally {await library.ShutdownAsync();await service.ShutdownAsync();}
-        });
-        sealed class DelayedServer : HttpMessageHandler
-        {
-            readonly HttpMessageInvoker inner=new HttpMessageInvoker(new HttpClientHandler {AllowAutoRedirect=false});
-            readonly TaskCompletionSource<bool> getRelease=new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
-            int registrations;
-            internal volatile bool GetHeld;
-            internal int DeleteStatus;
-            internal void ReleaseGet()=>getRelease.TrySetResult(true);
-            protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request,CancellationToken token)
-            {
-                string path=request.RequestUri.AbsolutePath;
-                var response=await inner.SendAsync(request,token);
-                await response.Content.LoadIntoBufferAsync();
-                if(request.Method==HttpMethod.Post && path=="/v1/uploads" && Interlocked.Increment(ref registrations)==1) {
-                    response.Dispose();throw new HttpRequestException("Registration succeeded but response was lost");
-                }
-                if(request.Method==HttpMethod.Get && path.StartsWith("/v1/uploads/",StringComparison.Ordinal)) {
-                    GetHeld=true;
-                    try {using(token.Register(()=>getRelease.TrySetCanceled()))await getRelease.Task;}
-                    catch {response.Dispose();throw;}
-                }
-                if(request.Method==HttpMethod.Delete)DeleteStatus=(int)response.StatusCode;
-                return response;
-            }
-            protected override void Dispose(bool disposing){if(disposing){ReleaseGet();inner.Dispose();}base.Dispose(disposing);}
-        }
-        [UnityTest] public IEnumerator ReconcileOwnsRemoteIdentityWhileOtherUploadsContinue()=>UniTask.ToCoroutine(async()=>
-        {
-            var server=new DelayedServer();
-            var service=await ImageBackupService.CreateAsync(Config(),NativeBackup.Call,false,server);
-            Task<Exception> reconciliation=null;
-            try {
-                string path=Path.Combine(root,"photo.jpg");File.WriteAllBytes(path,new byte[]{1,2,3,4});
-                string id=(await service.EnqueueAsync(new[]{ImageReference.FromFile(path)}))[0];await service.ProcessAsync();
-                Assert.AreEqual(BackupState.NeedsAttention,(await service.GetTaskAsync(id)).state);
-                using var timeout=new CancellationTokenSource(TimeSpan.FromSeconds(15));
-                reconciliation=Observe(service.ReconcileTaskAsync(id,timeout.Token)).AsTask();
-                await UniTask.WaitUntil(()=>server.GetHeld,cancellationToken:timeout.Token);
-                Assert.IsInstanceOf<BackupRepositoryException>(await Observe(service.ReconcileTaskAsync(id,timeout.Token)));
-                await service.RetryAsync(id);
-                string otherPath=Path.Combine(root,"other.jpg");File.WriteAllBytes(otherPath,new byte[]{9,8,7});
-                string other=(await service.EnqueueAsync(new[]{ImageReference.FromFile(otherPath)}))[0];
-                await service.ProcessAsync(timeout.Token);
-                Assert.AreEqual(1,(await service.GetTaskAsync(id)).generation,"Retry intent must not admit a new attempt while the old remote check is active.");
-                Assert.AreEqual(BackupState.Completed,(await service.GetTaskAsync(other)).state,"Unrelated upload must continue.");
-                server.ReleaseGet();Assert.IsNull(await reconciliation);
-                Assert.AreEqual(200,server.DeleteStatus,"Reconciliation should close its own incomplete session.");
-                await service.ProcessAsync(timeout.Token);
-                var completed=await service.GetTaskAsync(id);
-                Assert.AreEqual(2,completed.generation);Assert.AreEqual(BackupState.Completed,completed.state);
-            } finally {server.ReleaseGet();if(reconciliation!=null)await reconciliation;await service.ShutdownAsync();}
-        });
-        [UnityTest] public IEnumerator CanceledReconcileReleasesIdentityForExplicitRetry()=>UniTask.ToCoroutine(async()=>
-        {
-            var server=new DelayedServer();
-            var service=await ImageBackupService.CreateAsync(Config(),NativeBackup.Call,false,server);
-            Task<Exception> reconciliation=null;
-            try {
-                string path=Path.Combine(root,"photo.jpg");File.WriteAllBytes(path,new byte[]{1,2,3,4});
-                string id=(await service.EnqueueAsync(new[]{ImageReference.FromFile(path)}))[0];await service.ProcessAsync();
-                using var canceled=new CancellationTokenSource();using var timeout=new CancellationTokenSource(TimeSpan.FromSeconds(15));
-                reconciliation=Observe(service.ReconcileTaskAsync(id,canceled.Token)).AsTask();
-                await UniTask.WaitUntil(()=>server.GetHeld,cancellationToken:timeout.Token);
-                canceled.Cancel();Assert.IsInstanceOf<OperationCanceledException>(await reconciliation);
-                Assert.AreEqual(0,server.DeleteStatus);
-                await service.RetryAsync(id);await service.ProcessAsync(timeout.Token);
-                Assert.AreEqual(BackupState.Completed,(await service.GetTaskAsync(id)).state);
-            } finally {server.ReleaseGet();if(reconciliation!=null)await reconciliation;await service.ShutdownAsync();}
         });
     }
 }

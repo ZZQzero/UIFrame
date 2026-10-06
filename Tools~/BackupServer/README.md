@@ -1,48 +1,56 @@
-# UIFrame 本机备份参考服务
+# UIFrame 本机照片备份参考服务（v2）
 
-Python 3.9+，无第三方依赖，默认监听本机。
-
-```sh
-python3 server.py init --root /tmp/uiframe-backup-local
-python3 server.py serve --root /tmp/uiframe-backup-local
-```
-
-初始化生成数据目录中的 `credentials.json`，账号默认 `local-user`，访问令牌随机生成。将它填入 Unity 的 **Tools → UIFrame → 图片与备份**，地址默认 `http://127.0.0.1:8787`。凭据文件不要提交。
-
-服务使用真实 SQLite / 文件存储，支持系统后台整文件上传并校验提交、分片上传、断点查询、SHA-256 校验、重复提交、账号隔离和下载。上限为单文件 512 MiB、分片 4 MiB；不是生产部署方案。停止服务不删除数据，重启时使用同一数据目录。
-
-测试：
+运行服务只需 Python 3.9+ 标准库。业务 API 与私有上传分别监听 8787、8788：
 
 ```sh
+python3 server.py init --root /tmp/uiframe-backup-local-v2
+python3 server.py serve --root /tmp/uiframe-backup-local-v2
 python3 -m unittest -v test_server.py
 ```
 
-Unity 显式 HTTP 集成测试：
+初始化创建仅当前用户可读的 credentials.json，包含 local-user 账号及随机令牌。通过应用的运行时配置提供令牌，不写进场景、日志或 Git。服务使用 SQLite 和普通文件，只有 v2 格式；需要新数据目录，不转换已有格式。重启使用相同目录可以恢复未完成的确认与清理。
+
+流程为批量 Plan → 独立文件 PUT → 服务端核验 → 滚动批量 Query。取消使用独立批量 Cancel。没有客户端 commit，也没有逐张能力查询：
+
+| 操作 | 接口 | 成功的含义 |
+| --- | --- | --- |
+| Plan | POST /v2/backup/plans | 返回逐项上传授权、确认回执或拒绝 |
+| Query | POST /v2/backup/status | 返回逐项真实状态和确认回执 |
+| Cancel | POST /v2/backup/cancellations | 原子仲裁取消；确认已经发生时返回回执 |
+| 上传 | PUT 私有 origin 的 /objects/{uploadId} | 空 204，仅表示完整文件已持久接收 |
+| 已备份列表 | GET /v2/backups?after=0&limit=32 | 账号内有限页 |
+| 下载 | GET /v2/backups/{backupId}/content | 不可变内容；客户端校验后才发布目标文件 |
+
+控制请求使用业务 Bearer，私有上传只使用描述中的 X-Upload-Authorization，明确拒绝业务 Authorization。固定 requestId 的参数不能变化。请求每批 1–32 项，上限 256 KiB；响应 512 KiB；上传描述 8 KiB；照片 512 MiB。上传流式处理，不全量载入内存。
+
+业务及存储地址必须是可信的最终终点，服务、反向代理、CDN和认证网关均不得重定向这些请求。Desktop / Android 客户端拒绝自动跳转；iOS background NSURLSession 由系统自动跟随，客户端最终 URL / 可用 metrics 校验只能事后发现违规，不能阻止字节转发。正式接入须用设备核对302/307/308、同域及跨域行为；本机服务不发送重定向，不能代替该验收。
+
+上传授权默认 24 小时有效。授权到期但尚未超过保留窗口时，可由客户端显式 Plan 更新描述；传输结果未知时先显式 Query 核对。正常 Pending / Verifying 返回下一检查时点（参考服务间隔 5 秒）。上传尝试在授权到期再过 24 小时后关闭，新的尝试必须使用新代次。取消墓碑与请求身份保留，以阻止迟到请求重新创建已取消的尝试。
+
+独立工作线程依据持久 ready 记录核验大小和 SHA-256，不依赖客户端继续发请求。核验通过后发布不可变文件，再提交备份记录。只有账号内已核验内容可以复用；重复签名 PUT 不会覆盖已经发布的内容。来源版本与内容对象分别记录，同内容的多个来源仍保留各自备份记录。
+
+每个请求独占自己的 incoming 文件。流式接收期间不持有上传尝试锁，持久 writing 记录保护在用文件；核验只读取已关闭的 ready 文件。慢速重复 PUT 不会阻止已到达文件的核验和清理。登记、发布和过期维护使用相同的短锁顺序；维护跳过仍有写入者的尝试，取消仍以最终发布时的仲裁状态为准。
+
+临时文件创建前登记归属；启动时把已中断的写入转入清理。已完成处理的临时文件自动回收，超过 24 小时且没有备份引用的发布对象也可回收。每轮维护最多处理 64 个候选，活动文件操作持有的锁不会阻塞其他回收候选。已确认及仍被引用的内容不受临时 TTL 影响。单个文件清理失败持久隔离，其余上传、核验、清理继续；修复磁盘问题后显式执行：
+
+```sh
+python3 server.py serve --root /tmp/uiframe-backup-local-v2 --retry-failed-cleanup
+```
+
+Unity 的 HTTP 集成测试使用独立临时服务：
 
 ```sh
 python3 integration_server.py
 ```
 
-它在 `127.0.0.1:18787` 启动临时测试服务，然后显式运行 Unity `ReceiptDownloadSurvivesHistoryCleanupAndReopen`。测试服务停止后删除测试数据；固定令牌仅用于这一本机测试。
+它监听 127.0.0.1:18787 和 :18788，固定测试账号 integration-user。测试令牌只用于本机夹具。停止进程后临时目录会删除。运行 Unity 的 MediaIntegration 类别时保持服务开启。
 
-接口和客户端用法见包内 `Docs/Gallery.md`。真机需要使用电脑可达的局域网地址；不会自动放开手机 HTTP 策略或把本机服务部署到公网。
-
-后台扩展：先建立上传会话，再 `PUT /v1/uploads/{key}/background`。正文为整个文件，必须带 Bearer 认证和 `X-Backup-Account-SHA256`（账号 UTF-8 的 SHA-256）。校验成功并持久提交后才返回 completed；重复请求幂等，不承诺整文件上传的分片续传。传输中断仅清理本次临时文件，不覆盖已有分片。`.incoming` 文件创建前登记持久归属；显式 TTL 清理可恢复中断的回收意图，不删除已完成副本。
-
-性能与能力协商：客户端在服务实例内复用服务器能力；`POST /v1/uploads` 的响应增加可选 `capabilities`，包含协议版本、账号、分片大小、文件上限与后台上传支持。无需逐张额外查询能力，也不代表免除服务器逐次认证和校验。当前接口仍逐张建立会话，批量清单接口尚未实现。
-
-提交 SHA-256 与分片文件写入不持有 SQLite 全局锁。同一上传的修改由固定数量的分组锁协调，确保校验期间同一任务不能同时追加、删除或后台替换；其他组的上传与能力查询可继续进行。
-
-未完成会话的过期回收默认关闭，显式开启：
+手机访问电脑时，使用可达的局域网地址，例如：
 
 ```sh
-python3 server.py serve --root /tmp/uiframe-backup-local --upload-ttl-days 7
-# 已记录失败的清理，只有显式要求才再次执行：
-python3 server.py serve --root /tmp/uiframe-backup-local --upload-ttl-days 7 --retry-failed-cleanup
+python3 server.py serve --root /tmp/uiframe-backup-local-v2 --host 0.0.0.0 --storage-origin http://192.168.1.2:8788
 ```
 
-活动上传 / 校验 / 提交持有会话占用，不参与 TTL。回收先持久认领，再删除临时文件并确认结果；旧会话返回410。重新登记同一幂等身份是显式操作，新 epoch 阻止旧请求迟到提交。完成回执和共享内容文件不受 TTL 影响。服务是单进程本机参考实现，生产认证、配额和灾备另行配置。
+客户端业务地址使用 http://192.168.1.2:8787，显式启用开发 HTTP，并配置平台网络规则。0.0.0.0 是监听地址，不能作为手机收到的上传地址。
 
-分片和整文件请求都在读取正文前固定会话 epoch，写入时重新核对。取消后重新登记同一身份，旧请求返回409，不能改变新会话偏移。`.incoming` 有独立的时间和清理状态：取消后即使进程结束，也由下次维护回收；没有所属上传行仍可清理。会话和临时文件合计每轮最多200项，清理失败持久记录，须显式重试。未启用 TTL 维护时不会自动运行这项回收。
-
-单文件删除 / 刷盘失败在持久记录成功后局部隔离，`Store.cleanup_expired` 返回 `expired`、`freedBytes`、`skipped` 和 `failures`（账号、文件名、错误）组成的部分结果。其余候选继续清理，服务启动与后续维护继续，已失败项不自动重试。命令行会报告这些部分失败；只有数据库操作或故障记录等无法隔离的错误才中止启动 / 维护。
+机器契约见包内 Docs/GalleryBackupProtocol.openapi.yaml，固定示例见 fixtures。此服务用于本机协议与故障验证。生产接入仍需真实认证、HTTPS、配额、对象存储、监控、灾备及容量验收；本机测试不构成生产吞吐保证。

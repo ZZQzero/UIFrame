@@ -221,121 +221,7 @@ namespace UIFrame.Regression
                 StringAssert.Contains("new.jpg",(await service.QueryTasksAsync()).Items.Single().source);
             } finally {await library.ShutdownAsync();await service.ShutdownAsync();}
         });
-        sealed class Server : HttpMessageHandler
-        {
-            internal int Uploads;
-            internal bool HoldFirst,FailUploads,MissingSession;
-            internal readonly System.Threading.Tasks.TaskCompletionSource<bool> Release=new System.Threading.Tasks.TaskCompletionSource<bool>(System.Threading.Tasks.TaskCreationOptions.RunContinuationsAsynchronously);
-            protected override async System.Threading.Tasks.Task<HttpResponseMessage> SendAsync(HttpRequestMessage request,CancellationToken token)
-            {
-                if(request.RequestUri.AbsolutePath=="/v1/capabilities")return new HttpResponseMessage {Content=new StringContent("{\"protocolVersion\":1,\"account\":\"audit\",\"chunkBytes\":1024,\"maxFileBytes\":1048576}")};
-                if(MissingSession && request.Method==HttpMethod.Get)return new HttpResponseMessage(System.Net.HttpStatusCode.NotFound) {Content=new StringContent("{}")};
-                int number=Interlocked.Increment(ref Uploads);
-                if(HoldFirst && number==1) {
-                    var stopped=new System.Threading.Tasks.TaskCompletionSource<bool>(System.Threading.Tasks.TaskCreationOptions.RunContinuationsAsynchronously);
-                    using(token.Register(()=>stopped.TrySetCanceled(token)))await await System.Threading.Tasks.Task.WhenAny(Release.Task,stopped.Task);
-                }
-                if(FailUploads)throw new HttpRequestException("controlled transport failure");
-                var upload=JsonUtility.FromJson<UploadRequest>(await request.Content.ReadAsStringAsync());
-                return new HttpResponseMessage {Content=new StringContent(JsonUtility.ToJson(new UploadResponse {uploadId=upload.key,sha256=upload.sha256,size=upload.size,offset=upload.size,completed=true,backupId=upload.key,capabilities=new ServerCapabilities {protocolVersion=1,account="audit",chunkBytes=1024,maxFileBytes=1048576}}))};
-            }
-        }
-        static string StopAfterClaim(string id)=>$"CREATE TRIGGER review_stop_after_claim AFTER INSERT ON task_attempts WHEN NEW.task_id='{id}' BEGIN UPDATE tasks SET desired_action=1 WHERE id=NEW.task_id; END";
-        static string FailRelease(string id)=>$"CREATE TRIGGER review_release_failure BEFORE UPDATE OF payload_released ON task_attempts WHEN NEW.task_id='{id}' AND NEW.payload_released=1 AND OLD.payload_released=0 BEGIN SELECT RAISE(ABORT,'release fixture'); END";
-        [UnityTest] public IEnumerator StoppedBeforeStartPropagatesReleaseFailure()=>UniTask.ToCoroutine(async()=>
-        {
-            var service=await ImageBackupService.CreateAsync(Config());var server=new Server();
-            try {
-                var ids=await service.EnqueueAsync(new[]{ImageReference.FromFile(Photo("first")),ImageReference.FromFile(Photo("second"))});
-                string catalog=Path.Combine(service.RepositoryRoot,service.StoreId,"catalog.sqlite");await service.ShutdownAsync();service=null;
-                await ConfigureDatabase(catalog,StopAfterClaim(ids[0]),FailRelease(ids[0]));
-                service=await ImageBackupService.CreateAsync(Config(),NativeBackup.Call,false,server);
-                var error=await Observe(service.ProcessAsync());Assert.IsInstanceOf<BackupRepositoryException>(error);StringAssert.Contains("release fixture",error.Message);
-                Assert.AreEqual(0,server.Uploads);Assert.IsFalse(service.IsRunning);
-                var stopped=await service.GetTaskAsync(ids[0]);Assert.AreEqual(BackupState.Paused,stopped.state);
-                var attempt=(await service.Db(BackupRepository.Command.Attempt,default,stopped.id,stopped.generation)).Single;
-                Assert.AreEqual(0,attempt.Number("payload_released"));Assert.AreEqual(0,attempt.Number("credential_released"));
-                Assert.AreEqual(BackupState.Queued,(await service.GetTaskAsync(ids[1])).state);
-            } finally {if(service!=null)await service.ShutdownAsync();}
-        });
-        [UnityTest] public IEnumerator StoppedBeforeStartReleasesAndContinuesOtherTasks()=>UniTask.ToCoroutine(async()=>
-        {
-            var service=await ImageBackupService.CreateAsync(Config());var server=new Server();
-            try {
-                var ids=await service.EnqueueAsync(new[]{ImageReference.FromFile(Photo("first")),ImageReference.FromFile(Photo("second"))});
-                string catalog=Path.Combine(service.RepositoryRoot,service.StoreId,"catalog.sqlite");await service.ShutdownAsync();service=null;
-                await ConfigureDatabase(catalog,StopAfterClaim(ids[0]));
-                service=await ImageBackupService.CreateAsync(Config(),NativeBackup.Call,false,server);await service.ProcessAsync();
-                var stopped=await service.GetTaskAsync(ids[0]);Assert.AreEqual(BackupState.Paused,stopped.state);
-                var attempt=(await service.Db(BackupRepository.Command.Attempt,default,stopped.id,stopped.generation)).Single;
-                Assert.AreEqual(1,attempt.Number("payload_released"));Assert.AreEqual(1,attempt.Number("credential_released"));
-                Assert.AreEqual(1,server.Uploads);Assert.AreEqual(BackupState.Completed,(await service.GetTaskAsync(ids[1])).state);
-            } finally {if(service!=null)await service.ShutdownAsync();}
-        });
-        [UnityTest] public IEnumerator CredentialErrorRemainsPrimaryWhenReleaseFails()=>UniTask.ToCoroutine(async()=>
-        {
-            var service=await ImageBackupService.CreateAsync(Config());var original=new InvalidOperationException("credential fixture");
-            try {
-                var ids=await service.EnqueueAsync(new[]{ImageReference.FromFile(Photo("first"))});
-                string catalog=Path.Combine(service.RepositoryRoot,service.StoreId,"catalog.sqlite");await service.ShutdownAsync();service=null;
-                await ConfigureDatabase(catalog,FailRelease(ids[0]));var config=Config();int reads=0;config.AccessToken=()=>++reads==1?"fixture":throw original;
-                service=await ImageBackupService.CreateAsync(config,NativeBackup.Call,false,new Server());
-                LogAssert.Expect(LogType.Exception,new System.Text.RegularExpressions.Regex("release fixture"));
-                Assert.AreSame(original,await Observe(service.ProcessAsync()));Assert.IsFalse(service.IsRunning);
-                Assert.AreEqual(BackupState.Failed,(await service.GetTaskAsync(ids[0])).state);
-            } finally {if(service!=null)await service.ShutdownAsync();}
-        });
-        [UnityTest] public IEnumerator CancelCurrentUploadAllowsOtherTasksToComplete()=>UniTask.ToCoroutine(async()=>
-        {
-            var server=new Server {HoldFirst=true};var service=await ImageBackupService.CreateAsync(Config(),NativeBackup.Call,false,server);
-            try {
-                var ids=await service.EnqueueAsync(new[]{ImageReference.FromFile(Photo("first")),ImageReference.FromFile(Photo("second"))});
-                var process=service.ProcessAsync().AsTask();using var timeout=new CancellationTokenSource(TimeSpan.FromSeconds(10));
-                await UniTask.WaitUntil(()=>server.Uploads==1,cancellationToken:timeout.Token);await service.CancelAsync(ids[0]);await process;
-                Assert.AreEqual(BackupState.NeedsAttention,(await service.GetTaskAsync(ids[0])).state);
-                Assert.AreEqual(BackupState.Completed,(await service.GetTaskAsync(ids[1])).state);Assert.AreEqual(2,server.Uploads);
-            } finally {server.Release.TrySetResult(true);await service.ShutdownAsync();}
-        });
-        [UnityTest] public IEnumerator CancelQueuedTaskDoesNotInvalidateAlreadySelectedPage()=>UniTask.ToCoroutine(async()=>
-        {
-            var server=new Server {HoldFirst=true};var service=await ImageBackupService.CreateAsync(Config(),NativeBackup.Call,false,server);
-            try {
-                var ids=await service.EnqueueAsync(new[]{ImageReference.FromFile(Photo("first")),ImageReference.FromFile(Photo("second")),ImageReference.FromFile(Photo("third"))});
-                var process=service.ProcessAsync().AsTask();using var timeout=new CancellationTokenSource(TimeSpan.FromSeconds(10));
-                await UniTask.WaitUntil(()=>server.Uploads==1,cancellationToken:timeout.Token);await service.CancelAsync(ids[1]);server.Release.TrySetResult(true);await process;
-                Assert.AreEqual(BackupState.Canceled,(await service.GetTaskAsync(ids[1])).state);
-                Assert.AreEqual(BackupState.Completed,(await service.GetTaskAsync(ids[2])).state);Assert.AreEqual(2,server.Uploads);
-            } finally {server.Release.TrySetResult(true);await service.ShutdownAsync();}
-        });
-        [UnityTest] public IEnumerator CredentialFailureBeforeRequestIsDefinitive()=>UniTask.ToCoroutine(async()=>
-        {
-            var server=new Server();int reads=0;var original=new InvalidOperationException("credential fixture");var config=Config();config.AccessToken=()=>++reads==1?"fixture":throw original;
-            var service=await ImageBackupService.CreateAsync(config,NativeBackup.Call,false,server);
-            try {
-                var ids=await service.EnqueueAsync(new[]{ImageReference.FromFile(Photo("photo"))});
-                Assert.AreSame(original,await Observe(service.ProcessAsync()));Assert.AreEqual(0,server.Uploads);
-                Assert.AreEqual(BackupState.Failed,(await service.GetTaskAsync(ids[0])).state);
-                await service.CancelAsync(ids[0]);Assert.AreEqual(BackupState.Canceled,(await service.GetTaskAsync(ids[0])).state);
-            } finally {await service.ShutdownAsync();}
-        });
-        [UnityTest] public IEnumerator LocalFailureDuringRetryPreservesPriorUnknownUntilReconciled()=>UniTask.ToCoroutine(async()=>
-        {
-            var server=new Server {FailUploads=true};bool failCredential=false;var original=new InvalidOperationException("credential fixture");var config=Config();config.AccessToken=()=>failCredential?throw original:"fixture";
-            var service=await ImageBackupService.CreateAsync(config,NativeBackup.Call,false,server);
-            try {
-                var ids=await service.EnqueueAsync(new[]{ImageReference.FromFile(Photo("photo"))});await service.ProcessAsync();
-                Assert.AreEqual(BackupState.NeedsAttention,(await service.GetTaskAsync(ids[0])).state);
-                await service.RetryAsync(ids[0]);await service.CancelAsync(ids[0]);
-                Assert.AreEqual(BackupState.NeedsAttention,(await service.GetTaskAsync(ids[0])).state);
-                await service.RetryAsync(ids[0]);failCredential=true;
-                Assert.AreSame(original,await Observe(service.ProcessAsync()));Assert.AreEqual(1,server.Uploads);
-                Assert.AreEqual(BackupState.NeedsAttention,(await service.GetTaskAsync(ids[0])).state);
-                failCredential=false;server.MissingSession=true;
-                await service.ReconcileTaskAsync(ids[0]);await service.CancelAsync(ids[0]);
-                Assert.AreEqual(BackupState.Canceled,(await service.GetTaskAsync(ids[0])).state);
-            } finally {await service.ShutdownAsync();}
-        });
-        [UnityTest] public IEnumerator AbandonedCleanupFailuresCanBeListedAfterReopenAndRetriedByFile()=>UniTask.ToCoroutine(async()=>
+        [UnityTest] public IEnumerator PreparationCleanupFailuresCanBeListedAfterReopenAndRetriedByFile()=>UniTask.ToCoroutine(async()=>
         {
             var service=await ImageBackupService.CreateAsync(Config());
             try {
@@ -343,13 +229,13 @@ namespace UIFrame.Regression
                 await service.Db(BackupRepository.Command.Prepare,default,"aa",owner,DateTime.UtcNow.Ticks,2,"b1","file:first","v1","first.jpg","image/jpeg",4L,"b2","file:second","v1","second.jpg","image/jpeg",4L);
                 string folder=Path.Combine(service.RepositoryRoot,service.StoreId,"payloads");
                 foreach(var id in new[]{"b1","b2"}){Directory.CreateDirectory(Path.Combine(folder,id+".payload"));File.WriteAllText(Path.Combine(folder,id+".payload","occupied"),"fixture");}
-                await service.Db(BackupRepository.Command.Abandon,default,"aa",owner,DateTime.UtcNow.Ticks,"interrupted preparation");
+                foreach(var id in new[]{"b1","b2"})await service.Db(BackupRepository.Command.FailItem,default,id,owner,"interrupted preparation",DateTime.UtcNow.Ticks);
                 LogAssert.Expect(LogType.Exception,new System.Text.RegularExpressions.Regex("BackupRepositoryException"));LogAssert.Expect(LogType.Exception,new System.Text.RegularExpressions.Regex("BackupRepositoryException"));
                 await service.CleanupFilesAsync();await service.ShutdownAsync();service=await ImageBackupService.CreateAsync(Config());
-                Assert.IsEmpty((await service.QueryTasksAsync()).Items);
+                Assert.IsTrue((await service.QueryTasksAsync()).Items.All(x=>x.state==BackupState.Failed));
                 var first=await service.QueryCleanupFailuresAsync(1);var second=await service.QueryCleanupFailuresAsync(1,first.Next);
                 Assert.AreEqual("b1",first.Items.Single().FileId);Assert.AreEqual("b2",second.Items.Single().FileId);
-                Assert.IsNull(first.Items[0].TaskId);Assert.IsNotEmpty(first.Items[0].Error);
+                Assert.AreEqual("b1",first.Items[0].TaskId);Assert.IsNotEmpty(first.Items[0].Error);
                 Directory.Delete(Path.Combine(folder,"b1.payload"),true);await service.RetryCleanupAsync(first.Items[0].FileId);
                 Assert.AreEqual("b2",(await service.QueryCleanupFailuresAsync()).Items.Single().FileId);
                 Assert.AreEqual(4,(await new BackupMaintenance(service).PreviewAsync()).CleanupFailedBytes);

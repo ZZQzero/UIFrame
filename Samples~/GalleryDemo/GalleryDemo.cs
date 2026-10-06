@@ -39,13 +39,13 @@ public sealed class GalleryDemo : MonoBehaviour
     public void BackupSelected() => Run(async ct =>
     {
         if (selection == null) throw new InvalidOperationException("请先选择图片。");
-        await EnsureBackup(ct); await backup.EnqueueAsync(selection.Items, ct); await backup.ProcessAsync(ct);
+        await EnsureBackup(ct);await backup.SubmitAsync(Guid.NewGuid().ToString("N"),selection.Items,ct);
         var summary=await backup.GetSummaryAsync(ct);long completed=summary[BackupState.Completed],failed=summary[BackupState.Failed]+summary[BackupState.NeedsAttention];
         SetStatus($"已备份 {completed} 张，失败或需处理 {failed} 张。" + (backup.UsesNativeBackgroundTransfer ? "其余已提交系统后台，请刷新状态查看结果。" : ""));
     });
-    public void ContinueBackup() => Run(async ct => { await EnsureBackup(ct); await backup.ProcessAsync(ct); SetStatus("本轮备份任务处理完毕，请查看任务状态。"); });
+    public void ContinueBackup() => ResumeBackup();
     public void PauseBackup() => Run(async ct => { await EnsureBackup(ct); await backup.PauseAsync(ct); SetStatus("备份已暂停。"); });
-    public void ResumeBackup() => Run(async ct => { await EnsureBackup(ct); await backup.ResumeAsync(ct); await backup.ProcessAsync(ct); SetStatus("已提交继续备份。"); });
+    public void ResumeBackup() => Run(async ct => { await EnsureBackup(ct); await backup.ResumeAsync(ct); SetStatus("已提交继续备份。"); });
     public void RefreshBackupStatus() => Run(async ct =>
     {
         await EnsureBackup(ct);long completed=(await backup.GetSummaryAsync(ct))[BackupState.Completed];
@@ -55,7 +55,7 @@ public sealed class GalleryDemo : MonoBehaviour
     public void ShowTaskNextPage()=>Run(async ct=>
     {
         await EnsureBackup(ct);var page=await backup.QueryTasksAsync(new BackupTaskQuery {PageSize=20,Cursor=taskCursor},ct);taskCursor=page.Next;
-        SetStatus(string.Join("\n",page.Items.Select(task=>task.name+" · "+task.state))+(page.Next==null?"\n已到末页。":"\n还有下一页。"));
+        SetStatus(string.Join("\n",page.Items.Select(task=>task.name+" · "+task.state+" · "+task.phase))+(page.Next==null?"\n已到末页。":"\n还有下一页。"));
     });
     public void PreviewCleanup()=>Run(async ct=>
     {

@@ -48,7 +48,7 @@ namespace Game.Media.Backup
         bool busy;
         public string LastError { get; private set; }
         public DateTime? LastScanUtc { get; private set; }
-        public bool IsWaitingForCapacity { get; private set; }
+        public bool IsWaitingForCapacity => service.IsWaitingForCapacity;
         public bool SupportsBackgroundDiscovery => false;
         public AutomaticBackupPolicy Policy => policy.Copy();
         ImageLibraryScope cachedScope;
@@ -84,6 +84,7 @@ namespace Game.Media.Backup
             if(value==null) throw new ArgumentNullException(nameof(value));
             if(!Enum.IsDefined(typeof(BackupSourceKind),value.sourceKind) || value.scanIntervalSeconds<30) throw new ArgumentOutOfRangeException(nameof(value));
             if(!value.enabled) return;
+            if(service.TransferMode!=BackupTransferMode.Automatic)throw new ArgumentException("Automatic discovery requires automatic background scheduling mode.");
             _=new ImageLibraryScope((ImageLibrarySourceKind)value.sourceKind,value.source,value.recursive);
             if(value.wifiOnly && wifiAvailable==null) throw new InvalidOperationException("Wi-Fi-only discovery requires a verified network policy provider.");
             if(service.UsesNativeBackgroundTransfer && value.wifiOnly!=service.NativeWifiOnly) throw new ArgumentException("Automatic and native background Wi-Fi policies must match.");
@@ -144,16 +145,17 @@ namespace Game.Media.Backup
                 if(batch.Items.Count<32) return cursor;
             }
         }
-        public async UniTask ScanOnceAsync(CancellationToken cancellationToken=default,bool uploadDuringScan=false,bool completeReconciliation=true)
+        public async UniTask ScanOnceAsync(CancellationToken cancellationToken=default,bool completeReconciliation=true)
         {
             using var operation=EnterOperation();
-            await ScanCoreAsync(cancellationToken,uploadDuringScan,completeReconciliation);
+            await ScanCoreAsync(cancellationToken,completeReconciliation);
         }
-        async UniTask ScanCoreAsync(CancellationToken cancellationToken,bool uploadDuringScan,bool completeReconciliation)
+        async UniTask ScanCoreAsync(CancellationToken cancellationToken,bool completeReconciliation)
         {
             var currentPolicy=policy.Copy();Validate(currentPolicy);if(!currentPolicy.enabled) throw new InvalidOperationException("Automatic backup is disabled.");
             if(currentPolicy.wifiOnly && !wifiAvailable()) return;
-            IsWaitingForCapacity=false;ImageLibraryIndex.WatchHandle observation=null;Exception primary=null;
+            if(!service.UsesNativeBackgroundTransfer)service.SetDesktopNetworkPolicy(()=>!policy.wifiOnly || wifiAvailable());
+            ImageLibraryIndex.WatchHandle observation=null;Exception primary=null;
             try
             {
                 observation=library.Watch(Scope,_=>{});
@@ -197,19 +199,24 @@ namespace Game.Media.Backup
                 for(;;)
                 {
                     var pending=(await service.Db(Command.Discoveries,cancellationToken,scope,afterSource,afterVersion,0,32)).Rows;
-                    foreach(var candidate in pending)
+                    if(pending.Count!=0)
                     {
                         cancellationToken.ThrowIfCancellationRequested();if(currentPolicy.wifiOnly && !wifiAvailable()) return;
-                        afterSource=candidate.Text("source_id");afterVersion=candidate.Text("content_version");int colon=afterSource.IndexOf(':');
-                        var image=new ImageReference(afterSource.Substring(0,colon),candidate.Text("provider_id"),candidate.Text("name"),candidate.Text("mime"),version:afterVersion);
-                        IReadOnlyList<string> ids;
-                        try { ids=await service.EnqueueBatchAsync(new[]{image},cancellationToken); }
-                        catch(BackupBudgetExceededException) { IsWaitingForCapacity=true;return; }
-                        catch(BackupSourceFailure failure)
+                        var images=pending.Select(candidate=>
                         {
-                            await service.Db(Command.Disposition,cancellationToken,scope,afterSource,afterVersion,4,failure.Original.SourceException.ToString());continue;
+                            string identity=candidate.Text("source_id");int colon=identity.IndexOf(':');
+                            return new ImageReference(identity.Substring(0,colon),candidate.Text("provider_id"),candidate.Text("name"),candidate.Text("mime"),version:candidate.Text("content_version"));
+                        }).ToArray();
+                        try {await service.SubmitAsync(Guid.NewGuid().ToString("N"),images,cancellationToken);}
+                        catch(BackupSubmissionException failure) when(!failure.HasSharedFailure)
+                        {
+                            foreach(var item in failure.Result.Items.Where(x=>x.State==BackupState.Failed && x.Acceptance==BackupAcceptanceStage.Preparing))
+                            {
+                                var candidate=pending[item.Index];
+                                await service.Db(Command.Disposition,cancellationToken,scope,candidate.Text("source_id"),candidate.Text("content_version"),4,item.Error);
+                            }
                         }
-                        if(uploadDuringScan) await service.ProcessTasksAsync(ids,cancellationToken,service.UsesNativeBackgroundTransfer?null:currentPolicy.wifiOnly?wifiAvailable:null);
+                        afterSource=pending[pending.Count-1].Text("source_id");afterVersion=pending[pending.Count-1].Text("content_version");
                     }
                     if(pending.Count<32) break;
                 }
@@ -218,10 +225,12 @@ namespace Game.Media.Backup
             catch(Exception error)
             {
                 primary=error;LastError=error.Message;
-                if(error is GalleryException gallery && gallery.IsScopeAccessFailure)
+                var gallery=error as GalleryException ?? (error as BackupSubmissionException)?.InnerExceptions.OfType<GalleryException>().FirstOrDefault(x=>x.IsScopeAccessFailure);
+                if(gallery!=null && gallery.IsScopeAccessFailure)
                 {
                     try {await library.RecordSourceAccessFailureAsync(Scope,gallery);}catch(Exception secondary){UnityEngine.Debug.LogException(secondary);}
                     try {await SuspendScopeAsync(default);}catch(Exception secondary){UnityEngine.Debug.LogException(secondary);}
+                    System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(gallery).Throw();
                 }
                 throw;
             }
@@ -278,8 +287,7 @@ namespace Game.Media.Backup
                     if(!policy.wifiOnly || wifiAvailable())
                     {
                         bool complete=System.Diagnostics.Stopwatch.GetTimestamp()>=nextReconciliation;
-                        await ScanCoreAsync(cancellationToken,true,complete);
-                        await service.ProcessAsync(cancellationToken,service.UsesNativeBackgroundTransfer?null:policy.wifiOnly?wifiAvailable:null);
+                        await ScanCoreAsync(cancellationToken,complete);
                         if(complete)nextReconciliation=System.Diagnostics.Stopwatch.GetTimestamp()+(long)policy.scanIntervalSeconds*System.Diagnostics.Stopwatch.Frequency;
                     }
                     long until=System.Diagnostics.Stopwatch.GetTimestamp()+(long)policy.scanIntervalSeconds*System.Diagnostics.Stopwatch.Frequency;

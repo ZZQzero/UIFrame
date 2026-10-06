@@ -1,8 +1,31 @@
 # 图片与长期备份验证记录
 
-更新：2026-10-01（执行跨2026-09-30 / 10-01）。本页记录当前 SQLite 实现与复审修复的证据；此前 JSON 实现的测试数量与性能不作为当前版本验收结果。
+更新：2026-10-02。当前照片备份为唯一v2协议，业务仓库ABI / schema 2，SQLite核心ABI3。完整改动、命令、构建ID、B01–B24矩阵与设备执行步骤见 [本轮执行记录](GalleryBackgroundProtocolExecution.md)，清单见 [后台协议计划](GalleryBackgroundProtocolPlan.md)，最新F1–F6修复及边界见 [全量复查报告](GalleryBackgroundFullReview.md#6-修复结果与最终验证)。
 
-## 当前结论
+## 当前v2验证
+
+| 范围 | 本轮结果 |
+| --- | --- |
+| Unity图库与备份 | 71项：70通过、0失败、1项因构建目标跳过；该项在Android目标另行1/1通过 |
+| 32项失败隔离强化 | 一张慢传、一张失败，其余30张确认及慢项取消，专项1/1通过 |
+| 原生协议与契约 | 30项协议测试通过；6个关键回归在旧库全部失败；Release和ASan / UBSan契约测试通过 |
+| 异常退出 | 48个真实kill窗口、2个核对窗口及范围关联验证通过 |
+| 参考服务 | 33项HTTP / 进程 / 清理测试通过；OpenAPI3.1及8组正反例通过，已更正iOS重定向能力说明 |
+| Android | 生产Java / JNI调度、追加受理、并发恢复、期限所有权及清理宿主绑定、IL2CPP High / Release混淆APK通过；完整Java HTTP链路未运行 |
+| iOS | 生产目标与截止策略函数的Foundation宿主测试、Objective-C++、IL2CPP High导出、无签名Release编译链接通过；系统后台会话未实测 |
+| 四平台来源 | macOS / Android / iOS / Windows库同源，哈希及ABI检查通过；Windows只交叉构建 |
+
+业务库build ID为 `cfb8809e8ceca2ffdd03356367f4b4053bdbfb82435c6729b6a5afcd1aeed3b8`；最终修复证据目录为 `/var/folders/gk/fvyb98j97rv0xvb18qrzxppr0000gn/T/uiframe-review-fix-20261002-iqd48h49`，Unity整合结果为unity-final.xml、Android专项为unity-permission.xml。前次复审及首次交付证据分别保留在 `/var/folders/gk/fvyb98j97rv0xvb18qrzxppr0000gn/T/uiframe-v2-audit-20261002-1_i2lw75` 和 `/tmp/uiframe-background-v2-20261001.5cBjcQ`。全包.meta GUID合法且无重复，新增文档和Unity测试已补.meta。
+
+前次业务库 `a21bb7af...` 的1000个64KiB合成对象满批场景产生32次Plan；100%已核验场景为0次PUT、0照片上传字节，本次未重测这项吞吐。最终库已重测稀疏调度：百万历史且1个活动任务的Attempts p50约0.106ms、ProtocolWake p50约0.060ms，使用活动索引。这些合成对象 / 宿主查询数据不代表手机吞吐、真实网络或旧版性能提升，详见执行记录的测量条件。
+
+**仍未验收：** 手机系统后台 / 锁屏 / 退出矩阵、24小时负载、接近512MiB照片的设备峰值、Windows实际执行及生产服务。没有同条件旧版性能基线；不宣称商业发布全部完成。用户主Unity未重启，已加载旧原生库时需正常重开才能使用新版原生库。
+
+## 2026-10-01及之前的历史证据
+
+以下保留SQLite改造与多轮复审当时的记录；旧测试数量、旧业务ABI和哈希均不代表当前v2结果，旧JSON与旧协议的验证不能替代本轮验收。
+
+### 当时结论
 
 共享 BackupRepository、C# 图库索引、增量变化、共享缩略图、持久批量操作、分批清理及本机服务器 TTL 已接入。任务 / 策略 / 基线 / 回执没有旧 JSON 读取、格式探测、迁移、双写或全量 GetTasks 兼容接口。HTTP、平台桥接和构建清单仍使用 JSON。
 

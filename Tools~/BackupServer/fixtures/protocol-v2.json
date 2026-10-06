@@ -1,0 +1,189 @@
+[
+  {
+    "schema": "PlanRequest",
+    "operation": "plans",
+    "value": {
+      "protocolVersion": 2,
+      "requestId": "plan-1",
+      "items": [
+        {
+          "clientTaskId": "photo-a",
+          "attemptGeneration": 1,
+          "sourceNamespace": "example-install",
+          "sourceId": "camera:1",
+          "sourceVersion": "revision:1",
+          "sha256": "55c64d0fcd6f9d5f7c828093857e3fdfda68478bb4e9bd24d481ef391c7804e8",
+          "byteCount": 5,
+          "name": "photo.jpg",
+          "mimeType": "image/jpeg"
+        }
+      ]
+    }
+  },
+  {
+    "schema": "BatchResponse",
+    "value": {
+      "protocolVersion": 2,
+      "requestId": "plan-1",
+      "account": "example",
+      "serverTime": 1790874133508,
+      "limits": {
+        "maxItems": 32,
+        "maxRequestBytes": 262144,
+        "maxResponseBytes": 524288,
+        "maxDescriptorBytes": 8192,
+        "maxFileBytes": 536870912
+      },
+      "items": [
+        {
+          "clientTaskId": "photo-a",
+          "attemptGeneration": 1,
+          "status": "UploadRequired",
+          "upload": {
+            "clientTaskId": "photo-a",
+            "attemptGeneration": 1,
+            "uploadId": "adcf4105537d573ddcd76c0d4f3fb42d",
+            "sha256": "55c64d0fcd6f9d5f7c828093857e3fdfda68478bb4e9bd24d481ef391c7804e8",
+            "byteCount": 5,
+            "url": "https://storage.example.invalid/objects/adcf4105537d573ddcd76c0d4f3fb42d",
+            "headers": [
+              {
+                "name": "X-Upload-Authorization",
+                "value": "1790960533508.8ceb7fb661301e9fac43b30fe4442ff0358fc8c41fcfdd838d2c023a119e7fb2"
+              }
+            ],
+            "expiresAt": 1790960533508,
+            "successStatusCodes": [
+              200,
+              201,
+              204
+            ]
+          }
+        }
+      ]
+    }
+  },
+  {
+    "schema": "IdentityRequest",
+    "operation": "status",
+    "value": {
+      "protocolVersion": 2,
+      "requestId": "query-pending",
+      "items": [
+        {
+          "clientTaskId": "photo-a",
+          "attemptGeneration": 1
+        }
+      ]
+    }
+  },
+  {
+    "schema": "BatchResponse",
+    "value": {
+      "protocolVersion": 2,
+      "requestId": "query-pending",
+      "account": "example",
+      "serverTime": 1790874133509,
+      "limits": {
+        "maxItems": 32,
+        "maxRequestBytes": 262144,
+        "maxResponseBytes": 524288,
+        "maxDescriptorBytes": 8192,
+        "maxFileBytes": 536870912
+      },
+      "items": [
+        {
+          "clientTaskId": "photo-a",
+          "attemptGeneration": 1,
+          "status": "Verifying",
+          "nextCheckAt": 1790874138509
+        }
+      ]
+    }
+  },
+  {
+    "schema": "IdentityRequest",
+    "operation": "status",
+    "value": {
+      "protocolVersion": 2,
+      "requestId": "query-confirmed",
+      "items": [
+        {
+          "clientTaskId": "photo-a",
+          "attemptGeneration": 1
+        }
+      ]
+    }
+  },
+  {
+    "schema": "BatchResponse",
+    "value": {
+      "protocolVersion": 2,
+      "requestId": "query-confirmed",
+      "account": "example",
+      "serverTime": 1790874133510,
+      "limits": {
+        "maxItems": 32,
+        "maxRequestBytes": 262144,
+        "maxResponseBytes": 524288,
+        "maxDescriptorBytes": 8192,
+        "maxFileBytes": 536870912
+      },
+      "items": [
+        {
+          "clientTaskId": "photo-a",
+          "attemptGeneration": 1,
+          "status": "Confirmed",
+          "receipt": {
+            "clientTaskId": "photo-a",
+            "attemptGeneration": 1,
+            "backupId": "7e0ced362258763929ea830a45b0cd47",
+            "sourceNamespace": "example-install",
+            "sourceId": "camera:1",
+            "sourceVersion": "revision:1",
+            "sha256": "55c64d0fcd6f9d5f7c828093857e3fdfda68478bb4e9bd24d481ef391c7804e8",
+            "byteCount": 5,
+            "confirmedAt": 1790874133509
+          }
+        }
+      ]
+    }
+  },
+  {
+    "schema": "IdentityRequest",
+    "operation": "cancellations",
+    "value": {
+      "protocolVersion": 2,
+      "requestId": "cancel-1",
+      "items": [
+        {
+          "clientTaskId": "photo-b",
+          "attemptGeneration": 1
+        }
+      ]
+    }
+  },
+  {
+    "schema": "BatchResponse",
+    "value": {
+      "protocolVersion": 2,
+      "requestId": "cancel-1",
+      "account": "example",
+      "serverTime": 1790874133510,
+      "limits": {
+        "maxItems": 32,
+        "maxRequestBytes": 262144,
+        "maxResponseBytes": 524288,
+        "maxDescriptorBytes": 8192,
+        "maxFileBytes": 536870912
+      },
+      "items": [
+        {
+          "clientTaskId": "photo-b",
+          "attemptGeneration": 1,
+          "status": "Canceled"
+        }
+      ]
+    }
+  }
+]

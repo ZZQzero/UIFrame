@@ -10,8 +10,13 @@ import java.util.*;
 final class BackupRepository implements AutoCloseable {
     static final int CLEANUP_FILE_FAILED=1001;
     static { System.loadLibrary("uiframe_sqlite"); System.loadLibrary("uiframe_backup"); }
-    static final int INFO=1, TASK=7, SUBMITTED=10, FINISH=12, RELEASE=13, START=22, ATTEMPTS=23,HANDOFF=74,SCHEDULABLE=75,
-        CLEANUP_PAGE=18, CLEANUP_RUN=19, ATTEMPT=60, RESTART=63;
+    static final int INFO=1, TASK=7, ATTEMPTS=23, HANDOFF=74,
+        CLEANUP_PAGE=18, CLEANUP_RUN=19, ATTEMPT=60,
+        CONTROL_CREATE=80, CONTROL_SEAL=81, CONTROL_SUBMITTED=82, CONTROL_START=83,
+        CONTROL_VALIDATE=84, CONTROL_APPLY=85, CONTROL_FAIL=86, CONTROL_RELEASE=87,
+        CONTROL_RECOVER=88, CONTROLS=89, UPLOADS=90, UPLOAD_START=91, UPLOAD_END=92,
+        UPLOAD_RELEASE=93, PROTOCOL_ACTIONS=94, SYSTEM_SCHEDULED=95,
+        PROTOCOL_CLEANUP=100, PROTOCOL_RECONCILE=101, PROTOCOL_RELEASE=102, PROTOCOL_RESUME=103, PROTOCOL_WAKE=105, UPLOAD_REJECT=106;
     public static final class Failure extends RuntimeException {
         private static final long serialVersionUID=1L;
         final int code, sqlite, phase, committed;
