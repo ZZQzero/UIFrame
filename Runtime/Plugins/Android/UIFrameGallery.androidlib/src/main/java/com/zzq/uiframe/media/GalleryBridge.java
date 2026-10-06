@@ -363,7 +363,7 @@ public final class GalleryBridge {
                     else if(mime != null && mime.startsWith("image/")) job.pages.add(new JSONObject()
                         .put("id", DocumentsContract.buildDocumentUriUsingTree(tree,id).toString()).put("name",cursor.getString(1))
                         .put("mime",mime).put("size",cursor.isNull(3) ? -1 : cursor.getLong(3)).put("source","directory")
-                        .put("version",cursor.getString(4)+":"+cursor.getString(3)));
+                        .put("version",GalleryIndex.documentVersion(cursor,4,3)));
                 }
             }
         }

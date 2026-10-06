@@ -2,7 +2,7 @@
   "target": "ios",
   "abi": 2,
   "sqlite_abi": 3,
-  "sqlite_build_id": "cc2af4a34676c4a76a07358b30d6c4351d4b22a8bdba0f2c9c2e0954fdbbc305",
+  "sqlite_build_id": "d485f695fda5529bd7ae610ff823fc211c45cdd4aa28fa94b9456b82bccf10fd",
   "build_id": "cfb8809e8ceca2ffdd03356367f4b4053bdbfb82435c6729b6a5afcd1aeed3b8",
   "sources": {
     "CMakeLists.txt": "eb5b1264b53a211a8f239c1e509408e1d9123266eb2c710f66512fc4b25a28e0",
@@ -20,11 +20,11 @@
   },
   "sanitized": false,
   "artifacts": {
-    "libuiframe_backup.a": "935ce7f25af46bdb9ae863cb110bc361a7c1982830e32ad9d36bde9b238bda5e"
+    "libuiframe_backup.a": "9653aa14b34604575abbcab3c3117416acbaa7e45bf97a623342de487b748395"
   },
   "flags": [
     "-DCMAKE_BUILD_TYPE=RelWithDebInfo",
-    "-DUFSQLITE_LIBRARY=/private/tmp/uiframe-sqlite-ios/libuiframe_sqlite.a",
+    "-DUFSQLITE_LIBRARY=/private/tmp/uiframe-fixes-20261006-sqlite-ios/libuiframe_sqlite.a",
     "-DUFBACKUP_TESTS=OFF",
     "-DUFBACKUP_SANITIZE=OFF",
     "-DCMAKE_SYSTEM_NAME=iOS",

@@ -259,8 +259,8 @@ namespace Game.Media.Backup
         {
             void CheckSize(long size)
             {
-                if (size > maximum) throw new BackupSourceFailure(new IOException("Image exceeds the per-file backup limit."));
-                if (size > available) throw new BackupBudgetExceededException();
+                if (size > Math.Min(maximum,budget)) throw new BackupSourceFailure(new IOException("Image exceeds the per-file or total staging limit."));
+                if (size > available) throw new BackupSourceFailure(new GalleryException("SourceChanged","Image exceeded its declared size during preparation."));
             }
             if (source.Source == "file")
             {
@@ -306,8 +306,7 @@ namespace Game.Media.Backup
             }
             catch (GalleryException error) when (error.Code == "SizeLimitExceeded")
             {
-                if (maximum <= available) throw new BackupSourceFailure(error);
-                throw new BackupBudgetExceededException();
+                throw new BackupSourceFailure(error);
             }
             catch (GalleryException error) when (error.Code == "SourceUnavailable" || error.Code == "ReadFailed" || error.Code == "UnsupportedFormat")
             { throw new BackupSourceFailure(error); }

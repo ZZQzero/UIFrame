@@ -32,7 +32,13 @@ namespace Game.Media.Storage
                 }
                 var app=await repository.Query(new SqliteCommand("PRAGMA application_id"),r=>r.GetInt64(0),token).ConfigureAwait(false);
                 var version=await repository.Query(new SqliteCommand("PRAGMA user_version"),r=>r.GetInt64(0),token).ConfigureAwait(false);
-                if(app[0]!=1430667852 || version[0]!=1) throw new InvalidDataException("Unexpected image library identity or schema.");
+                if(app[0]!=1430667852 || (version[0]!=1 && version[0]!=2)) throw new InvalidDataException("Unexpected image library identity or schema.");
+                if(version[0]==1)
+                    await repository.Commit(new[]{
+                        new SqliteCommand("ALTER TABLE assets ADD COLUMN byte_count INTEGER CHECK(byte_count IS NULL OR byte_count>=0)"),
+                        new SqliteCommand("UPDATE library_scopes SET requires_reconcile=1"),
+                        new SqliteCommand("PRAGMA user_version=2")
+                    },token).ConfigureAwait(false);
                 var identity=await repository.Query(new SqliteCommand("SELECT library_id,index_generation FROM library_settings WHERE singleton=1"),r=>(id:r.GetString(0),generation:r.GetInt64(1)),token).ConfigureAwait(false);
                 if(identity.Count!=1) throw new InvalidDataException("Missing image library identity.");
                 repository.Id=identity[0].id; repository.Generation=identity[0].generation;
@@ -90,12 +96,12 @@ namespace Game.Media.Storage
                     "INSERT INTO change_log(scope_id,source_id,content_version,kind,scope_revision,permission_generation) " +
                     "SELECT ?,?,?,CASE WHEN s.source_id IS NULL OR s.present=0 THEN 0 WHEN s.content_version IS NOT ? THEN 1 ELSE 2 END,?,? " +
                     "FROM (SELECT 1) LEFT JOIN assets a ON a.source_id=? LEFT JOIN scope_assets s ON s.scope_id=? AND s.source_id=a.source_id " +
-                    "WHERE s.source_id IS NULL OR s.present=0 OR s.asset_revision<>a.asset_revision OR a.content_version IS NOT ? OR a.name<>? OR a.mime<>? OR a.width<>? OR a.height<>?",
-                    scope.Scope,source,image.Version,image.Version,scope.Revision,scope.Permission,source,scope.Scope,image.Version,image.FileName,image.MimeType,image.Width??0,image.Height??0));
+                    "WHERE s.source_id IS NULL OR s.present=0 OR s.asset_revision<>a.asset_revision OR a.content_version IS NOT ? OR a.name<>? OR a.mime<>? OR a.width<>? OR a.height<>? OR a.byte_count IS NOT ?",
+                    scope.Scope,source,image.Version,image.Version,scope.Revision,scope.Permission,source,scope.Scope,image.Version,image.FileName,image.MimeType,image.Width??0,image.Height??0,image.ByteCount));
                 commands.Add(new SqliteCommand(
-                    "INSERT INTO assets(source_id,content_version,name,mime,width,height) VALUES(?,?,?,?,?,?) " +
-                    "ON CONFLICT(source_id) DO UPDATE SET asset_revision=assets.asset_revision+CASE WHEN assets.content_version IS NOT excluded.content_version OR assets.name<>excluded.name OR assets.mime<>excluded.mime OR assets.width<>excluded.width OR assets.height<>excluded.height THEN 1 ELSE 0 END,content_version=excluded.content_version,name=excluded.name,mime=excluded.mime,width=excluded.width,height=excluded.height",
-                    source,image.Version,image.FileName,image.MimeType,image.Width??0,image.Height??0));
+                    "INSERT INTO assets(source_id,content_version,name,mime,width,height,byte_count) VALUES(?,?,?,?,?,?,?) " +
+                    "ON CONFLICT(source_id) DO UPDATE SET asset_revision=assets.asset_revision+CASE WHEN assets.content_version IS NOT excluded.content_version OR assets.name<>excluded.name OR assets.mime<>excluded.mime OR assets.width<>excluded.width OR assets.height<>excluded.height OR assets.byte_count IS NOT excluded.byte_count THEN 1 ELSE 0 END,content_version=excluded.content_version,name=excluded.name,mime=excluded.mime,width=excluded.width,height=excluded.height,byte_count=excluded.byte_count",
+                    source,image.Version,image.FileName,image.MimeType,image.Width??0,image.Height??0,image.ByteCount));
                 commands.Add(new SqliteCommand(
                     "INSERT INTO scope_assets(scope_id,source_id,seen_scan_id,updated_seq,present,content_version,asset_revision) VALUES(?,?,?,(SELECT coalesce(max(sequence),0) FROM change_log),1,?,(SELECT asset_revision FROM assets WHERE source_id=?)) " +
                     "ON CONFLICT(scope_id,source_id) DO UPDATE SET seen_scan_id=excluded.seen_scan_id,updated_seq=excluded.updated_seq,present=1,content_version=excluded.content_version,asset_revision=excluded.asset_revision",
@@ -156,21 +162,21 @@ namespace Game.Media.Storage
             AppendRemoval(commands,scope,source,kind); return Commit(commands,token);
         }
         internal Task<IReadOnlyList<ImageReference>> Page(string scope,string after,int size,CancellationToken token)
-            => Query(new SqliteCommand("SELECT a.source_id,a.content_version,a.name,a.mime,a.width,a.height FROM scope_assets s JOIN assets a ON a.source_id=s.source_id WHERE s.scope_id=? AND s.present=1 AND s.source_id>? ORDER BY s.source_id LIMIT ?",scope,after,size),MapImage,token);
+            => Query(new SqliteCommand("SELECT a.source_id,a.content_version,a.name,a.mime,a.width,a.height,a.byte_count FROM scope_assets s JOIN assets a ON a.source_id=s.source_id WHERE s.scope_id=? AND s.present=1 AND s.source_id>? ORDER BY s.source_id LIMIT ?",scope,after,size),MapImage,token);
         static ImageReference MapImage(SqliteRow row)
         {
             string identity=row.GetString(0); int colon=identity.IndexOf(':'); if(colon<=0) throw new InvalidDataException("Invalid indexed image identity.");
-            return new ImageReference(identity.Substring(0,colon),identity.Substring(colon+1),row.GetString(2),row.GetString(3),width:(int)row.GetInt64(4),height:(int)row.GetInt64(5),version:row.GetString(1));
+            return new ImageReference(identity.Substring(0,colon),identity.Substring(colon+1),row.GetString(2),row.GetString(3),row.IsNull(6)?-1:row.GetInt64(6),width:(int)row.GetInt64(4),height:(int)row.GetInt64(5),version:row.GetString(1));
         }
         // One SELECT owns one SQLite read snapshot, including an empty page.
         internal async Task<ImageLibraryChangeBatch> Changes(string scope,long after,int size,CancellationToken token)
         {
             var rows=await Query(new SqliteCommand(
-                "WITH page AS (SELECT c.sequence,c.source_id,c.content_version,c.kind,a.name,a.mime FROM change_log c LEFT JOIN assets a ON a.source_id=c.source_id WHERE c.scope_id=? AND c.sequence>? ORDER BY c.sequence LIMIT ?) " +
-                "SELECT l.library_id,l.index_generation,s.id,s.revision,s.permission_generation,l.retained_after_seq,s.requires_reconcile,max((SELECT coalesce(max(sequence),0) FROM change_log),l.retained_after_seq),p.sequence,p.source_id,p.content_version,p.kind,p.name,p.mime " +
+                "WITH page AS (SELECT c.sequence,c.source_id,c.content_version,c.kind,a.name,a.mime,CASE WHEN c.content_version IS a.content_version THEN a.byte_count END AS byte_count FROM change_log c LEFT JOIN assets a ON a.source_id=c.source_id WHERE c.scope_id=? AND c.sequence>? ORDER BY c.sequence LIMIT ?) " +
+                "SELECT l.library_id,l.index_generation,s.id,s.revision,s.permission_generation,l.retained_after_seq,s.requires_reconcile,max((SELECT coalesce(max(sequence),0) FROM change_log),l.retained_after_seq),p.sequence,p.source_id,p.content_version,p.kind,p.name,p.mime,p.byte_count " +
                 "FROM library_settings l JOIN library_scopes s ON s.id=? LEFT JOIN page p ON 1=1 WHERE l.singleton=1 ORDER BY p.sequence",scope,after,size,scope),
                 r=>(position:new ImageLibraryPosition {LibraryId=r.GetString(0),IndexGeneration=r.GetInt64(1),ScopeId=r.GetString(2),ScopeRevision=r.GetInt64(3),PermissionGeneration=r.GetInt64(4),RetainedAfter=r.GetInt64(5),RequiresRefresh=r.GetInt64(6)!=0,Sequence=r.GetInt64(7)},
-                    change:r.IsNull(8)?null:new ImageLibraryChange {Sequence=r.GetInt64(8),SourceIdentity=r.GetString(9),Version=r.GetString(10),Kind=(ImageLibraryChangeKind)r.GetInt64(11),Name=r.GetString(12),Mime=r.GetString(13)}),token).ConfigureAwait(false);
+                    change:r.IsNull(8)?null:new ImageLibraryChange {Sequence=r.GetInt64(8),SourceIdentity=r.GetString(9),Version=r.GetString(10),Kind=(ImageLibraryChangeKind)r.GetInt64(11),Name=r.GetString(12),Mime=r.GetString(13),ByteCount=r.IsNull(14)?(long?)null:r.GetInt64(14)}),token).ConfigureAwait(false);
             if(rows.Count==0)throw new ArgumentException("Library scope not registered.");
             var position=rows[0].position;var changes=rows.Where(r=>r.change!=null).Select(r=>r.change).ToArray();
             if(changes.Length==size)position.Sequence=changes[changes.Length-1].Sequence;

@@ -6,6 +6,7 @@
 #import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
 #import <Network/Network.h>
 #include <atomic>
+#include <errno.h>
 #import <CommonCrypto/CommonDigest.h>
 
 static std::atomic<bool> UFMWifi(false);
@@ -143,6 +144,33 @@ static NSString *UFMAccess() {
         default:return @"NotDetermined";
     }
 }
+// Only authorization evidence changes the scope; missing files and network failures stay local.
+static NSString *UFMAccessErrorCode(NSError *error) {
+    for(NSUInteger depth=0;error && depth<8;depth++,error=error.userInfo[NSUnderlyingErrorKey]) {
+        if([error.domain isEqual:@"UIFrameGalleryAccess"]) return error.code==2?@"ScopeConfirmationRequired":@"PermissionDenied";
+        if([error.domain isEqual:PHPhotosErrorDomain] && (error.code==PHPhotosErrorAccessUserDenied || error.code==PHPhotosErrorAccessRestricted))return @"PermissionDenied";
+        if([error.domain isEqual:NSCocoaErrorDomain] && error.code==NSFileReadNoPermissionError)return @"PermissionDenied";
+        if([error.domain isEqual:NSPOSIXErrorDomain] && (error.code==EACCES || error.code==EPERM))return @"PermissionDenied";
+    }
+    return nil;
+}
+static NSError *UFMScopeFailure(NSInteger code,NSString *message,NSError *underlying) {
+    NSMutableDictionary *info=[@{NSLocalizedDescriptionKey:message} mutableCopy];
+    if(underlying)info[NSUnderlyingErrorKey]=underlying;
+    return [NSError errorWithDomain:@"UIFrameGalleryAccess" code:code userInfo:info];
+}
+static NSDictionary *UFMSourceError(UFMJob *job,NSError *error,NSString *fallback) {
+    NSString *code=[job.request[@"source"] isEqual:@"directory"] || [job.request[@"op"] isEqual:@"directory"]?UFMAccessErrorCode(error):nil;
+    return UFMError(code?:fallback,error.localizedDescription);
+}
+static NSDictionary *UFMPhotoAccessFailure(NSError *error) {
+    NSString *access=UFMAccess(),*code=UFMAccessErrorCode(error);
+    if(![access isEqual:@"Authorized"] && ![access isEqual:@"Limited"])code=@"PermissionDenied";
+    return code?UFMError(code,error.localizedDescription?:@"Photo library read access is unavailable."):nil;
+}
+static NSDictionary *UFMPhotoSourceFailure(NSError *error) {
+    return UFMPhotoAccessFailure(error)?:UFMError(@"SourceUnavailable",error.localizedDescription?:@"Photo is no longer accessible.");
+}
 static NSString *UFMMime(NSString *extension) {
     UTType *type=[UTType typeWithFilenameExtension:extension]; return type.preferredMIMEType ?: @"application/octet-stream";
 }
@@ -156,11 +184,11 @@ static PHFetchOptions *UFMImageOptions() {
 }
 static NSURL *UFMResolveDirectory(UFMJob *job, NSString *bookmark, NSError **error) {
     NSData *data=[[NSData alloc] initWithBase64EncodedString:bookmark options:0];
-    if(!data) { *error=UFMFailure(@"Invalid directory bookmark."); return nil; }
+    if(!data) { *error=UFMScopeFailure(2,@"Invalid directory bookmark; select the directory again.",nil); return nil; }
     BOOL stale=NO;
     NSURL *url=[NSURL URLByResolvingBookmarkData:data options:NSURLBookmarkResolutionWithoutUI relativeToURL:nil bookmarkDataIsStale:&stale error:error];
-    if(!url || stale) { if(!*error) *error=UFMFailure(@"Directory bookmark is stale; select the directory again."); return nil; }
-    if(![url startAccessingSecurityScopedResource]) { *error=UFMFailure(@"Directory authorization unavailable."); return nil; }
+    if(!url || stale) { *error=UFMScopeFailure(UFMAccessErrorCode(*error)?1:2,@"Directory bookmark is unavailable; select the directory again.",*error); return nil; }
+    if(![url startAccessingSecurityScopedResource]) { *error=UFMScopeFailure(1,@"Directory authorization unavailable.",nil); return nil; }
     job.securityRoot=url; return url;
 }
 static NSString *UFMBookmarkPath(NSString *key, NSError **error) {
@@ -179,7 +207,7 @@ static NSString *UFMRegisterBookmark(NSString *bookmark, NSError **error) {
 }
 static NSDictionary *UFMDirectory(UFMJob *job) {
     NSError *error=nil; NSURL *root=UFMResolveDirectory(job,job.request[@"path"],&error);
-    if(!root) return UFMError(@"PermissionDenied",error.description);
+    if(!root) return UFMSourceError(job,error,@"SourceUnavailable");
     NSString *bookmarkId=UFMRegisterBookmark(job.request[@"path"],&error); if(!bookmarkId) return UFMError(@"WriteFailed",error.description);
     NSArray *keys=@[NSURLIsDirectoryKey,NSURLIsSymbolicLinkKey,NSURLFileSizeKey,NSURLContentModificationDateKey];
     __block NSError *enumerationError=nil;
@@ -187,7 +215,7 @@ static NSDictionary *UFMDirectory(UFMJob *job) {
     job.pages=[UFMPageStore new];
     for(NSURL *url in enumerator) { @autoreleasepool {
         if(job.canceled) break;
-        NSDictionary *values=[url resourceValuesForKeys:keys error:&error]; if(!values) return UFMError(@"ReadFailed",error.description);
+        NSDictionary *values=[url resourceValuesForKeys:keys error:&error]; if(!values) return UFMSourceError(job,error,@"ReadFailed");
         if([values[NSURLIsSymbolicLinkKey] boolValue]) { [enumerator skipDescendants]; continue; }
         if([values[NSURLIsDirectoryKey] boolValue]) { if(![job.request[@"recursive"] boolValue]) [enumerator skipDescendants]; continue; }
         NSString *mime=UFMMime(url.pathExtension); if(![mime hasPrefix:@"image/"]) continue;
@@ -197,7 +225,7 @@ static NSDictionary *UFMDirectory(UFMJob *job) {
         [job.pages add:@{@"id":identifier,@"source":@"directory",@"name":url.lastPathComponent,@"mime":mime,@"size":values[NSURLFileSizeKey] ?: @(-1),
             @"version":[NSString stringWithFormat:@"%.6f:%@",[values[NSURLContentModificationDateKey] timeIntervalSince1970],values[NSURLFileSizeKey]]}];
     }}
-    if(enumerationError) return UFMError(@"ReadFailed",enumerationError.description);
+    if(enumerationError) return UFMSourceError(job,enumerationError,@"ReadFailed");
     [job.pages finish]; return @{@"status":@"ok"};
 }
 static NSDictionary *UFMLibrary(UFMJob *job) {
@@ -239,7 +267,12 @@ static NSString *UFMSource(UFMJob *job, NSError **error) {
         NSDictionary *identity=[NSJSONSerialization JSONObjectWithData:[job.request[@"path"] dataUsingEncoding:NSUTF8StringEncoding] options:0 error:error];
         if(!identity) return nil;
         NSString *stored=UFMBookmarkPath(identity[@"bookmarkId"],error); if(!stored) return nil;
-        NSString *bookmark=[NSString stringWithContentsOfFile:stored encoding:NSUTF8StringEncoding error:error]; if(!bookmark) return nil;
+        NSString *bookmark=[NSString stringWithContentsOfFile:stored encoding:NSUTF8StringEncoding error:error];
+        if(!bookmark) {
+            if([(*error).domain isEqual:NSCocoaErrorDomain] && (*error).code==NSFileReadNoSuchFileError)
+                *error=UFMScopeFailure(2,@"Saved directory authorization is missing; select the directory again.",*error);
+            return nil;
+        }
         NSURL *root=UFMResolveDirectory(job,bookmark,error); if(!root) return nil;
         NSString *path=[[root.path stringByAppendingPathComponent:identity[@"relative"]] stringByStandardizingPath];
         NSString *resolved=[path stringByResolvingSymlinksInPath];
@@ -253,13 +286,13 @@ static NSDictionary *UFMCopyImage(UFMJob *job, NSString *source, NSString *desti
     NSOutputStream *output=[NSOutputStream outputStreamToFileAtPath:destination append:NO];
     [input open]; [output open];
     @try {
-        if (input.streamError) return UFMError(@"SourceUnavailable",input.streamError.description);
+        if (input.streamError) return UFMSourceError(job,input.streamError,@"SourceUnavailable");
         if (output.streamError) return UFMError(@"WriteFailed",output.streamError.description);
         uint8_t buffer[131072]; long long total=0, limit=[job.request[@"maxBytes"] longLongValue];
         for (;;) {
             if (job.canceled) return @{@"status":@"canceled"};
             NSInteger count=[input read:buffer maxLength:sizeof(buffer)];
-            if (count<0) return UFMError(@"SourceUnavailable",input.streamError.description);
+            if (count<0) return UFMSourceError(job,input.streamError,@"SourceUnavailable");
             if (count==0) return nil;
             if (limit>0 && count>limit-total) return UFMError(@"SizeLimitExceeded",@"Image exceeds export byte limit.");
             for (NSInteger offset=0;offset<count;) {
@@ -325,14 +358,14 @@ static NSDictionary *UFMIndex(UFMJob *job) {
         if([op isEqual:@"imagesClose"]){[UFMScans removeObjectForKey:identity];return @{@"status":@"ok"};}
         if([op isEqual:@"unobserve"]){UFMLibraryObserver *observer=UFMObservers[identity];[UFMObservers removeObjectForKey:identity];if(observer)[PHPhotoLibrary.sharedPhotoLibrary unregisterChangeObserver:observer];return @{@"status":@"ok"};}
         if([op isEqual:@"stat"] && [job.request[@"source"] isEqual:@"directory"]) {
-            NSError *error=nil;NSString *path=UFMSource(job,&error);UFMCheckIO(error);
-            NSDictionary *attributes=[[NSFileManager defaultManager] attributesOfItemAtPath:path error:&error];UFMCheckIO(error);
+            NSError *error=nil;NSString *path=UFMSource(job,&error);if(!path)return UFMSourceError(job,error,@"SourceUnavailable");
+            NSDictionary *attributes=[[NSFileManager defaultManager] attributesOfItemAtPath:path error:&error];if(!attributes)return UFMSourceError(job,error,@"ReadFailed");
             return @{@"status":@"ok",@"items":@[@{@"id":identity,@"version":[NSString stringWithFormat:@"%.6f:%@",[attributes[NSFileModificationDate] timeIntervalSince1970],attributes[NSFileSize]]}]};
         }
         NSString *access=UFMAccess();if(![access isEqual:@"Authorized"] && ![access isEqual:@"Limited"])return UFMError(@"PermissionDenied",@"Photo library read access is unavailable");
         if([op isEqual:@"stat"]) {
             PHAsset *asset=[PHAsset fetchAssetsWithLocalIdentifiers:@[identity] options:nil].firstObject;
-            return asset?@{@"status":@"ok",@"items":@[UFMAssetItem(asset)]}:UFMError(@"SourceUnavailable",@"Photo is no longer accessible");
+            return asset?@{@"status":@"ok",@"items":@[UFMAssetItem(asset)]}:UFMPhotoSourceFailure(nil);
         }
         if([op isEqual:@"imagesOpen"]) {
             if(UFMScans.count>=16 || UFMScans[identity])return UFMError(@"ScanCapacity",@"Photo scan capacity or identity conflict");
@@ -416,8 +449,9 @@ static NSDictionary *UFMReadSource(UFMJob *job, NSString *source) {
 
 // PhotoKit selects an appropriately sized representation; previews never export the original resource.
 static void UFMReadThumbnail(UFMJob *job) {
+    NSDictionary *accessFailure=UFMPhotoAccessFailure(nil);if(accessFailure){UFMComplete(job,accessFailure);return;}
     PHAsset *asset=[PHAsset fetchAssetsWithLocalIdentifiers:@[job.request[@"path"]] options:nil].firstObject;
-    if(!asset) { UFMComplete(job,UFMError(@"SourceUnavailable",@"Photo is no longer accessible.")); return; }
+    if(!asset) { UFMComplete(job,UFMPhotoSourceFailure(nil)); return; }
     if(!UFMFitsPixels(job,asset.pixelWidth,asset.pixelHeight)) { UFMComplete(job,UFMError(@"ImageTooLarge",@"Requested image exceeds MaxPixels.")); return; }
     PHImageRequestOptions *options=[PHImageRequestOptions new]; options.networkAccessAllowed=YES;
     options.deliveryMode=PHImageRequestOptionsDeliveryModeHighQualityFormat; options.resizeMode=PHImageRequestOptionsResizeModeExact;
@@ -427,7 +461,7 @@ static void UFMReadThumbnail(UFMJob *job) {
         if([info[PHImageResultIsDegradedKey] boolValue]) return;
         @synchronized(job) { job.imagePending=NO; job.copying=YES; }
         if(job.canceled) { UFMComplete(job,@{@"status":@"canceled"}); return; }
-        if(!image || info[PHImageErrorKey]) { UFMComplete(job,UFMError(@"SourceUnavailable",[info[PHImageErrorKey] description] ?: @"No photo preview returned.")); return; }
+        if(!image || info[PHImageErrorKey]) { UFMComplete(job,UFMPhotoSourceFailure(info[PHImageErrorKey])); return; }
         [UFMQueue addOperationWithBlock:^{ @autoreleasepool {
             if(job.canceled) { UFMComplete(job,@{@"status":@"canceled"}); return; }
             CGFloat w=image.size.width, h=image.size.height, scale=MIN(1,edge/MAX(w,h));
@@ -442,8 +476,9 @@ static void UFMReadThumbnail(UFMJob *job) {
 }
 // Cloud/provider waits hold no worker slot. Cancellation detaches their output before returning ownership.
 static void UFMReadAsset(UFMJob *job) {
+    NSDictionary *accessFailure=UFMPhotoAccessFailure(nil);if(accessFailure){UFMComplete(job,accessFailure);return;}
     PHAsset *asset=[PHAsset fetchAssetsWithLocalIdentifiers:@[job.request[@"path"]] options:nil].firstObject;
-    if (!asset) { UFMComplete(job,UFMError(@"SourceUnavailable",@"Source is unavailable or permission was revoked.")); return; }
+    if (!asset) { UFMComplete(job,UFMPhotoSourceFailure(nil)); return; }
     PHAssetResource *resource=nil;
     for (PHAssetResource *candidate in [PHAssetResource assetResourcesForAsset:asset]) {
         if (candidate.type==PHAssetResourceTypeFullSizePhoto) { resource=candidate; break; }
@@ -477,7 +512,8 @@ static void UFMReadAsset(UFMJob *job) {
         NSDictionary *failure;
         @synchronized(job) { [job.resourceOutput close]; job.resourceOutput=nil; job.resourcePending=NO; failure=job.resourceFailure; }
         if (job.canceled) { UFMComplete(job,@{@"status":@"canceled"}); return; }
-        if (failure || error) { UFMComplete(job,failure ?: UFMError(@"SourceUnavailable",error.description)); return; }
+        if (failure || error) { UFMComplete(job,failure ?: UFMPhotoSourceFailure(error)); return; }
+        NSDictionary *accessFailure=UFMPhotoAccessFailure(nil);if(accessFailure){UFMComplete(job,accessFailure);return;}
         [UFMQueue addOperationWithBlock:^{ @autoreleasepool { UFMComplete(job,UFMReadSource(job,path)); } }];
     }];
     @synchronized(job) {
@@ -595,7 +631,7 @@ extern "C" void UFMStart(const char *json) {
             else if([op isEqual:@"export"] || [op isEqual:@"preview"]) {
                 if ([job.request[@"source"] isEqual:@"file"] || [job.request[@"source"] isEqual:@"directory"]) {
                     NSError *error=nil; NSString *source=UFMSource(job,&error);
-                    UFMComplete(job,source ? UFMReadSource(job,source) : UFMError(@"SourceUnavailable",error.description));
+                    UFMComplete(job,source ? UFMReadSource(job,source) : UFMSourceError(job,error,@"SourceUnavailable"));
                 } else if([op isEqual:@"preview"]) UFMReadThumbnail(job);
                 else UFMReadAsset(job);
             }

@@ -1,8 +1,8 @@
 {
   "abi": 2,
-  "sqlite_build_id": "cc2af4a34676c4a76a07358b30d6c4351d4b22a8bdba0f2c9c2e0954fdbbc305",
+  "sqlite_build_id": "d485f695fda5529bd7ae610ff823fc211c45cdd4aa28fa94b9456b82bccf10fd",
   "binary": "libuiframe_backup.so",
-  "sha256": "4547f17c11f6e9d74024e1512fc9fbddadab5ca3246a18a71d583ec295d0346f",
+  "sha256": "cdae02c14dd69710e8eb29e64092aa9b32a584f84271f2cf9361c66d6dd2d8dc",
   "sources": [
     {
       "path": "CMakeLists.txt",

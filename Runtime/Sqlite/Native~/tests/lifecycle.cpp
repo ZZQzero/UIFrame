@@ -1,4 +1,22 @@
+#include <fstream>
+#ifndef _WIN32
+#include <unistd.h>
+#include <sys/stat.h>
+#include <errno.h>
+static bool fail_directory_sync = false;
+static int snapshot_fsync(int fd) {
+    struct stat info{};
+    if (fail_directory_sync && fstat(fd, &info) == 0 && S_ISDIR(info.st_mode)) {
+        fail_directory_sync = false; errno = EIO; return -1;
+    }
+    return fsync(fd);
+}
+#define fsync snapshot_fsync
+#endif
 #include "../src/core.cpp"
+#ifndef _WIN32
+#undef fsync
+#endif
 #include <iostream>
 namespace {
 std::vector<uint8_t> request(const char *sql) {
@@ -30,6 +48,61 @@ uint64_t open_store(uint64_t client, const std::string &path, int mode) {
     require(ufsqlite_release_result(client, result.operation) == 0, UF_STATE, "open release failed");
     return result.database;
 }
+void snapshot_boundaries(uint64_t client, uint64_t db, const std::filesystem::path &root) {
+    finish(client, send(client, db, UF_EXECUTE, request("CREATE TABLE snapshot_data(value BLOB)")));
+    for (int i=0;i<4;++i) finish(client, send(client, db, UF_EXECUTE, request("INSERT INTO snapshot_data VALUES(zeroblob(500000))")));
+    uint64_t serial = 100000;
+    auto make = [&](const std::string &path) {
+        auto job = std::make_unique<Job>(); job->id = ++serial; job->deadline = Clock::now()+std::chrono::seconds(60);
+        { std::lock_guard<std::mutex> lock(engine().mutex); job->database = engine().databases.at(db); }
+        Writer w(4096); w.string(path.data(), path.size()); w.number(32*MiB,8); w.number(32*MiB,8);
+        job->input = std::move(w.bytes); return job;
+    };
+    auto fail = [&](Job &job, int expected) {
+        int code = 0;
+        try { while (!snapshot_step(job)) {} } catch (const Failure &error) { code = error.code; }
+        require(code == expected, UF_STATE, "snapshot returned unexpected status");
+        require(close_snapshot(job) == SQLITE_OK, UF_STATE, "snapshot cleanup failed");
+    };
+    for (const char *suffix : {"-wal", "-shm", "-journal"}) {
+        auto path = (root / (std::string("sidecar")+suffix+".sqlite")).u8string();
+        auto side = path+suffix;
+        { std::ofstream stream(side); stream << "foreign"; }
+        auto job = make(path); fail(*job, UF_STATE);
+        require(!std::filesystem::exists(path), UF_STATE, "sidecar conflict published a snapshot");
+        std::ifstream stream(side); std::string value; stream >> value;
+        require(value == "foreign", UF_STATE, "foreign sidecar changed");
+        stream.close(); std::filesystem::remove(side);
+        job = make(path); require(!snapshot_step(*job), UF_STATE, "fixture must span steps");
+        { std::ofstream output(side); output << "late"; }
+        fail(*job, UF_STATE);
+        require(!std::filesystem::exists(path) && std::filesystem::exists(side), UF_STATE, "late sidecar was overwritten");
+        std::filesystem::remove(side);
+    }
+    auto path = (root / "owned-snapshot.sqlite").u8string();
+    auto job = make(path); require(!snapshot_step(*job), UF_STATE, "fixture must span steps");
+    auto competitor = make(path); fail(*competitor, UF_STATE);
+    Writer open(4096); open.number(0,4); open.string(path.data(),path.size()); open.number(0,8); open.number(32*MiB,8);
+    auto blocked = receive(client,send(client,0,UF_OPEN,open.bytes));
+    require(blocked.error == UF_STATE, UF_STATE, "CreateNew entered snapshot destination");
+    ufsqlite_release_result(client, blocked.operation);
+    job->cancel = true; fail(*job, UF_CANCELED);
+    require(!std::filesystem::exists(path), UF_STATE, "canceled snapshot published");
+    job = make(path); while (!snapshot_step(*job)) {}
+    require(job->completion.committed == 1, UF_STATE, "successful snapshot not marked published");
+    auto copy = open_store(client,path,2);
+    finish(client,send(client,copy,UF_QUERY,request("SELECT length(value) FROM snapshot_data")));
+    finish(client,send(client,copy,UF_CLOSE));
+#ifndef _WIN32
+    path = (root / "sync-failure.sqlite").u8string(); job = make(path);
+    fail_directory_sync = true; fail(*job,UF_IO);
+    require(!fail_directory_sync && job->completion.committed == 1 && std::filesystem::exists(path), UF_STATE,
+            "post-publication fsync failure lost its publication fact");
+    copy = open_store(client,path,2);
+    finish(client,send(client,copy,UF_QUERY,request("SELECT length(value) FROM snapshot_data")));
+    finish(client,send(client,copy,UF_CLOSE));
+#endif
+}
 }
 int main() {
     try {
@@ -60,6 +133,7 @@ int main() {
         Reader value{query.data + query.data_size - 8, 8};
         require(value.number(8) == 1, UF_STATE, "writes did not follow acceptance order");
         require(ufsqlite_release_result(client, query.operation) == 0, UF_STATE, "query release");
+        snapshot_boundaries(client, db, root);
         uint64_t reserved_close, duplicate_close;
         require(ufsqlite_reserve(client, db, UF_CLOSE, 0, 0, 0, 5000, &reserved_close) == 0, UF_STATE, "reserve close");
         require(ufsqlite_reserve(client, db, UF_CLOSE, 0, 0, 0, 5000, &duplicate_close) == UF_STATE, UF_STATE, "duplicate close reservation admitted");

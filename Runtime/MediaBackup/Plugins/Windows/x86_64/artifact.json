@@ -1,8 +1,8 @@
 {
   "abi": 2,
-  "sqlite_build_id": "cc2af4a34676c4a76a07358b30d6c4351d4b22a8bdba0f2c9c2e0954fdbbc305",
+  "sqlite_build_id": "d485f695fda5529bd7ae610ff823fc211c45cdd4aa28fa94b9456b82bccf10fd",
   "binary": "uiframe_backup.dll",
-  "sha256": "28fd3e074a3e6599816f3319896c1adf0cc5f154151f03e3486e815852b4d64b",
+  "sha256": "e944ef4fabc34e68f1a71f5505aabcaf245cd1fb692d5fb4335df0231a84a646",
   "sources": [
     {
       "path": "CMakeLists.txt",

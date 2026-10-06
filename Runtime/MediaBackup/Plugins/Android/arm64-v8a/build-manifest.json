@@ -2,7 +2,7 @@
   "target": "android",
   "abi": 2,
   "sqlite_abi": 3,
-  "sqlite_build_id": "cc2af4a34676c4a76a07358b30d6c4351d4b22a8bdba0f2c9c2e0954fdbbc305",
+  "sqlite_build_id": "d485f695fda5529bd7ae610ff823fc211c45cdd4aa28fa94b9456b82bccf10fd",
   "build_id": "cfb8809e8ceca2ffdd03356367f4b4053bdbfb82435c6729b6a5afcd1aeed3b8",
   "sources": {
     "CMakeLists.txt": "eb5b1264b53a211a8f239c1e509408e1d9123266eb2c710f66512fc4b25a28e0",
@@ -20,11 +20,11 @@
   },
   "sanitized": false,
   "artifacts": {
-    "libuiframe_backup.so": "4547f17c11f6e9d74024e1512fc9fbddadab5ca3246a18a71d583ec295d0346f"
+    "libuiframe_backup.so": "cdae02c14dd69710e8eb29e64092aa9b32a584f84271f2cf9361c66d6dd2d8dc"
   },
   "flags": [
     "-DCMAKE_BUILD_TYPE=RelWithDebInfo",
-    "-DUFSQLITE_LIBRARY=/private/tmp/uiframe-sqlite-android/libuiframe_sqlite.so",
+    "-DUFSQLITE_LIBRARY=/private/tmp/uiframe-fixes-20261006-sqlite-android/libuiframe_sqlite.so",
     "-DUFBACKUP_TESTS=OFF",
     "-DUFBACKUP_SANITIZE=OFF",
     "-DCMAKE_TOOLCHAIN_FILE=/Users/zzq/Library/Android/sdk/ndk/27.2.12479018/build/cmake/android.toolchain.cmake",

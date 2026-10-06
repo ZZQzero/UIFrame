@@ -88,6 +88,9 @@ namespace Game.Media.Backup
                     {
                         lease=image.Acquire();
                         if(image.ByteCount>Math.Min(maximum,budget))throw new BackupSourceFailure(new IOException("Image exceeds the per-file or total staging limit."));
+                        // Unknown lengths reserve their full permitted size before the first read.
+                        // Waiting here is backpressure, never a retry of a failed export.
+                        long required=image.ByteCount??Math.Min(maximum,budget);
                         long available;
                         for(;;)
                         {
@@ -98,7 +101,7 @@ namespace Game.Media.Backup
                             long staged=counts.Single(x=>x.Number("state")==1).Number("count");
                             long free=(await Db(Command.Storage,token)).Single.Number("available_bytes")-16L*1024*1024;
                             available=Math.Min(budget-occupied,free);
-                            if(staged<64 && available>0 && (!image.ByteCount.HasValue || image.ByteCount.Value<=available))break;
+                            if(staged<64 && available>0 && required<=available)break;
                             IsWaitingForCapacity=true;
                             await Schedule();
                             await UniTask.Delay(200,ignoreTimeScale:true,cancellationToken:token);
@@ -126,6 +129,7 @@ namespace Game.Media.Backup
                     {
                         errors.Add(failure.Original.SourceException);
                         await Db(Command.FailItem,default,ids[next],owner,failure.Original.SourceException.ToString(),Now);
+                        await CleanupFilesAsync(default,32);
                     }
                     finally
                     {

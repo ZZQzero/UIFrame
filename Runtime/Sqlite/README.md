@@ -38,13 +38,13 @@ finally { await db.CloseAsync(); }
 | `ExecuteAsync` | 单条不返回行的 SQL；成功返回直接受影响行数 |
 | `QueryPageAsync` | 一条只读 SQL；映射完成即释放原生页，返回的集合由调用方持有 |
 | `ExecuteTransactionAsync` | 有序 `SqliteBatch`，提交后交付 `SqliteBatchResult`；必须 Dispose，可以在数据库关闭后继续读取 |
-| `CreateSnapshotAsync` | 固定来源快照、分步复制、校验并发布到新的目标路径；已有目标不覆盖 |
+| `CreateSnapshotAsync` | 固定来源快照、分步复制、校验并发布到新的目标路径；已有主文件或 WAL／SHM／journal 均拒绝且不删除 |
 | `GetStorageInfoAsync` | 主库、WAL 和可用磁盘字节；并发写入后数字可以变化 |
 | `CheckpointAsync` | Passive 或 Truncate；只尝试一次，读取者阻止回收时 `CheckpointBlocked=true`，不等待或重试 |
 | `GetDiagnostics` / `SqliteRuntime.GetDiagnostics` | **模块全局**连接、排队 / 执行数量、参数 / 结果缓冲、等待 / 执行 / 提交耗时、缓存命中、错误 / 取消 / 超时计数和引擎内存 |
 | `CloseAsync` | 停止新请求，等已受理工作及映射结束，释放连接；重复调用等待同一结果 |
 
-`SqliteCommand.ExpectAffectedRows(n)` 作为事务条件；不匹配时回滚整批。参数支持 null、string、byte[]、有符号64位范围的整数、bool、有限浮点数。SQL 一条命令一条语句，参数与 SQL 分开；禁止外部 BEGIN / COMMIT / ATTACH 和核心配置 PRAGMA。业务 application_id / user_version 可读写。
+`SqliteCommand.ExpectAffectedRows(n)` 作为事务条件；不匹配时回滚整批。参数支持 null、string、byte[]、有符号64位范围的整数、bool、有限浮点数。SQL 一条命令一条语句，参数与 SQL 分开；禁止外部 BEGIN / COMMIT / ATTACH 和核心配置 PRAGMA。业务 application_id / user_version 可读写；只读 quick_check 可执行，也用于 SQLite 自身的 ALTER TABLE 校验。
 
 行对象仅在 `Func<SqliteRow,T>` 内有效，映射后不可保留行对象；需要的数据应在回调中复制。映射运行在受限的后台并发槽位，须是短小的纯映射，不能访问 Unity 或同步等待嵌套数据库工作。映射异常保留原异常，不能撤销此前已提交的写入。
 
@@ -59,6 +59,8 @@ finally { await db.CloseAsync(); }
 - WAL + synchronous=FULL；同时开启 fullfsync / checkpoint_fullfsync，由目标 VFS 执行相应刷新。没有关闭可靠落盘以换取性能。
 - `SqliteOpenOptions` 默认写入前保留32 MiB可用磁盘、WAL高水位128 MiB。可显式配置；检查在写事务开始前执行，不预测任意SQL的全部未来磁盘增长，也不能代替实际磁盘满错误。高水位阻止写入，查询、维护、关闭仍可执行。释放空间或checkpoint后可显式提交新工作；不会重放原失败操作。
 - 自动checkpoint采用SQLite的1000页阈值。显式Truncate适合空闲窗口，不在写事务中执行VACUUM；本版没有自动压缩。
+
+`CreateNew` 与快照发布共用目标路径所有权：检查、创建／复制、发布及落盘期间，同一核心的其他写入者或快照不能占用该目标。可写打开和快照目标目录须允许创建／打开 `.ufsqlite-owner`；永久保留该锁文件以避免锁文件换代竞态，不应手动删除。快照在发布前再次检查主文件和侧文件；失败或取消只回收自身临时文件。发布后目录刷盘失败仍返回错误，保留已发布事实和目标文件，调用者应核对目标后决定后续操作。这一协作锁不约束绕过核心直接改写文件的外部程序。
 
 成功以COMMIT完成为准。提交后迟到取消不改写成功；不确定提交通过 `SqliteException.CommitOutcomeUnknown` 表达，故障库停止后续工作并仍允许关闭。业务通过同事务内的OperationId回执核对。次级清理错误保留在 `CleanupCode` 或 `SqliteRuntime.LastCleanupError`，不替换已有主异常。没有自动重试、损坏重建、JSON兼容、导入或双写。SqliteException.Phase 标识主错误所处阶段。
 

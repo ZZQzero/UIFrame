@@ -20,7 +20,7 @@ from urllib.parse import urlsplit
 from urllib.request import Request, urlopen
 
 from protocol import MAX_FILE_BYTES, decode_request, encode, identity
-from server import Store, handler_for
+from server import Store, handler_for, BackupHTTPServer
 from store import now_ms
 
 
@@ -29,8 +29,8 @@ class BackupProtocolTests(unittest.TestCase):
         self.directory = tempfile.TemporaryDirectory()
         self.credentials = [dict(account='alice', token='test-alice'), dict(account='bob', token='test-bob')]
         self.store = Store(self.directory.name, self.credentials)
-        self.private = ThreadingHTTPServer(('127.0.0.1', 0), handler_for(self.store, storage=True))
-        self.server = ThreadingHTTPServer(('127.0.0.1', 0), handler_for(self.store))
+        self.private = BackupHTTPServer(('127.0.0.1', 0), handler_for(self.store, storage=True))
+        self.server = BackupHTTPServer(('127.0.0.1', 0), handler_for(self.store))
         self.store.storage_origin = 'http://127.0.0.1:' + str(self.private.server_port)
         self.url = 'http://127.0.0.1:' + str(self.server.server_port)
         self.threads = []
@@ -518,6 +518,118 @@ __import__('time').sleep(60)
             finally:
                 if process.poll() is None: process.kill()
                 process.communicate(timeout=5)
+
+    def test_second_owner_cannot_recover_a_live_body(self):
+        item = self.item()
+        upload = self.plan([item])[0]['upload']
+        test = self
+        class Body(io.BytesIO):
+            def read(self, size=-1):
+                with test.assertRaises(OSError):
+                    Store(test.directory.name, test.credentials)
+                test.assertEqual('writing', test.store.db.execute('SELECT state FROM incoming').fetchone()[0])
+                test.store.cleanup()
+                test.assertTrue(Path(test.store.db.execute('SELECT path FROM incoming').fetchone()[0]).exists())
+                return super().read(size)
+        self.store.receive(upload['uploadId'], upload['headers'][0]['value'], 5, Body(b'photo'))
+        self.store.confirm_pending()
+        self.assertEqual('Confirmed', self.query(item)['status'])
+
+    def test_other_process_cannot_open_owned_directory(self):
+        code = "from store import Store; import sys\ntry: Store(sys.argv[1], [])\nexcept OSError: print('ownership rejected'); sys.exit(23)"
+        result = subprocess.run([sys.executable, '-c', code, self.directory.name],
+                                cwd=Path(__file__).parent, capture_output=True, timeout=5)
+        self.assertEqual(23, result.returncode, result.stderr)
+        self.assertEqual(b'ownership rejected', result.stdout.strip())
+        self.assertEqual('UploadRequired', self.plan([self.item()])[0]['status'])
+
+    def test_renewal_wins_over_stale_expiry_candidate(self):
+        item = self.item()
+        upload = self.plan([item])[0]['upload']
+        with self.store.lock, self.store.db:
+            self.store.db.execute('UPDATE attempts SET expires_at=?', (now_ms()-2*86400000-1000,))
+        original = self.store.upload_lock
+        def renew(upload_id):
+            self.store.upload_lock = original
+            renewed = self.plan([item])[0]
+            self.assertEqual((204, b''), self.put(renewed, b'photo'))
+            return original(upload_id)
+        with patch.object(self.store, 'upload_lock', renew):
+            self.store.maintenance()
+        self.assertEqual('ready', self.store.db.execute('SELECT state FROM incoming').fetchone()[0])
+        self.store.confirm_pending(); self.store.cleanup()
+        self.assertEqual('Confirmed', self.query(item)['status'])
+
+    def test_http_close_drains_handlers_before_storage_release(self):
+        entered, release, closed = threading.Event(), threading.Event(), threading.Event()
+        original = self.store.receive
+        def blocked(*args):
+            entered.set()
+            if not release.wait(5): raise TimeoutError('Fixture not released')
+            return original(*args)
+        upload = self.plan([self.item()])[0]
+        with patch.object(self.store, 'receive', blocked), ThreadPoolExecutor() as pool:
+            pending = pool.submit(self.put, upload, b'photo')
+            self.assertTrue(entered.wait(2))
+            self.private.shutdown()
+            closer = threading.Thread(target=lambda: (self.private.server_close(), closed.set()))
+            closer.start()
+            try:
+                self.assertFalse(closed.wait(0.1))
+                with self.assertRaises(OSError): Store(self.directory.name, self.credentials)
+            finally:
+                release.set(); closer.join(5)
+            self.assertTrue(closed.is_set())
+            self.assertEqual((204, b''), pending.result(timeout=5))
+        self.store.confirm_pending()
+        self.assertEqual(1, self.store.db.execute('SELECT count(*) FROM backups').fetchone()[0])
+
+    def test_process_kill_during_body_releases_owner_and_recovers_partial(self):
+        worker = """
+import io,sys,time
+from store import Store
+from protocol import decode_request
+s=Store(sys.argv[1],[dict(account='alice',token='test-alice')]);s.storage_origin='http://127.0.0.1:1'
+request=decode_request(sys.argv[2].encode(),'plans')
+u=s.control('alice','plans',request)['items'][0]['upload']
+class Body(io.BytesIO):
+ def read(self,n):
+  print('writing',flush=True)
+  time.sleep(60)
+  return super().read(n)
+s.receive(u['uploadId'],u['headers'][0]['value'],5,Body(b'photo'))
+"""
+        with tempfile.TemporaryDirectory() as directory:
+            request = dict(protocolVersion=2, requestId='crash-writing', items=[self.item()])
+            process = subprocess.Popen([sys.executable, '-u', '-c', worker, directory, encode(request).decode()],
+                cwd=Path(__file__).parent, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            try:
+                self.assertEqual('writing', process.stdout.readline().strip())
+                process.kill(); process.wait(timeout=5)
+                reopened = Store(directory, self.credentials)
+                try:
+                    self.assertEqual('cleanup', reopened.db.execute('SELECT state FROM incoming').fetchone()[0])
+                    reopened.cleanup()
+                    self.assertEqual(0, reopened.db.execute('SELECT count(*) FROM incoming').fetchone()[0])
+                    self.assertEqual([], list(Path(directory).rglob('*.incoming')))
+                    reopened.storage_origin='http://127.0.0.1:1'
+                    upload=reopened.control('alice','plans',request)['items'][0]['upload']
+                    reopened.receive(upload['uploadId'],upload['headers'][0]['value'],5,io.BytesIO(b'photo'))
+                    reopened.confirm_pending()
+                    self.assertEqual(1,reopened.db.execute('SELECT count(*) FROM backups').fetchone()[0])
+                finally: reopened.close()
+            finally:
+                if process.poll() is None: process.kill()
+                process.communicate(timeout=5)
+
+    def test_failed_initialization_releases_directory_ownership(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path=Path(directory)/'backup.sqlite3'
+            with sqlite3.connect(path) as database: database.execute('CREATE TABLE old_format(value)')
+            with self.assertRaises(ValueError): Store(directory,self.credentials)
+            path.unlink()
+            reopened=Store(directory,self.credentials)
+            reopened.close()
 
     def test_old_catalog_is_rejected_without_modification(self):
         with tempfile.TemporaryDirectory() as directory:

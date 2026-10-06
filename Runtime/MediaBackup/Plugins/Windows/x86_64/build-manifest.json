@@ -2,7 +2,7 @@
   "target": "windows-x64",
   "abi": 2,
   "sqlite_abi": 3,
-  "sqlite_build_id": "cc2af4a34676c4a76a07358b30d6c4351d4b22a8bdba0f2c9c2e0954fdbbc305",
+  "sqlite_build_id": "d485f695fda5529bd7ae610ff823fc211c45cdd4aa28fa94b9456b82bccf10fd",
   "build_id": "cfb8809e8ceca2ffdd03356367f4b4053bdbfb82435c6729b6a5afcd1aeed3b8",
   "sources": {
     "CMakeLists.txt": "eb5b1264b53a211a8f239c1e509408e1d9123266eb2c710f66512fc4b25a28e0",
@@ -21,15 +21,15 @@
   "sanitized": false,
   "artifacts": {
     "libuiframe_backup.dll.a": "670881c815ecf4c69589fce04286124380a7ef11c6f9698ce776a0bbb90fd7e0",
-    "uiframe_backup.dll": "28fd3e074a3e6599816f3319896c1adf0cc5f154151f03e3486e815852b4d64b"
+    "uiframe_backup.dll": "e944ef4fabc34e68f1a71f5505aabcaf245cd1fb692d5fb4335df0231a84a646"
   },
   "flags": [
     "-DCMAKE_BUILD_TYPE=RelWithDebInfo",
-    "-DUFSQLITE_LIBRARY=/private/tmp/uiframe-sqlite-windows-x64/libuiframe_sqlite.dll.a",
+    "-DUFSQLITE_LIBRARY=/private/tmp/uiframe-fixes-20261006-sqlite-windows-x64/libuiframe_sqlite.dll.a",
     "-DUFBACKUP_TESTS=OFF",
     "-DUFBACKUP_SANITIZE=OFF",
     "-DCMAKE_TOOLCHAIN_FILE=/Users/zzq/UIFrameTest/Packages/UIFrame/Runtime/Sqlite/Native~/build/windows-llvm-mingw.cmake",
-    "-DUFSQLITE_LLVM_MINGW=/tmp/uiframe-windows-toolchain/llvm-mingw-20260922-ucrt-macos-universal"
+    "-DUFSQLITE_LLVM_MINGW=/tmp/uiframe-fixes-windows-toolchain/llvm-mingw-20260922-ucrt-macos-universal"
   ],
   "native_tests": "not-run",
   "compiler_cache": []

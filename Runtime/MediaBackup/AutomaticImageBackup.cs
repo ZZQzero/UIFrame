@@ -138,8 +138,10 @@ namespace Game.Media.Backup
                 var p=batch.Position;var args=new List<object>{scope,p.LibraryId,p.IndexGeneration,p.ScopeRevision,p.PermissionGeneration,cursor.Sequence,p.Sequence,p.RetainedAfter,batch.Items.Count};
                 foreach(var change in batch.Items)
                 {
+                    if(change.Kind<=ImageLibraryChangeKind.MetadataChanged && string.IsNullOrEmpty(change.Version))
+                        throw new GalleryException("ContentVersionUnavailable","The provider cannot identify the current image version.");
                     int colon=change.SourceIdentity.IndexOf(':');string provider=change.SourceIdentity.Substring(colon+1);
-                    args.AddRange(new object[]{change.Sequence,(int)change.Kind,change.SourceIdentity,change.Version??"",change.Name??"",change.Mime??"",provider,0L});
+                    args.AddRange(new object[]{change.Sequence,(int)change.Kind,change.SourceIdentity,change.Version??"",change.Name??"",change.Mime??"",provider,change.ByteCount??0L});
                 }
                 await service.Db(Command.Discover,token,args.ToArray());cursor=p;
                 if(batch.Items.Count<32) return cursor;
@@ -205,7 +207,8 @@ namespace Game.Media.Backup
                         var images=pending.Select(candidate=>
                         {
                             string identity=candidate.Text("source_id");int colon=identity.IndexOf(':');
-                            return new ImageReference(identity.Substring(0,colon),candidate.Text("provider_id"),candidate.Text("name"),candidate.Text("mime"),version:candidate.Text("content_version"));
+                            long bytes=candidate.Number("byte_count");
+                            return new ImageReference(identity.Substring(0,colon),candidate.Text("provider_id"),candidate.Text("name"),candidate.Text("mime"),bytes>0?bytes:-1,version:candidate.Text("content_version"));
                         }).ToArray();
                         try {await service.SubmitAsync(Guid.NewGuid().ToString("N"),images,cancellationToken);}
                         catch(BackupSubmissionException failure) when(!failure.HasSharedFailure)

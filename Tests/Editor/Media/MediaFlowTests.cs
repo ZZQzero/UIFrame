@@ -70,6 +70,24 @@ namespace UIFrame.Regression
             public bool Pending(string id)=>pending.ContainsKey(id);
             public void Dispose(){NativeMedia.Transport=previous;Assert.IsEmpty(pending,"Native resources are still owned.");}
         }
+        [UnityTest] public IEnumerator UnknownVersionCannotEnterBaselineOrIncrementalDiscoveries()=>UniTask.ToCoroutine(async()=>
+        {
+            var image=new MediaItem {id="photo",source="library",name="photo.jpg",mime="image/jpeg",size=4};
+            using var native=new Transport {Images=new[]{image}};
+            var library=await ImageLibraryIndex.OpenAsync(Path.Combine(root,"index.sqlite"));
+            var service=await ImageBackupService.CreateAsync(Config());
+            try {
+                var automatic=await AutomaticImageBackup.CreateAsync(service,library);
+                await automatic.ConfigureAsync(new AutomaticBackupPolicy {enabled=true,sourceKind=BackupSourceKind.PhotoLibrary,wifiOnly=false,includeExisting=false});
+                var first=await Observe(automatic.ScanOnceAsync());
+                Assert.IsInstanceOf<GalleryException>(first);Assert.AreEqual("ContentVersionUnavailable",((GalleryException)first).Code);
+                image.version="v1";await automatic.ScanOnceAsync();
+                image.version=null;
+                var changed=await Observe(automatic.ScanOnceAsync());
+                Assert.IsInstanceOf<GalleryException>(changed);Assert.AreEqual("ContentVersionUnavailable",((GalleryException)changed).Code);
+                Assert.IsEmpty((await service.QueryTasksAsync()).Items);
+            } finally {await service.ShutdownAsync();await library.ShutdownAsync();}
+        });
         [UnityTest] public IEnumerator WatchThenRefreshWaitsForRegistration()=>UniTask.ToCoroutine(async()=>
         {
             using var native=new Transport {HeldOperation="observe"};

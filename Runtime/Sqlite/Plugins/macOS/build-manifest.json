@@ -3,17 +3,17 @@
   "sqlite": "3.53.4",
   "source_id": "2026-07-24 19:02:57 bf7c7f30031888f4e796e429ab3978879485813aaca6f641c7b33e4e09459bcc",
   "abi": 3,
-  "build_id": "cc2af4a34676c4a76a07358b30d6c4351d4b22a8bdba0f2c9c2e0954fdbbc305",
+  "build_id": "d485f695fda5529bd7ae610ff823fc211c45cdd4aa28fa94b9456b82bccf10fd",
   "sanitized": false,
   "native_tests": "passed",
   "sources": {
-    "src/core.cpp": "8f6ca5afe72060605d3f7f8fada4b5ef717a857f28bb4fc8fc50d66ab3507e8f",
+    "src/core.cpp": "10034d3fc3aa168e32bc3263d92b1439912de4956eee59308a6edcadd7fede93",
     "include/ufsqlite.h": "49b6cc0a230f5a9ba120a7e0cb70dfd0dd434e564eeea7bc6a9ac9b37fc000f4",
     "CMakeLists.txt": "fc9dae35ef47419f79f04883949776a94ea13ccdb4424ecae704f014e9d6c607",
     "build/build.py": "33ed85d3f45663b5f302037091a2d55c30166c633fe38698ec1f119ddcec8ed4"
   },
   "artifacts": {
-    "libuiframe_sqlite.dylib": "aea78b6ece382668a08278233140cb8a5cf5d83cf3a05e7181a1eac767f39c45"
+    "libuiframe_sqlite.dylib": "6ba5737c304d95a95bfe83ba9202850b87be2b34f8b4beac96c837a4c57bb0a1"
   },
   "flags": [
     "-DCMAKE_BUILD_TYPE=RelWithDebInfo",

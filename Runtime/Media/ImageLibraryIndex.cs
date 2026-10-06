@@ -39,6 +39,7 @@ namespace Game.Media
         public string Version { get; internal set; }
         public ImageLibraryChangeKind Kind { get; internal set; }
         internal string Name,Mime;
+        internal long? ByteCount;
     }
     public sealed class ImageLibraryPosition
     {
@@ -323,7 +324,7 @@ namespace Game.Media
                 else foreach(string path in paths)
                 {
                     token.ThrowIfCancellationRequested();examined++;
-                    if(File.Exists(path)) await repository.Upsert(state,null,await ResolveFiles(new[]{ImageReference.FromFile(path)},true,paths,token),token);
+                    if(GameImageDirectory.ContainsImage(scope.Source,scope.Recursive,path)) await repository.Upsert(state,null,await ResolveFiles(new[]{ImageReference.FromFile(path)},true,paths,token),token);
                     else await repository.Remove(state,"file:"+path,3,token);
                 }
                 updating=false;

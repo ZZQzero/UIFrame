@@ -5,7 +5,7 @@ namespace Game.Media.Storage
     {
         internal static readonly string[] Commands = {
             @"PRAGMA application_id=1430667852;",
-            @"PRAGMA user_version=1;",
+            @"PRAGMA user_version=2;",
             @"CREATE TABLE library_settings (
     singleton INTEGER PRIMARY KEY CHECK(singleton=1),
     library_id TEXT NOT NULL UNIQUE,
@@ -31,6 +31,7 @@ namespace Game.Media.Storage
     mime TEXT NOT NULL,
     width INTEGER NOT NULL CHECK(width>=0),
     height INTEGER NOT NULL CHECK(height>=0),
+    byte_count INTEGER CHECK(byte_count IS NULL OR byte_count>=0),
     asset_revision INTEGER NOT NULL DEFAULT 1 CHECK(asset_revision>0)
 ) STRICT;",
             @"CREATE TABLE scope_assets (

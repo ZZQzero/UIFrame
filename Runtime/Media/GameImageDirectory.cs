@@ -57,8 +57,30 @@ namespace Game.Media
                 {
                     if (recursive) foreach (var image in Enumerate(path, true, token)) yield return image;
                 }
-                else if (ImagePaths.Mime(Path.GetExtension(path)).StartsWith("image/", StringComparison.Ordinal)) yield return ImageReference.FromFile(path);
+                else if (IsImageFile(path,attributes)) yield return ImageReference.FromFile(path);
             }
+        }
+        static bool IsImageFile(string path,FileAttributes attributes)
+            => (attributes&(FileAttributes.ReparsePoint|FileAttributes.Directory))==0 &&
+               ImagePaths.Mime(Path.GetExtension(path)).StartsWith("image/",StringComparison.Ordinal);
+        // Match full enumeration, including links in an ancestor below the selected root.
+        internal static bool ContainsImage(string root, bool recursive, string path)
+        {
+            string prefix=Path.GetFullPath(root).TrimEnd(Path.DirectorySeparatorChar,Path.AltDirectorySeparatorChar)+Path.DirectorySeparatorChar;
+            path=Path.GetFullPath(path);
+            var comparison=Path.DirectorySeparatorChar=='\\'?StringComparison.OrdinalIgnoreCase:StringComparison.Ordinal;
+            if(!path.StartsWith(prefix,comparison))return false;
+            string relative=path.Substring(prefix.Length);
+            if(!recursive && relative.IndexOf(Path.DirectorySeparatorChar)>=0)return false;
+            try
+            {
+                if(!IsImageFile(path,File.GetAttributes(path)))return false;
+                for(string parent=Path.GetDirectoryName(path);parent.Length>=prefix.Length;parent=Path.GetDirectoryName(parent))
+                    if((File.GetAttributes(parent)&FileAttributes.ReparsePoint)!=0)return false;
+                return true;
+            }
+            catch(FileNotFoundException){return false;}
+            catch(DirectoryNotFoundException){return false;}
         }
     }
 

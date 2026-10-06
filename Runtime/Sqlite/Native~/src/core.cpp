@@ -143,11 +143,53 @@ namespace
             close();
         }
     };
+    // Path ownership exists before the main database does. Keep the lock inode
+    // permanently so concurrent openers cannot lock different generations of it.
+    struct PathOwner
+    {
+#ifdef _WIN32
+        HANDLE handle = INVALID_HANDLE_VALUE;
+#else
+        int handle = -1;
+#endif
+        ~PathOwner() { close(); }
+        void close()
+        {
+#ifdef _WIN32
+            if (handle != INVALID_HANDLE_VALUE) { CloseHandle(handle); handle = INVALID_HANDLE_VALUE; }
+#else
+            if (handle >= 0) { ::close(handle); handle = -1; }
+#endif
+        }
+        void acquire(const std::string &path)
+        {
+            auto lock_path = path + ".ufsqlite-owner";
+#ifdef _WIN32
+            handle = CreateFileW(std::filesystem::u8path(lock_path).c_str(), GENERIC_READ | GENERIC_WRITE,
+                                 FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+            require(handle != INVALID_HANDLE_VALUE, UF_IO, "Cannot open ownership lock");
+            OVERLAPPED lock{};
+            require(LockFileEx(handle, LOCKFILE_EXCLUSIVE_LOCK | LOCKFILE_FAIL_IMMEDIATELY, 0, 1, 0, &lock),
+                    UF_STATE, "Database path already owned");
+#else
+            handle = ::open(lock_path.c_str(), O_RDWR | O_CREAT | O_CLOEXEC | O_NOFOLLOW, 0600);
+            require(handle >= 0, UF_IO, "Cannot open ownership lock");
+            require(flock(handle, LOCK_EX | LOCK_NB) == 0, UF_STATE, "Database path already owned");
+#endif
+        }
+    };
+    void require_new_target(const std::string &path)
+    {
+        for (const auto &entry : {path, path + "-wal", path + "-shm", path + "-journal"})
+            require(std::filesystem::symlink_status(std::filesystem::u8path(entry)).type() == std::filesystem::file_type::not_found,
+                    UF_STATE, "New database target has an existing file or sidecar");
+    }
     struct Database
     {
         uint64_t id, client;
         std::string path, identity;
         Connection write, read;
+        PathOwner path_owner;
         std::atomic<bool> ready{false}, fault{false};
         bool closing = false, write_busy = false, read_busy = false, snapshot_busy = false, readonly = false;
         bool close_reserved = false;
@@ -156,13 +198,18 @@ namespace
 #ifdef _WIN32
         HANDLE owner = INVALID_HANDLE_VALUE;
 #else
-        int owner = -1, lock_fd = -1;
+        int owner = -1;
 #endif
         ~Database()
         {
             unlock();
         }
         void unlock()
+        {
+            close_file();
+            path_owner.close();
+        }
+        void close_file()
         {
 #ifdef _WIN32
             if (owner != INVALID_HANDLE_VALUE)
@@ -176,17 +223,13 @@ namespace
                 ::close(owner);
                 owner = -1;
             }
-            if (lock_fd >= 0)
-            {
-                ::close(lock_fd);
-                lock_fd = -1;
-            }
 #endif
         }
     };
     struct Snapshot
     {
         Connection source, target;
+        PathOwner destination_owner;
         sqlite3_backup *backup = nullptr;
         std::string temporary, destination;
         uint64_t max_bytes = 0, max_wal = 0;
@@ -291,8 +334,9 @@ namespace
         if (action == SQLITE_TRANSACTION || action == SQLITE_SAVEPOINT || action == SQLITE_ATTACH ||
             action == SQLITE_DETACH)
             return SQLITE_DENY;
+        // quick_check is read-only; SQLite also invokes it to validate ALTER TABLE.
         if (action == SQLITE_PRAGMA &&
-            (!a || (std::strcmp(a, "application_id") && std::strcmp(a, "user_version"))))
+            (!a || (std::strcmp(a, "application_id") && std::strcmp(a, "user_version") && std::strcmp(a, "quick_check"))))
             return SQLITE_DENY;
         if (action == SQLITE_FUNCTION && b &&
             (!std::strcmp(b, "load_extension") || !std::strcmp(b, "readfile") ||
@@ -362,13 +406,15 @@ namespace
         d->min_free = min_free;
         d->max_wal = max_wal;
         bool created = false;
-        if (mode == 0)
-            require(!std::filesystem::exists(std::filesystem::u8path(path)) && !std::filesystem::exists(std::filesystem::u8path(path + "-wal")) &&
-                        !std::filesystem::exists(std::filesystem::u8path(path + "-shm")) &&
-                        !std::filesystem::exists(std::filesystem::u8path(path + "-journal")),
-                    UF_STATE, "CreateNew found an existing database or sidecars");
         try
         {
+            auto absolute = std::filesystem::u8path(path);
+            path = (mode == 0 ? std::filesystem::canonical(absolute.parent_path()) / absolute.filename()
+                              : std::filesystem::canonical(absolute)).u8string();
+            if (!d->readonly)
+                d->path_owner.acquire(path);
+            if (mode == 0)
+                require_new_target(path);
 #ifdef _WIN32
             d->owner = CreateFileW(std::filesystem::u8path(path).c_str(),
                                    d->readonly ? GENERIC_READ : GENERIC_READ | GENERIC_WRITE,
@@ -417,15 +463,6 @@ namespace
                 require(!e.owners.count(d->identity), UF_STATE, "Database already owned");
                 e.owners.emplace(d->identity, d->id);
             }
-#ifndef _WIN32
-            if (!d->readonly)
-            {
-                auto lock_path = d->path + ".ufsqlite-owner";
-                d->lock_fd = ::open(lock_path.c_str(), O_RDWR | O_CREAT | O_CLOEXEC | O_NOFOLLOW, 0600);
-                require(d->lock_fd >= 0, UF_IO, "Cannot open ownership lock");
-                require(flock(d->lock_fd, LOCK_EX | LOCK_NB) == 0, UF_STATE, "Database already owned");
-            }
-#endif
             if (!d->readonly)
                 configure(d->write, d->path, false, j);
             configure(d->read, d->path, true, j);
@@ -443,7 +480,7 @@ namespace
         {
             int write_error = d->write.close(), read_error = d->read.close();
             j.completion.reserved = write_error != SQLITE_OK ? write_error : read_error;
-            d->unlock();
+            d->close_file();
             auto &e = engine();
             {
                 std::lock_guard<std::mutex> l(e.mutex);
@@ -461,6 +498,7 @@ namespace
                         j.completion.reserved = SQLITE_IOERR_DELETE;
                 }
             }
+            d->path_owner.close();
             throw;
         }
     }
@@ -841,10 +879,13 @@ namespace
                         destination.find('\0') == std::string::npos &&
                         std::filesystem::u8path(destination).is_absolute(),
                     UF_ARGUMENT, "Invalid snapshot options");
-            require(!std::filesystem::exists(std::filesystem::u8path(destination)), UF_STATE, "Snapshot destination exists");
             j.snapshot = std::make_unique<Snapshot>();
             auto &s = *j.snapshot;
+            auto absolute = std::filesystem::u8path(destination);
+            destination = (std::filesystem::canonical(absolute.parent_path()) / absolute.filename()).u8string();
             s.destination = destination;
+            s.destination_owner.acquire(destination);
+            require_new_target(destination);
             s.max_bytes = max_bytes;
             s.max_wal = max_wal;
             configure(s.source, j.database->path, true, j);
@@ -857,6 +898,7 @@ namespace
                         page_count * page_size,
                     UF_CAPACITY, "Insufficient snapshot space");
             auto temporary = destination + ".ufsqlite-" + std::to_string(j.id) + ".partial";
+            require_new_target(temporary);
 #ifdef _WIN32
             auto file = CreateFileW(std::filesystem::u8path(temporary).c_str(), GENERIC_READ | GENERIC_WRITE, 0,
                                     nullptr, CREATE_NEW, FILE_ATTRIBUTE_NORMAL, nullptr);
@@ -905,6 +947,7 @@ namespace
         check_cancel(j);
         sql_check(s.target.close(), nullptr);
         sql_check(s.source.close(), nullptr);
+        require_new_target(s.destination);
 #ifdef _WIN32
         require(MoveFileExW(std::filesystem::u8path(s.temporary).c_str(),
                             std::filesystem::u8path(s.destination).c_str(), MOVEFILE_WRITE_THROUGH) != 0,

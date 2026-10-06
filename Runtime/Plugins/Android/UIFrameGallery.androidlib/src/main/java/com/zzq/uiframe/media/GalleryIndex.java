@@ -120,10 +120,15 @@ final class GalleryIndex {
             String[] fields={DocumentsContract.Document.COLUMN_LAST_MODIFIED,DocumentsContract.Document.COLUMN_SIZE};
             try(Cursor cursor=resolver().query(Uri.parse(path),fields,null,null,null,job.signal)) {
                 if(cursor==null || !cursor.moveToFirst())throw new GalleryBridge.MediaFailure("SourceUnavailable","Document no longer accessible");
-                if(cursor.isNull(0) || cursor.isNull(1))throw new GalleryBridge.MediaFailure("ContentVersionUnavailable","Document provider has no content version");
-                return new JSONObject().put("id",path).put("version",cursor.getString(0)+":"+cursor.getString(1));
+                String version=documentVersion(cursor,0,1);
+                if(version==null)throw new GalleryBridge.MediaFailure("ContentVersionUnavailable","Document provider has no content version");
+                return new JSONObject().put("id",path).put("version",version);
             }
         }
         throw new IllegalArgumentException("Unsupported version source");
+    }
+    static String documentVersion(Cursor cursor,int modified,int size) {
+        if(cursor.isNull(modified) || cursor.isNull(size) || cursor.getLong(modified)<=0 || cursor.getLong(size)<0)return null;
+        return cursor.getLong(modified)+":"+cursor.getLong(size);
     }
 }

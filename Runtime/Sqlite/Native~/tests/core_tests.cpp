@@ -193,6 +193,9 @@ int main()
         number(small, 32 * 1024 * 1024, 8);
         c.done(submit(c.c, d, UF_SNAPSHOT, small, 0, 0), UF_CAPACITY);
         expect(!std::filesystem::exists(root / "too-small.sqlite"), "failed snapshot published");
+        c.done(submit(c.c, d, UF_BATCH, command("ALTER TABLE saves ADD COLUMN extra INTEGER CHECK(extra>=0)")));
+        c.done(submit(c.c, d, UF_EXECUTE, command("UPDATE saves SET extra=-1")), UF_SQL);
+        c.done(submit(c.c, d, UF_QUERY, command("PRAGMA quick_check")));
         auto first = submit(c.c, d, UF_QUERY, command("SELECT 1"));
         auto closing = submit(c.c, d, UF_CLOSE, {}, 0, 0);
         c.done(first);

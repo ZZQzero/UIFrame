@@ -14,6 +14,30 @@ from protocol import (CHECK_INTERVAL_MS, LIMITS, MAX_DESCRIPTOR_BYTES, MAX_FILE_
 import json
 
 
+class DirectoryOwner:
+    """A persistent lock inode; never unlink it while another opener may exist."""
+    def __init__(self, root):
+        self.file = (root / '.backup-owner').open('a+b')
+        try:
+            if os.name == 'nt':
+                import msvcrt
+                self.file.seek(0, os.SEEK_END)
+                if self.file.tell() == 0:
+                    self.file.write(b'\0')
+                    self.file.flush()
+                self.file.seek(0)
+                msvcrt.locking(self.file.fileno(), msvcrt.LK_NBLCK, 1)
+            else:
+                import fcntl
+                fcntl.flock(self.file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BaseException:
+            self.file.close()
+            raise
+
+    def close(self):
+        self.file.close()
+
+
 def now_ms():
     return time.time_ns() // 1_000_000
 
@@ -46,9 +70,11 @@ class Store:
         self.stop = threading.Event()
         self.worker = None
         self.worker_error = None
-        self.db = sqlite3.connect(self.root / 'backup.sqlite3', check_same_thread=False)
-        self.db.row_factory = sqlite3.Row
+        self.owner = DirectoryOwner(self.root)
+        self.db = None
         try:
+            self.db = sqlite3.connect(self.root / 'backup.sqlite3', check_same_thread=False)
+            self.db.row_factory = sqlite3.Row
             version = self.db.execute('PRAGMA user_version').fetchone()[0]
             tables = self.db.execute("SELECT count(*) FROM sqlite_master WHERE type='table'").fetchone()[0]
             if version != 2 and (version != 0 or tables != 0):
@@ -65,7 +91,15 @@ class Store:
             self.signing_key = bytes(self.db.execute("SELECT value FROM settings WHERE key='signing_key'").fetchone()[0])
             os.chmod(self.root / 'backup.sqlite3', 0o600)
         except BaseException:
-            self.db.close()
+            try:
+                if self.db is not None:
+                    self.db.close()
+            except Exception as secondary:
+                print('Closing failed catalog initialization: ' + repr(secondary), file=sys.stderr)
+            try:
+                self.owner.close()
+            except Exception as secondary:
+                print('Releasing failed catalog ownership: ' + repr(secondary), file=sys.stderr)
             raise
 
     def close(self):
@@ -74,6 +108,7 @@ class Store:
         if self.worker:
             self.worker.join()
         self.db.close()
+        self.owner.close()
 
     def authenticate(self, authorization):
         if not authorization.startswith('Bearer '):
@@ -413,8 +448,9 @@ class Store:
                     # potentially slow network transfer never holds that gate.
                     if self.db.execute("SELECT 1 FROM incoming WHERE upload_id=? AND state='writing' LIMIT 1", (attempt['upload_id'],)).fetchone():
                         continue
-                    self.db.execute("UPDATE attempts SET state='rejected',error_code='AttemptExpired',error_message='Upload attempt exceeded its retention window' WHERE upload_id=? AND state IN ('upload','verifying') AND expires_at<?", (attempt['upload_id'], at - ttl))
-                    self.db.execute("UPDATE incoming SET state='cleanup' WHERE upload_id=? AND state IN ('writing','ready')", (attempt['upload_id'],))
+                    closed = self.db.execute("UPDATE attempts SET state='rejected',error_code='AttemptExpired',error_message='Upload attempt exceeded its retention window' WHERE upload_id=? AND state IN ('upload','verifying') AND expires_at<?", (attempt['upload_id'], at - ttl)).rowcount
+                    if closed:
+                        self.db.execute("UPDATE incoming SET state='cleanup' WHERE upload_id=? AND state='ready'", (attempt['upload_id'],))
             finally:
                 gate.release()
         with self.lock, self.db:

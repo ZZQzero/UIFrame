@@ -15,6 +15,12 @@ from protocol import MAX_REQUEST_BYTES, MAX_RESPONSE_BYTES, ProtocolError, decod
 from store import Store
 
 
+class BackupHTTPServer(ThreadingHTTPServer):
+    # server_close must drain every handler before Store releases directory ownership.
+    daemon_threads = False
+    block_on_close = True
+
+
 def handler_for(store, storage=False):
     class Handler(BaseHTTPRequestHandler):
         protocol_version = 'HTTP/1.1'
@@ -120,8 +126,8 @@ def serve(root, credentials, host='127.0.0.1', port=8787, storage_port=8788,
     business = private = None
     storage_thread = None
     try:
-        private = ThreadingHTTPServer((host, storage_port), handler_for(store, storage=True))
-        business = ThreadingHTTPServer((host, port), handler_for(store))
+        private = BackupHTTPServer((host, storage_port), handler_for(store, storage=True))
+        business = BackupHTTPServer((host, port), handler_for(store))
         store.storage_origin = storage_origin or f'http://{host}:{private.server_port}'
         if retry_failed_cleanup:
             for failure in store.cleanup(retry_failed=True)['failures'] + store.maintenance(retry_failed=True)['failures']:
