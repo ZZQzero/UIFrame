@@ -321,6 +321,54 @@ namespace UIFrame.Regression
                 Assert.AreEqual(1,(await service.QueryBackupsAsync()).Items.Count);
             } finally {await service.ShutdownAsync();}
         });
+        [UnityTest] public IEnumerator MaintenanceMakesProgressWhenSelectionExceedsSoftTimeSlice()=>UniTask.ToCoroutine(async()=>{
+            var service=await ImageBackupService.CreateAsync(Config(),NativeBackup.Call,false,new BackupProtocolFixture {ConfirmOnPlan=true});
+            try {
+                await service.SubmitAndWaitAsync(Guid.NewGuid().ToString("N"),new[]{Photo("one")});
+                await service.WaitForIdleAsync();
+                var result=await new BackupMaintenance(service).RunAsync(new BackupRetentionPolicy {
+                    HistoryAge=TimeSpan.Zero,KeepHistoryCount=0,MaximumItems=1,TimeSlice=TimeSpan.FromTicks(1)});
+                Assert.AreEqual(1,result.HistoryRemoved);
+                Assert.IsTrue(result.TimeSliceEnded);
+                Assert.IsEmpty((await service.QueryTasksAsync()).Items);
+                Assert.AreEqual(1,(await service.QueryBackupsAsync()).Items.Count);
+            } finally {await service.ShutdownAsync();}
+        });
+        [UnityTest] public IEnumerator MaintenanceTinySliceIsolatesOneFailedFileAndNextRunProgresses()=>UniTask.ToCoroutine(async()=>{
+            var service=await ImageBackupService.CreateAsync(Config(),NativeBackup.Call,false,new BackupProtocolFixture());
+            try {
+                await service.WaitForIdleAsync();
+                const System.Reflection.BindingFlags flags=System.Reflection.BindingFlags.Instance|System.Reflection.BindingFlags.NonPublic;
+                string owner=(string)typeof(ImageBackupService).GetField("owner",flags).GetValue(service);
+                long now=DateTime.UtcNow.Ticks;
+                await service.Db(BackupRepository.Command.Prepare,default,"cc",owner,now,2,
+                    "aa","file:first","v1","first.jpg","image/jpeg","bb","file:second","v1","second.jpg","image/jpeg","",0L);
+                string payloads=Path.Combine(service.RepositoryRoot,service.StoreId,"payloads");
+                foreach(string id in new[]{"aa","bb"}) {
+                    await service.Db(BackupRepository.Command.TryPrepare,default,id,owner,4L,4L,1024L,now);
+                    File.WriteAllBytes(Path.Combine(payloads,id+".payload"),new byte[]{1,2,3,4});
+                    await service.Db(BackupRepository.Command.FailItem,default,id,owner,"fixture preparation failure",now);
+                }
+                string broken=Path.Combine(payloads,"aa.payload"),ready=Path.Combine(payloads,"bb.payload");
+                File.Delete(broken);Directory.CreateDirectory(broken);File.WriteAllText(Path.Combine(broken,"blocker"),"x");
+                var maintenance=new BackupMaintenance(service);
+                var policy=new BackupRetentionPolicy {MaximumItems=1,TimeSlice=TimeSpan.FromTicks(1)};
+                var error=await Observe(maintenance.RunAsync(policy));
+                Assert.IsInstanceOf<BackupCleanupException>(error);
+                var result=((BackupCleanupException)error).Result;
+                Assert.AreEqual(1,result.Failures.Count);Assert.AreEqual("aa",result.Failures[0].FileId);
+                Assert.IsTrue(result.Failures[0].Error.IsIsolatedCleanupFailure);
+                Assert.AreSame(result.Failures[0].Error,error.InnerException);
+                Assert.IsTrue(result.TimeSliceEnded);Assert.AreEqual(0,result.FilesDeleted);Assert.IsTrue(File.Exists(ready));
+                using(var canceled=new CancellationTokenSource()) {
+                    canceled.Cancel();Assert.IsInstanceOf<OperationCanceledException>(await Observe(maintenance.RunAsync(policy,canceled.Token)));
+                }
+                result=await maintenance.RunAsync(policy);
+                Assert.AreEqual(1,result.FilesDeleted);Assert.AreEqual(4,result.FileBytesFreed);Assert.IsTrue(result.TimeSliceEnded);
+                Assert.IsFalse(File.Exists(ready));Assert.IsTrue(Directory.Exists(broken));
+                Assert.AreEqual("aa",(await service.QueryCleanupFailuresAsync()).Items.Single().FileId);
+            } finally {await service.ShutdownAsync();}
+        });
         [UnityTest] public IEnumerator DurableOperationIdentityAndGlobalPauseStayIndependent()=>UniTask.ToCoroutine(async()=>{
             var service=await ImageBackupService.CreateAsync(Config(),NativeBackup.Call,false,new BackupProtocolFixture());
             try {

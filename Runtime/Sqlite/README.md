@@ -28,7 +28,7 @@ finally { await db.CloseAsync(); }
 
 应用最终退出前释放所有批次结果并调用 `await SqliteRuntime.ShutdownAsync()`。该调用结束当前进程中的托管模块寿命，不是用于每次切换界面的重置接口。关闭与查询映射都不访问 Unity；调用方在使用 Unity 对象之前切回主线程。Editor 自动在域重载、退出播放模式和退出时清理，重新进入编辑模式开启新的编辑器寿命。
 
-业务自己定义 application_id、schema、账号归属、参数校验、索引和操作回执。参考 [游戏存档与背包示例](Samples~/GameRepositories.cs)：示例包含原子变更、余额约束及独立操作回执，重复 OperationId 会导致整个事务失败；调用方可查询此前回执核对丢失的提交结果，不会自动重放。
+业务自己定义 application_id、schema、账号归属、参数校验、索引和操作回执。参考 [游戏存档与背包示例说明](Samples~/README.md) 和 [代码](Samples~/GameRepositories.cs)：存档拒绝旧版或同版覆盖；购买、合成、奖励将完整资源增减与操作回执放在同一事务中，提交后才更新内存背包。UI 可直接读取内存数量。重复 OperationId 会使整个事务失败，调用方显式查询原回执核对，不会自动重放。示例 schema 为 2，旧示例库须由业务显式迁移；照片库结构和通用 SQLite API 不变。
 
 ## 接口与所有权
 

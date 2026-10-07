@@ -399,7 +399,25 @@ struct Repository {
         case UFB_OPERATION_ITEMS: a.count(3); read=true; commands.emplace_back("SELECT task_id,outcome,error FROM operation_items WHERE operation_id=? AND task_id>? ORDER BY task_id LIMIT ?",std::vector<Value>{a.id(0),a.text(1,64),a.number(2,1,200)}); break;
         case UFB_HISTORY_PAGE: {
             a.count(4); auto after=a.number(0),before=a.number(1),keep=a.number(2,0,1000000),limit=a.number(3,1,200); read=true;
-            commands.emplace_back("SELECT sequence,id,updated_utc FROM tasks WHERE sequence>? AND state IN(3,8) AND (updated_utc<? OR sequence<=coalesce((SELECT sequence FROM tasks WHERE state IN(3,8) ORDER BY sequence DESC LIMIT 1 OFFSET ?),0)) AND NOT "+Unreleased+" AND NOT "+HistoryControlHeld+" AND EXISTS(SELECT 1 FROM file_records f WHERE f.id=file_id AND f.state=3) ORDER BY sequence LIMIT ?",std::vector<Value>{after,before,keep,limit}); break;
+            // Merge the two ordered state indexes instead of sorting all terminal
+            // history. Counts avoid walking a retained-only catalog for the cutoff.
+            // Age and count candidates are disjoint; each selects at most one page.
+            const auto eligible=" AND NOT "+Unreleased+" AND NOT "+HistoryControlHeld+
+                " AND EXISTS(SELECT 1 FROM file_records f WHERE f.id=tasks.file_id AND f.state=3)";
+            const auto excess=[&](int state) {return "SELECT sequence FROM tasks WHERE state="+std::to_string(state)+
+                " AND sequence>? AND sequence<=(SELECT boundary FROM cutoff)"+eligible;};
+            const auto aged=[&](int state) {return
+                "SELECT sequence FROM tasks INDEXED BY tasks_state_page WHERE state="+std::to_string(state)+
+                " AND updated_utc<? AND sequence>max(?,(SELECT boundary FROM cutoff))"+eligible;};
+            commands.emplace_back(
+                "WITH cutoff AS MATERIALIZED (SELECT CASE WHEN (SELECT sum(count) FROM task_counts WHERE state IN(3,8))>? THEN "
+                "coalesce((SELECT sequence FROM (SELECT sequence FROM tasks WHERE state=3 UNION ALL SELECT sequence FROM tasks WHERE state=8 ORDER BY sequence DESC) LIMIT 1 OFFSET ?),0) ELSE 0 END AS boundary), "
+                "excess AS MATERIALIZED ("+excess(3)+" UNION ALL "+excess(8)+" ORDER BY sequence LIMIT ?), "
+                "aged AS MATERIALIZED ("+aged(3)+" UNION ALL "+aged(8)+" ORDER BY sequence LIMIT CASE "
+                "WHEN EXISTS(SELECT 1 FROM tasks INDEXED BY tasks_history WHERE state IN(3,8) AND updated_utc<?) "
+                "THEN max(0,?-(SELECT count(*) FROM excess)) ELSE 0 END) "
+                "SELECT sequence,id,updated_utc FROM tasks WHERE sequence IN(SELECT sequence FROM excess UNION ALL SELECT sequence FROM aged) ORDER BY sequence LIMIT ?",
+                std::vector<Value>{keep,keep,after,after,limit,before,after,before,after,before,limit,limit}); break;
         }
         case UFB_PRUNE_TASK: {
             a.count(2); auto id=a.id(0); auto version=a.number(1);

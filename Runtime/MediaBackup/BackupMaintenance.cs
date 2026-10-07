@@ -133,6 +133,9 @@ namespace Game.Media.Backup
             MediaThread.Check();var p=(policy??new BackupRetentionPolicy()).Snapshot();if(running)throw new InvalidOperationException("This maintenance runner is already active.");running=true;
             var result=new BackupCleanupResult();var elapsed=Stopwatch.StartNew();long before=ImageBackupService.Now-p.HistoryAge.Ticks;int remaining=p.MaximumItems;
             var failures=new List<BackupFileCleanupFailure>();
+            // Selection and filesystem calls cannot be preempted. A selected first
+            // item gets one attempt even if selection used the entire soft slice.
+            bool SliceEnded()=>remaining<p.MaximumItems && elapsed.Elapsed>=p.TimeSlice;
             BackupCleanupResult Complete()
             {
                 if(failures.Count==0)return result;
@@ -143,7 +146,7 @@ namespace Game.Media.Backup
                 var files=(await service.Db(Command.CleanupPage,token,"",remaining)).Rows;
                 foreach(var row in files)
                 {
-                    if(elapsed.Elapsed>=p.TimeSlice){result.TimeSliceEnded=true;return Complete();}
+                    if(SliceEnded()){result.TimeSliceEnded=true;return Complete();}
                     try {
                         var deleted=(await service.Db(Command.CleanupRun,token,row.Text("id"),row.Number("updated_utc"),ImageBackupService.Now)).Single;
                         result.FilesDeleted+=(int)deleted.Number("deleted");result.FileBytesFreed+=deleted.Number("freed_bytes");if(deleted.Number("deleted")==0)result.Skipped++;
@@ -153,27 +156,29 @@ namespace Game.Media.Backup
                 }
                 if(remaining>0)
                 {
+                    if(SliceEnded()){result.TimeSliceEnded=true;return Complete();}
                     var history=(await service.Db(Command.HistoryPage,token,0,before,p.KeepHistoryCount,remaining)).Rows;
                     foreach(var row in history)
                     {
-                        if(elapsed.Elapsed>=p.TimeSlice){result.TimeSliceEnded=true;return Complete();}
+                        if(SliceEnded()){result.TimeSliceEnded=true;return Complete();}
                         var deletion=await service.Db(Command.PruneTask,token,row.Text("id"),row.Number("updated_utc"));
                         if(deletion.Tables[2].Count!=0)result.HistoryRemoved++;else result.Skipped++;remaining--;
                     }
                 }
-                if(remaining>0 && elapsed.Elapsed<p.TimeSlice)
+                if(remaining>0 && !SliceEnded())
                 {
                     var operations=(await service.Db(Command.OperationCleanupPage,token,before,Math.Min(32,remaining))).Rows;
                     foreach(var row in operations)
                     {
-                        if(elapsed.Elapsed>=p.TimeSlice){result.TimeSliceEnded=true;return Complete();}
+                        if(SliceEnded()){result.TimeSliceEnded=true;return Complete();}
                         var pruned=await service.Db(Command.PruneOperation,token,row.Text("id"),before,remaining);
                         int removed=checked((int)pruned.Tables[1][0].Number("removed"));result.OperationItemsRemoved+=removed;
                         remaining-=Math.Max(1,removed);if(remaining==0)break;
                     }
-                    if(remaining>0 && elapsed.Elapsed<p.TimeSlice)result.MetadataRowsRemoved=(int)(await service.Db(Command.PruneScans,token,remaining)).Single.Number("removed");
+                    if(remaining>0 && !SliceEnded())result.MetadataRowsRemoved=(int)(await service.Db(Command.PruneScans,token,remaining)).Single.Number("removed");
                 }
                 if(p.Checkpoint && elapsed.Elapsed<p.TimeSlice)await service.Db(Command.Checkpoint,token);
+                result.TimeSliceEnded=elapsed.Elapsed>=p.TimeSlice;
                 return Complete();
             }
             finally {running=false;}
